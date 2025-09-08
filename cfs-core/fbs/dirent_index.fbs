@@ -1,0 +1,11 @@
+table Entry {
+  ino: ulong;
+  pageno: ushort;
+  page_size: ulong;
+}
+
+table Index {
+  entries: [Entry];
+}
+
+root_type Index;

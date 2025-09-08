@@ -1,0 +1,23 @@
+[workspace]
+
+resolver = "2"
+
+members = [
+    "cfs-core",
+    "cfs-md",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/junctionlabs/coolfs"
+homepage = "https://junctionlabs.io"
+
+[workspace.dependencies]
+axum = "0.8"
+flatbuffers = "25.2"
+# TODO: disable tokio/full
+tokio = { version = "1.47", features = ["full"]}
+tracing = "1.41"
+tracing-subscriber = "0.3"

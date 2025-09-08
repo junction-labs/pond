@@ -1,0 +1,76 @@
+enum FileType : byte {
+  Regular,
+  Directory,
+  Symlink,
+  BlockDevice,
+  CharDevice,
+  Fifo,
+  Socket,
+}
+
+table Timespec {
+  sec: long;   // seconds since epoch
+  nsec: int;   // nanoseconds
+}
+
+table DirEntry {
+  // inode number, must be unique
+  ino: ulong;
+
+  // inode number of the parent
+  parent_ino: ulong;
+
+  // file size in bytes
+  size: ulong;
+
+  // number of 512B blocks
+  blocks: ulong;
+
+  // last time this DirEntry was read
+  atime: Timespec;
+
+  // last time the contents of this DirEntry was modified
+  mtime: Timespec;
+
+  // last time metadata of this DirEntry was changed
+  ctime: Timespec;
+
+  // creation time (0 if unused)
+  crtime: Timespec;
+
+  // type of file, e.g. Regular file, Directory, Symlink, ...
+  kind: FileType;
+
+  // u16 permission bits
+  perm: ushort;
+
+  // number of hard links
+  nlink: uint;
+
+  // user id
+  uid: uint;
+
+  // group id
+  gid: uint;
+
+  // device id
+  rdev: uint;
+
+  // file flags
+  flags: uint;
+
+  // file/directory name
+  name: string;
+
+  // offset in S3 object where file data begins
+  s3_offset: ulong;
+
+  // size of file data (in bytes) in S3 object
+  s3_size: ulong;
+}
+
+table DirEntryPage {
+  dirents: [DirEntry];
+}
+
+root_type DirEntryPage;
