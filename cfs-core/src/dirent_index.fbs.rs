@@ -9,137 +9,314 @@ use core::cmp::Ordering;
 extern crate flatbuffers;
 use self::flatbuffers::{EndianScalar, Follow};
 
-pub enum EntryOffset {}
-#[derive(Copy, Clone, PartialEq)]
-
-pub struct Entry<'a> {
-  pub _tab: flatbuffers::Table<'a>,
+// struct Entry, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Entry(pub [u8; 16]);
+impl Default for Entry { 
+  fn default() -> Self { 
+    Self([0; 16])
+  }
+}
+impl core::fmt::Debug for Entry {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    f.debug_struct("Entry")
+      .field("ino", &self.ino())
+      .field("pageno", &self.pageno())
+      .finish()
+  }
 }
 
-impl<'a> flatbuffers::Follow<'a> for Entry<'a> {
-  type Inner = Entry<'a>;
+impl flatbuffers::SimpleToVerifyInSlice for Entry {}
+impl<'a> flatbuffers::Follow<'a> for Entry {
+  type Inner = &'a Entry;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    unsafe { <&'a Entry>::follow(buf, loc) }
   }
 }
-
-impl<'a> Entry<'a> {
-  pub const VT_INO: flatbuffers::VOffsetT = 4;
-  pub const VT_PAGENO: flatbuffers::VOffsetT = 6;
-  pub const VT_PAGE_SIZE: flatbuffers::VOffsetT = 8;
-
+impl<'a> flatbuffers::Follow<'a> for &'a Entry {
+  type Inner = &'a Entry;
   #[inline]
-  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    Entry { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args EntryArgs
-  ) -> flatbuffers::WIPOffset<Entry<'bldr>> {
-    let mut builder = EntryBuilder::new(_fbb);
-    builder.add_page_size(args.page_size);
-    builder.add_ino(args.ino);
-    builder.add_pageno(args.pageno);
-    builder.finish()
-  }
-
-
-  #[inline]
-  pub fn ino(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Entry::VT_INO, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn pageno(&self) -> u16 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u16>(Entry::VT_PAGENO, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn page_size(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Entry::VT_PAGE_SIZE, Some(0)).unwrap()}
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { flatbuffers::follow_cast_ref::<Entry>(buf, loc) }
   }
 }
+impl<'b> flatbuffers::Push for Entry {
+    type Output = Entry;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Entry as *const u8, <Self as flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> flatbuffers::PushAlignment {
+        flatbuffers::PushAlignment::new(8)
+    }
+}
 
-impl flatbuffers::Verifiable for Entry<'_> {
+impl<'a> flatbuffers::Verifiable for Entry {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
-    v.visit_table(pos)?
-     .visit_field::<u64>("ino", Self::VT_INO, false)?
-     .visit_field::<u16>("pageno", Self::VT_PAGENO, false)?
-     .visit_field::<u64>("page_size", Self::VT_PAGE_SIZE, false)?
-     .finish();
-    Ok(())
-  }
-}
-pub struct EntryArgs {
-    pub ino: u64,
-    pub pageno: u16,
-    pub page_size: u64,
-}
-impl<'a> Default for EntryArgs {
-  #[inline]
-  fn default() -> Self {
-    EntryArgs {
-      ino: 0,
-      pageno: 0,
-      page_size: 0,
-    }
+    v.in_buffer::<Self>(pos)
   }
 }
 
-pub struct EntryBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
-}
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> EntryBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_ino(&mut self, ino: u64) {
-    self.fbb_.push_slot::<u64>(Entry::VT_INO, ino, 0);
+impl<'a> Entry {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    ino: u64,
+    pageno: u16,
+  ) -> Self {
+    let mut s = Self([0; 16]);
+    s.set_ino(ino);
+    s.set_pageno(pageno);
+    s
   }
-  #[inline]
-  pub fn add_pageno(&mut self, pageno: u16) {
-    self.fbb_.push_slot::<u16>(Entry::VT_PAGENO, pageno, 0);
+
+  pub fn ino(&self) -> u64 {
+    let mut mem = core::mem::MaybeUninit::<<u64 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
   }
-  #[inline]
-  pub fn add_page_size(&mut self, page_size: u64) {
-    self.fbb_.push_slot::<u64>(Entry::VT_PAGE_SIZE, page_size, 0);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> EntryBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    EntryBuilder {
-      fbb_: _fbb,
-      start_: start,
+
+  pub fn set_ino(&mut self, x: u64) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
     }
   }
+
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<Entry<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    flatbuffers::WIPOffset::new(o.value())
+  pub fn key_compare_less_than(&self, o: &Entry) -> bool {
+    self.ino() < o.ino()
+  }
+
+  #[inline]
+  pub fn key_compare_with_value(&self, val: u64) -> ::core::cmp::Ordering {
+    let key = self.ino();
+    key.cmp(&val)
+  }
+  pub fn pageno(&self) -> u16 {
+    let mut mem = core::mem::MaybeUninit::<<u16 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u16 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_pageno(&mut self, x: u16) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        core::mem::size_of::<<u16 as EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
+// struct Page, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Page(pub [u8; 24]);
+impl Default for Page { 
+  fn default() -> Self { 
+    Self([0; 24])
+  }
+}
+impl core::fmt::Debug for Page {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    f.debug_struct("Page")
+      .field("pageno", &self.pageno())
+      .field("page_offset", &self.page_offset())
+      .field("page_size", &self.page_size())
+      .finish()
   }
 }
 
-impl core::fmt::Debug for Entry<'_> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("Entry");
-      ds.field("ino", &self.ino());
-      ds.field("pageno", &self.pageno());
-      ds.field("page_size", &self.page_size());
-      ds.finish()
+impl flatbuffers::SimpleToVerifyInSlice for Page {}
+impl<'a> flatbuffers::Follow<'a> for Page {
+  type Inner = &'a Page;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a Page>::follow(buf, loc) }
   }
 }
+impl<'a> flatbuffers::Follow<'a> for &'a Page {
+  type Inner = &'a Page;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { flatbuffers::follow_cast_ref::<Page>(buf, loc) }
+  }
+}
+impl<'b> flatbuffers::Push for Page {
+    type Output = Page;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Page as *const u8, <Self as flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> flatbuffers::PushAlignment {
+        flatbuffers::PushAlignment::new(8)
+    }
+}
+
+impl<'a> flatbuffers::Verifiable for Page {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> Page {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    pageno: u16,
+    page_offset: u64,
+    page_size: u64,
+  ) -> Self {
+    let mut s = Self([0; 24]);
+    s.set_pageno(pageno);
+    s.set_page_offset(page_offset);
+    s.set_page_size(page_size);
+    s
+  }
+
+  pub fn pageno(&self) -> u16 {
+    let mut mem = core::mem::MaybeUninit::<<u16 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u16 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_pageno(&mut self, x: u16) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        core::mem::size_of::<<u16 as EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  #[inline]
+  pub fn key_compare_less_than(&self, o: &Page) -> bool {
+    self.pageno() < o.pageno()
+  }
+
+  #[inline]
+  pub fn key_compare_with_value(&self, val: u16) -> ::core::cmp::Ordering {
+    let key = self.pageno();
+    key.cmp(&val)
+  }
+  pub fn page_offset(&self) -> u64 {
+    let mut mem = core::mem::MaybeUninit::<<u64 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_page_offset(&mut self, x: u64) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn page_size(&self) -> u64 {
+    let mut mem = core::mem::MaybeUninit::<<u64 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[16..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_page_size(&mut self, x: u64) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[16..].as_mut_ptr(),
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
 pub enum IndexOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -151,12 +328,13 @@ impl<'a> flatbuffers::Follow<'a> for Index<'a> {
   type Inner = Index<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
 impl<'a> Index<'a> {
   pub const VT_ENTRIES: flatbuffers::VOffsetT = 4;
+  pub const VT_PAGES: flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -168,17 +346,25 @@ impl<'a> Index<'a> {
     args: &'args IndexArgs<'args>
   ) -> flatbuffers::WIPOffset<Index<'bldr>> {
     let mut builder = IndexBuilder::new(_fbb);
+    if let Some(x) = args.pages { builder.add_pages(x); }
     if let Some(x) = args.entries { builder.add_entries(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn entries(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry<'a>>>> {
+  pub fn entries(&self) -> flatbuffers::Vector<'a, Entry> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry>>>>(Index::VT_ENTRIES, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, Entry>>>(Index::VT_ENTRIES, None).unwrap()}
+  }
+  #[inline]
+  pub fn pages(&self) -> flatbuffers::Vector<'a, Page> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, Page>>>(Index::VT_PAGES, None).unwrap()}
   }
 }
 
@@ -189,19 +375,22 @@ impl flatbuffers::Verifiable for Index<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Entry>>>>("entries", Self::VT_ENTRIES, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, Entry>>>("entries", Self::VT_ENTRIES, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, Page>>>("pages", Self::VT_PAGES, true)?
      .finish();
     Ok(())
   }
 }
 pub struct IndexArgs<'a> {
-    pub entries: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry<'a>>>>>,
+    pub entries: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, Entry>>>,
+    pub pages: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, Page>>>,
 }
 impl<'a> Default for IndexArgs<'a> {
   #[inline]
   fn default() -> Self {
     IndexArgs {
-      entries: None,
+      entries: None, // required field
+      pages: None, // required field
     }
   }
 }
@@ -212,8 +401,12 @@ pub struct IndexBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> IndexBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_entries(&mut self, entries: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Entry<'b >>>>) {
+  pub fn add_entries(&mut self, entries: flatbuffers::WIPOffset<flatbuffers::Vector<'b , Entry>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Index::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn add_pages(&mut self, pages: flatbuffers::WIPOffset<flatbuffers::Vector<'b , Page>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Index::VT_PAGES, pages);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> IndexBuilder<'a, 'b, A> {
@@ -226,6 +419,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> IndexBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<Index<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Index::VT_ENTRIES,"entries");
+    self.fbb_.required(o, Index::VT_PAGES,"pages");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -234,6 +429,7 @@ impl core::fmt::Debug for Index<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("Index");
       ds.field("entries", &self.entries());
+      ds.field("pages", &self.pages());
       ds.finish()
   }
 }
@@ -288,14 +484,14 @@ pub fn size_prefixed_root_as_index_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `Index`.
 pub unsafe fn root_as_index_unchecked(buf: &[u8]) -> Index {
-  flatbuffers::root_unchecked::<Index>(buf)
+  unsafe { flatbuffers::root_unchecked::<Index>(buf) }
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed Index and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `Index`.
 pub unsafe fn size_prefixed_root_as_index_unchecked(buf: &[u8]) -> Index {
-  flatbuffers::size_prefixed_root_unchecked::<Index>(buf)
+  unsafe { flatbuffers::size_prefixed_root_unchecked::<Index>(buf) }
 }
 #[inline]
 pub fn finish_index_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(
