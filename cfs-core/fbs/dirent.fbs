@@ -2,20 +2,21 @@ enum FileType : byte {
   Regular,
   Directory,
   Symlink,
-  BlockDevice,
-  CharDevice,
-  Fifo,
-  Socket,
+  // no support for block device, char device, fifo, socket
 }
 
 table Timespec {
-  sec: long;   // seconds since epoch
-  nsec: int;   // nanoseconds
+  // seconds since epoch
+  sec: long;
+  // nanoseconds
+  nsec: int;
 }
 
+// A DirEntry contains all applicable fields from fuser::FileAttr.
+// https://docs.rs/fuser/latest/fuser/struct.FileAttr.html
 table DirEntry {
   // inode number, must be unique
-  ino: ulong;
+  ino: ulong (key);
 
   // inode number of the parent
   parent_ino: ulong;
@@ -27,18 +28,15 @@ table DirEntry {
   blocks: ulong;
 
   // last time this DirEntry was read
-  atime: Timespec;
+  atime: Timespec (required);
 
   // last time the contents of this DirEntry was modified
-  mtime: Timespec;
+  mtime: Timespec (required);
 
   // last time metadata of this DirEntry was changed
-  ctime: Timespec;
+  ctime: Timespec (required);
 
-  // creation time (0 if unused)
-  crtime: Timespec;
-
-  // type of file, e.g. Regular file, Directory, Symlink, ...
+  // type of file, e.g. Regular file, Directory, Symlink
   kind: FileType;
 
   // u16 permission bits
@@ -56,11 +54,8 @@ table DirEntry {
   // device id
   rdev: uint;
 
-  // file flags
-  flags: uint;
-
   // file/directory name
-  name: string;
+  name: string (required);
 
   // offset in S3 object where file data begins
   s3_offset: ulong;
@@ -70,7 +65,7 @@ table DirEntry {
 }
 
 table DirEntryPage {
-  dirents: [DirEntry];
+  dirents: [DirEntry] (required);
 }
 
 root_type DirEntryPage;

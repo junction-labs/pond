@@ -1,11 +1,22 @@
-table Entry {
-  ino: ulong;
+struct Entry {
+  // inode
+  ino: ulong (key);
+  // page that holds the DirEntry for the node
   pageno: ushort;
+}
+
+struct Page {
+  // page number
+  pageno: ushort (key);
+  // offset in S3 object where the FlatBuffer-encoded DirEntryPage begins
+  page_offset: ulong;
+  // size of the DirEntryPage in bytes
   page_size: ulong;
 }
 
 table Index {
-  entries: [Entry];
+  entries: [Entry] (required);
+  pages: [Page] (required);
 }
 
 root_type Index;

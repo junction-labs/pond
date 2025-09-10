@@ -1,0 +1,21 @@
+table Header {
+  // Version of the volume
+  version: [ubyte] (required);
+
+  // Pointer to the start of the DirEntry Index
+  dirent_index_offset: ulong;
+
+  // Size of the DirEntry Index in bytes
+  dirent_index_size: ulong;
+
+  // Pointer to the start of the first DirEntry page
+  dirent_pages_offset: ulong;
+
+  // Size of all DirEntry pages in bytes
+  dirent_pages_size: ulong;
+
+  // TODO: checksum? generic flags entry? other volume metadata, e.g. total size, file count
+}
+
+root_type Header;
+
