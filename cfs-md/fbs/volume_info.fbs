@@ -1,0 +1,6 @@
+table VolumeInfo {
+    names: [string];
+    versions: [string];
+}
+
+root_type VolumeInfo;

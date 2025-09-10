@@ -22,7 +22,10 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.cmd {
-        Cmd::Generate => generate_srcs(&sh)?,
+        Cmd::Generate => {
+            generate_srcs(&sh, "cfs-core")?;
+            generate_srcs(&sh, "cfs-md")?;
+        }
     }
 
     Ok(())
@@ -36,15 +39,14 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn generate_srcs(sh: &Shell) -> anyhow::Result<()> {
-    let fbs: Result<Vec<_>, _> = glob::glob("cfs-core/fbs/*.fbs")
+fn generate_srcs(sh: &Shell, crate_name: &str) -> anyhow::Result<()> {
+    let fbs = glob::glob(&format!("{crate_name}/fbs/*.fbs"))
         .expect("invalid glob pattern")
-        .collect();
-    let fbs = fbs?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     cmd!(
         sh,
-        "flatc -o cfs-core/src/ --rust --gen-all --filename-suffix '.fbs' {fbs...}"
+        "flatc -o {crate_name}/src/ --rust --gen-all --filename-suffix '.fbs' {fbs...}"
     )
     .run()
     .map_err(|e| e.into())
