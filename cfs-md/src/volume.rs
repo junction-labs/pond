@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use bytes::Bytes;
+use flatbuffers::VerifierOptions;
 
 use crate::volume::generated::VolumeRootArgs;
 
@@ -42,6 +43,18 @@ impl Volume {
 
     pub fn as_bytes(&self) -> Bytes {
         self.buf.clone()
+    }
+
+    pub fn from_bytes(buf: &Bytes) -> Result<Self, flatbuffers::InvalidFlatbuffer> {
+        static VERIFY: VerifierOptions = flatbuffers::VerifierOptions {
+            max_depth: 1,
+            max_tables: 1,
+            max_apparent_size: 4 * 1024 * 1024, /* arbitrary! think about this */
+            ignore_missing_null_terminator: true,
+        };
+
+        generated::root_as_volume_root_with_opts(&VERIFY, buf)?;
+        Ok(Self { buf: buf.clone() })
     }
 
     pub fn name(&self) -> Option<&str> {

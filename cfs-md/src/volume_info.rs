@@ -69,6 +69,18 @@ impl VolumeInfo {
         self.buf.clone()
     }
 
+    pub fn from_bytes(buf: &Bytes) -> Result<Self, flatbuffers::InvalidFlatbuffer> {
+        static VERIFY: flatbuffers::VerifierOptions = flatbuffers::VerifierOptions {
+            max_depth: 1,
+            max_tables: 1,
+            max_apparent_size: 4 * 1024 * 1024, /* arbitrary! think about this */
+            ignore_missing_null_terminator: true,
+        };
+
+        generated::root_as_volume_info_with_opts(&VERIFY, buf)?;
+        Ok(Self { buf: buf.clone() })
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.as_root().names().unwrap_or_default().into_iter()
     }

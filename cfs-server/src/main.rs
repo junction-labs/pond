@@ -1,6 +1,3 @@
-mod volume;
-mod volume_info;
-
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -12,9 +9,9 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use bytes::Bytes;
 
-use crate::{volume::Volume, volume_info::VolumeInfo};
+use bytes::Bytes;
+use cfs_md::{Volume, VolumeInfo};
 
 #[tokio::main]
 async fn main() {

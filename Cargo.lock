@@ -192,8 +192,17 @@ version = "0.1.0"
 name = "cfs-md"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "flatbuffers",
+]
+
+[[package]]
+name = "cfs-server"
+version = "0.0.1"
+dependencies = [
  "axum",
  "bytes",
+ "cfs-md",
  "flatbuffers",
  "tokio",
  "tracing",
