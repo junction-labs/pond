@@ -1,0 +1,13 @@
+[package]
+name = "cfs-cli"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+cfs-md.workspace = true
+clap = { workspace = true, features = ["derive"] }
+http.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["full"]}
