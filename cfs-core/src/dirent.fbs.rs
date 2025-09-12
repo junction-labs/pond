@@ -60,7 +60,7 @@ impl<'a> flatbuffers::Follow<'a> for FileType {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -69,7 +69,7 @@ impl flatbuffers::Push for FileType {
     type Output = FileType;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -121,21 +121,21 @@ impl<'a> flatbuffers::Follow<'a> for Timespec {
   type Inner = &'a Timespec;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { <&'a Timespec>::follow(buf, loc) }
+    <&'a Timespec>::follow(buf, loc)
   }
 }
 impl<'a> flatbuffers::Follow<'a> for &'a Timespec {
   type Inner = &'a Timespec;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { flatbuffers::follow_cast_ref::<Timespec>(buf, loc) }
+    flatbuffers::follow_cast_ref::<Timespec>(buf, loc)
   }
 }
 impl<'b> flatbuffers::Push for Timespec {
     type Output = Timespec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        let src = unsafe { ::core::slice::from_raw_parts(self as *const Timespec as *const u8, <Self as flatbuffers::Push>::size()) };
+        let src = ::core::slice::from_raw_parts(self as *const Timespec as *const u8, <Self as flatbuffers::Push>::size());
         dst.copy_from_slice(src);
     }
     #[inline]
@@ -237,7 +237,7 @@ impl<'a> flatbuffers::Follow<'a> for DirEntry<'a> {
   type Inner = DirEntry<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -245,19 +245,15 @@ impl<'a> DirEntry<'a> {
   pub const VT_INO: flatbuffers::VOffsetT = 4;
   pub const VT_PARENT_INO: flatbuffers::VOffsetT = 6;
   pub const VT_SIZE: flatbuffers::VOffsetT = 8;
-  pub const VT_BLOCKS: flatbuffers::VOffsetT = 10;
-  pub const VT_ATIME: flatbuffers::VOffsetT = 12;
-  pub const VT_MTIME: flatbuffers::VOffsetT = 14;
-  pub const VT_CTIME: flatbuffers::VOffsetT = 16;
-  pub const VT_KIND: flatbuffers::VOffsetT = 18;
-  pub const VT_PERM: flatbuffers::VOffsetT = 20;
-  pub const VT_NLINK: flatbuffers::VOffsetT = 22;
-  pub const VT_UID: flatbuffers::VOffsetT = 24;
-  pub const VT_GID: flatbuffers::VOffsetT = 26;
-  pub const VT_RDEV: flatbuffers::VOffsetT = 28;
-  pub const VT_NAME: flatbuffers::VOffsetT = 30;
-  pub const VT_S3_OFFSET: flatbuffers::VOffsetT = 32;
-  pub const VT_S3_SIZE: flatbuffers::VOffsetT = 34;
+  pub const VT_MTIME: flatbuffers::VOffsetT = 10;
+  pub const VT_CTIME: flatbuffers::VOffsetT = 12;
+  pub const VT_KIND: flatbuffers::VOffsetT = 14;
+  pub const VT_PERM: flatbuffers::VOffsetT = 16;
+  pub const VT_UID: flatbuffers::VOffsetT = 18;
+  pub const VT_GID: flatbuffers::VOffsetT = 20;
+  pub const VT_NAME: flatbuffers::VOffsetT = 22;
+  pub const VT_S3_OFFSET: flatbuffers::VOffsetT = 24;
+  pub const VT_S3_SIZE: flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -271,18 +267,14 @@ impl<'a> DirEntry<'a> {
     let mut builder = DirEntryBuilder::new(_fbb);
     builder.add_s3_size(args.s3_size);
     builder.add_s3_offset(args.s3_offset);
-    builder.add_blocks(args.blocks);
     builder.add_size(args.size);
     builder.add_parent_ino(args.parent_ino);
     builder.add_ino(args.ino);
     if let Some(x) = args.name { builder.add_name(x); }
-    builder.add_rdev(args.rdev);
     builder.add_gid(args.gid);
     builder.add_uid(args.uid);
-    builder.add_nlink(args.nlink);
     if let Some(x) = args.ctime { builder.add_ctime(x); }
     if let Some(x) = args.mtime { builder.add_mtime(x); }
-    if let Some(x) = args.atime { builder.add_atime(x); }
     builder.add_perm(args.perm);
     builder.add_kind(args.kind);
     builder.finish()
@@ -321,20 +313,6 @@ impl<'a> DirEntry<'a> {
     unsafe { self._tab.get::<u64>(DirEntry::VT_SIZE, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn blocks(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(DirEntry::VT_BLOCKS, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn atime(&self) -> &'a Timespec {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<Timespec>(DirEntry::VT_ATIME, None).unwrap()}
-  }
-  #[inline]
   pub fn mtime(&self) -> &'a Timespec {
     // Safety:
     // Created from valid Table for this object
@@ -363,13 +341,6 @@ impl<'a> DirEntry<'a> {
     unsafe { self._tab.get::<u16>(DirEntry::VT_PERM, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn nlink(&self) -> u32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(DirEntry::VT_NLINK, Some(0)).unwrap()}
-  }
-  #[inline]
   pub fn uid(&self) -> u32 {
     // Safety:
     // Created from valid Table for this object
@@ -382,13 +353,6 @@ impl<'a> DirEntry<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(DirEntry::VT_GID, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn rdev(&self) -> u32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(DirEntry::VT_RDEV, Some(0)).unwrap()}
   }
   #[inline]
   pub fn name(&self) -> &'a str {
@@ -423,16 +387,12 @@ impl flatbuffers::Verifiable for DirEntry<'_> {
      .visit_field::<u64>("ino", Self::VT_INO, false)?
      .visit_field::<u64>("parent_ino", Self::VT_PARENT_INO, false)?
      .visit_field::<u64>("size", Self::VT_SIZE, false)?
-     .visit_field::<u64>("blocks", Self::VT_BLOCKS, false)?
-     .visit_field::<Timespec>("atime", Self::VT_ATIME, true)?
      .visit_field::<Timespec>("mtime", Self::VT_MTIME, true)?
      .visit_field::<Timespec>("ctime", Self::VT_CTIME, true)?
      .visit_field::<FileType>("kind", Self::VT_KIND, false)?
      .visit_field::<u16>("perm", Self::VT_PERM, false)?
-     .visit_field::<u32>("nlink", Self::VT_NLINK, false)?
      .visit_field::<u32>("uid", Self::VT_UID, false)?
      .visit_field::<u32>("gid", Self::VT_GID, false)?
-     .visit_field::<u32>("rdev", Self::VT_RDEV, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, true)?
      .visit_field::<u64>("s3_offset", Self::VT_S3_OFFSET, false)?
      .visit_field::<u64>("s3_size", Self::VT_S3_SIZE, false)?
@@ -444,16 +404,12 @@ pub struct DirEntryArgs<'a> {
     pub ino: u64,
     pub parent_ino: u64,
     pub size: u64,
-    pub blocks: u64,
-    pub atime: Option<&'a Timespec>,
     pub mtime: Option<&'a Timespec>,
     pub ctime: Option<&'a Timespec>,
     pub kind: FileType,
     pub perm: u16,
-    pub nlink: u32,
     pub uid: u32,
     pub gid: u32,
-    pub rdev: u32,
     pub name: Option<flatbuffers::WIPOffset<&'a str>>,
     pub s3_offset: u64,
     pub s3_size: u64,
@@ -465,16 +421,12 @@ impl<'a> Default for DirEntryArgs<'a> {
       ino: 0,
       parent_ino: 0,
       size: 0,
-      blocks: 0,
-      atime: None, // required field
       mtime: None, // required field
       ctime: None, // required field
       kind: FileType::Regular,
       perm: 0,
-      nlink: 0,
       uid: 0,
       gid: 0,
-      rdev: 0,
       name: None, // required field
       s3_offset: 0,
       s3_size: 0,
@@ -500,14 +452,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DirEntryBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(DirEntry::VT_SIZE, size, 0);
   }
   #[inline]
-  pub fn add_blocks(&mut self, blocks: u64) {
-    self.fbb_.push_slot::<u64>(DirEntry::VT_BLOCKS, blocks, 0);
-  }
-  #[inline]
-  pub fn add_atime(&mut self, atime: &Timespec) {
-    self.fbb_.push_slot_always::<&Timespec>(DirEntry::VT_ATIME, atime);
-  }
-  #[inline]
   pub fn add_mtime(&mut self, mtime: &Timespec) {
     self.fbb_.push_slot_always::<&Timespec>(DirEntry::VT_MTIME, mtime);
   }
@@ -524,20 +468,12 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DirEntryBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u16>(DirEntry::VT_PERM, perm, 0);
   }
   #[inline]
-  pub fn add_nlink(&mut self, nlink: u32) {
-    self.fbb_.push_slot::<u32>(DirEntry::VT_NLINK, nlink, 0);
-  }
-  #[inline]
   pub fn add_uid(&mut self, uid: u32) {
     self.fbb_.push_slot::<u32>(DirEntry::VT_UID, uid, 0);
   }
   #[inline]
   pub fn add_gid(&mut self, gid: u32) {
     self.fbb_.push_slot::<u32>(DirEntry::VT_GID, gid, 0);
-  }
-  #[inline]
-  pub fn add_rdev(&mut self, rdev: u32) {
-    self.fbb_.push_slot::<u32>(DirEntry::VT_RDEV, rdev, 0);
   }
   #[inline]
   pub fn add_name(&mut self, name: flatbuffers::WIPOffset<&'b  str>) {
@@ -562,7 +498,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DirEntryBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<DirEntry<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, DirEntry::VT_ATIME,"atime");
     self.fbb_.required(o, DirEntry::VT_MTIME,"mtime");
     self.fbb_.required(o, DirEntry::VT_CTIME,"ctime");
     self.fbb_.required(o, DirEntry::VT_NAME,"name");
@@ -576,16 +511,12 @@ impl core::fmt::Debug for DirEntry<'_> {
       ds.field("ino", &self.ino());
       ds.field("parent_ino", &self.parent_ino());
       ds.field("size", &self.size());
-      ds.field("blocks", &self.blocks());
-      ds.field("atime", &self.atime());
       ds.field("mtime", &self.mtime());
       ds.field("ctime", &self.ctime());
       ds.field("kind", &self.kind());
       ds.field("perm", &self.perm());
-      ds.field("nlink", &self.nlink());
       ds.field("uid", &self.uid());
       ds.field("gid", &self.gid());
-      ds.field("rdev", &self.rdev());
       ds.field("name", &self.name());
       ds.field("s3_offset", &self.s3_offset());
       ds.field("s3_size", &self.s3_size());
@@ -603,7 +534,7 @@ impl<'a> flatbuffers::Follow<'a> for DirEntryPage<'a> {
   type Inner = DirEntryPage<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -741,14 +672,14 @@ pub fn size_prefixed_root_as_dir_entry_page_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `DirEntryPage`.
 pub unsafe fn root_as_dir_entry_page_unchecked(buf: &[u8]) -> DirEntryPage {
-  unsafe { flatbuffers::root_unchecked::<DirEntryPage>(buf) }
+  flatbuffers::root_unchecked::<DirEntryPage>(buf)
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed DirEntryPage and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `DirEntryPage`.
 pub unsafe fn size_prefixed_root_as_dir_entry_page_unchecked(buf: &[u8]) -> DirEntryPage {
-  unsafe { flatbuffers::size_prefixed_root_unchecked::<DirEntryPage>(buf) }
+  flatbuffers::size_prefixed_root_unchecked::<DirEntryPage>(buf)
 }
 #[inline]
 pub fn finish_dir_entry_page_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(

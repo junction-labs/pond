@@ -17,6 +17,7 @@ repository = "https://github.com/junctionlabs/coolfs"
 homepage = "https://junctionlabs.io"
 
 [workspace.dependencies]
+anyhow = "1.0"
 axum = {version = "0.8", features = ["macros"]}
 bytes = "1.10"
 clap = { version = "4.5.47", features = ["derive"] }
@@ -27,6 +28,7 @@ reqwest = "0.12"
 tokio = { version = "1.47", features = ["full"]}
 tracing = "0.1.41"
 tracing-subscriber = "0.3"
+uuid = "1.18"
 
 cfs-core = { version = "0.1.0", path = "./cfs-core", default-features = false }
 cfs-client = { version = "0.1.0", path = "./cfs-client", default-features = false }

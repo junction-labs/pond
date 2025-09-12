@@ -20,7 +20,7 @@ impl<'a> flatbuffers::Follow<'a> for Header<'a> {
   type Inner = Header<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -226,14 +226,14 @@ pub fn size_prefixed_root_as_header_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `Header`.
 pub unsafe fn root_as_header_unchecked(buf: &[u8]) -> Header {
-  unsafe { flatbuffers::root_unchecked::<Header>(buf) }
+  flatbuffers::root_unchecked::<Header>(buf)
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed Header and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `Header`.
 pub unsafe fn size_prefixed_root_as_header_unchecked(buf: &[u8]) -> Header {
-  unsafe { flatbuffers::size_prefixed_root_unchecked::<Header>(buf) }
+  flatbuffers::size_prefixed_root_unchecked::<Header>(buf)
 }
 #[inline]
 pub fn finish_header_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(

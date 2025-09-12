@@ -32,21 +32,21 @@ impl<'a> flatbuffers::Follow<'a> for Entry {
   type Inner = &'a Entry;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { <&'a Entry>::follow(buf, loc) }
+    <&'a Entry>::follow(buf, loc)
   }
 }
 impl<'a> flatbuffers::Follow<'a> for &'a Entry {
   type Inner = &'a Entry;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { flatbuffers::follow_cast_ref::<Entry>(buf, loc) }
+    flatbuffers::follow_cast_ref::<Entry>(buf, loc)
   }
 }
 impl<'b> flatbuffers::Push for Entry {
     type Output = Entry;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        let src = unsafe { ::core::slice::from_raw_parts(self as *const Entry as *const u8, <Self as flatbuffers::Push>::size()) };
+        let src = ::core::slice::from_raw_parts(self as *const Entry as *const u8, <Self as flatbuffers::Push>::size());
         dst.copy_from_slice(src);
     }
     #[inline]
@@ -171,21 +171,21 @@ impl<'a> flatbuffers::Follow<'a> for Page {
   type Inner = &'a Page;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { <&'a Page>::follow(buf, loc) }
+    <&'a Page>::follow(buf, loc)
   }
 }
 impl<'a> flatbuffers::Follow<'a> for &'a Page {
   type Inner = &'a Page;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    unsafe { flatbuffers::follow_cast_ref::<Page>(buf, loc) }
+    flatbuffers::follow_cast_ref::<Page>(buf, loc)
   }
 }
 impl<'b> flatbuffers::Push for Page {
     type Output = Page;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        let src = unsafe { ::core::slice::from_raw_parts(self as *const Page as *const u8, <Self as flatbuffers::Push>::size()) };
+        let src = ::core::slice::from_raw_parts(self as *const Page as *const u8, <Self as flatbuffers::Push>::size());
         dst.copy_from_slice(src);
     }
     #[inline]
@@ -328,7 +328,7 @@ impl<'a> flatbuffers::Follow<'a> for Index<'a> {
   type Inner = Index<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -484,14 +484,14 @@ pub fn size_prefixed_root_as_index_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `Index`.
 pub unsafe fn root_as_index_unchecked(buf: &[u8]) -> Index {
-  unsafe { flatbuffers::root_unchecked::<Index>(buf) }
+  flatbuffers::root_unchecked::<Index>(buf)
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed Index and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `Index`.
 pub unsafe fn size_prefixed_root_as_index_unchecked(buf: &[u8]) -> Index {
-  unsafe { flatbuffers::size_prefixed_root_unchecked::<Index>(buf) }
+  flatbuffers::size_prefixed_root_unchecked::<Index>(buf)
 }
 #[inline]
 pub fn finish_index_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(

@@ -9,6 +9,7 @@ use std::{
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use crate::{
+    FileAttr,
     flatbuffer::IntoFlatBuffer,
     volume::{
         Header, HeaderArgs, HeaderOwned,
@@ -38,7 +39,7 @@ pub(crate) enum FileLocation {
 pub(crate) struct FileMetadata {
     pub(crate) parent_ino: u64,
     pub(crate) name: String,
-    pub(crate) attr: fuser::FileAttr,
+    pub(crate) attr: FileAttr,
 }
 
 #[allow(dead_code)]
@@ -69,16 +70,12 @@ impl StagedFile {
             ino: metadata.attr.ino,
             parent_ino: metadata.parent_ino,
             size: metadata.attr.size,
-            blocks: metadata.attr.blocks,
-            atime: Some(&metadata.attr.atime.into()),
             mtime: Some(&metadata.attr.mtime.into()),
             ctime: Some(&metadata.attr.ctime.into()),
             kind: metadata.attr.kind.into(),
             perm: metadata.attr.perm,
-            nlink: metadata.attr.nlink,
             uid: metadata.attr.uid,
             gid: metadata.attr.gid,
-            rdev: metadata.attr.rdev,
             name: Some(fbb.create_string(&metadata.name)),
             s3_offset,
             s3_size,
@@ -88,13 +85,12 @@ impl StagedFile {
     }
 }
 
-impl From<fuser::FileType> for FileType {
-    fn from(filetype: fuser::FileType) -> Self {
+impl From<crate::FileType> for FileType {
+    fn from(filetype: crate::FileType) -> Self {
         match filetype {
-            fuser::FileType::RegularFile => FileType::Regular,
-            fuser::FileType::Directory => FileType::Directory,
-            fuser::FileType::Symlink => FileType::Symlink,
-            _ => panic!(),
+            crate::FileType::Regular => FileType::Regular,
+            crate::FileType::Directory => FileType::Directory,
+            crate::FileType::Symlink => FileType::Symlink,
         }
     }
 }
@@ -120,22 +116,15 @@ impl Staging {
     pub(crate) fn mkdir(&mut self, parent_ino: u64, dirname: String) {
         let ino = ino(parent_ino, &dirname);
         let now = SystemTime::now();
-        let attr = fuser::FileAttr {
+        let attr = FileAttr {
             ino,
             size: 0,
-            blocks: 0,
-            atime: now,
             mtime: now,
             ctime: now,
-            crtime: UNIX_EPOCH, // macOS only
-            kind: fuser::FileType::Directory,
+            kind: crate::FileType::Directory,
             perm: 0o777, // ¯\_(ツ)_/¯
-            nlink: 1,
             uid: 0,
             gid: 0,
-            rdev: 0,
-            blksize: 0, // not applicable?
-            flags: 0,   // macOS only
         };
         self.dirents.insert(
             ino,
@@ -163,22 +152,15 @@ impl Staging {
 
         let ino = ino(parent_ino, &filename);
         let now = SystemTime::now();
-        let attr = fuser::FileAttr {
+        let attr = FileAttr {
             ino,
             size: metadata.size(),
-            blocks: metadata.blocks(),
-            atime: now,
             mtime: now,
             ctime: now,
-            crtime: UNIX_EPOCH, // macOS only
-            kind: fuser::FileType::RegularFile,
+            kind: crate::FileType::Regular,
             perm: 0o777, // ¯\_(ツ)_/¯
-            nlink: 1,
             uid: 0,
             gid: 0,
-            rdev: 0,
-            blksize: 0, // not applicable?
-            flags: 0,   // macOS only
         };
         self.dirents.insert(
             ino,

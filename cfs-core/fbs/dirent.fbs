@@ -7,28 +7,20 @@ enum FileType : byte {
 
 struct Timespec {
   // seconds since epoch
-  sec: ulong;
+  sec: uint64;
   // nanoseconds
-  nsec: uint;
+  nsec: uint32;
 }
 
-// A DirEntry contains all applicable fields from fuser::FileAttr.
-// https://docs.rs/fuser/latest/fuser/struct.FileAttr.html
 table DirEntry {
   // inode number, must be unique
-  ino: ulong (key);
+  ino: uint64 (key);
 
   // inode number of the parent
-  parent_ino: ulong;
+  parent_ino: uint64;
 
   // file size in bytes
-  size: ulong;
-
-  // number of 512B blocks
-  blocks: ulong;
-
-  // last time this DirEntry was read
-  atime: Timespec (required);
+  size: uint64;
 
   // last time the contents of this DirEntry was modified
   mtime: Timespec (required);
@@ -40,29 +32,23 @@ table DirEntry {
   kind: FileType;
 
   // u16 permission bits
-  perm: ushort;
-
-  // number of hard links
-  nlink: uint;
+  perm: uint16;
 
   // user id
-  uid: uint;
+  uid: uint32;
 
   // group id
-  gid: uint;
-
-  // device id
-  rdev: uint;
+  gid: uint32;
 
   // file/directory name
   name: string (required);
 
   // byte offset into the file section of the volume that tells us where this
   // dirent starts
-  s3_offset: ulong;
+  s3_offset: uint64;
 
   // size of file data (in bytes) in S3 object
-  s3_size: ulong;
+  s3_size: uint64;
 }
 
 table DirEntryPage {
