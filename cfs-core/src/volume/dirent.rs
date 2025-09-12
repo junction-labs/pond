@@ -4,7 +4,10 @@ use flatbuffers::InvalidFlatbuffer;
 #[allow(warnings)]
 #[rustfmt::skip]
 mod dirent_fbs;
-pub use dirent_fbs::{DirEntry, DirEntryPage, root_as_dir_entry_page};
+pub use dirent_fbs::{
+    DirEntry, DirEntryArgs, DirEntryPage, DirEntryPageArgs, FileType, Timespec,
+    root_as_dir_entry_page,
+};
 
 /// Wrapper around the buffer containing the FlatBuffer-encoded `DirEntryPage`. Provides zero-copy
 /// access to the individual `DirEntry`s within the Page.
@@ -15,6 +18,9 @@ pub(crate) struct DirEntryPageOwned {
 
 #[allow(dead_code)]
 impl DirEntryPageOwned {
+    // ~4MiB maximum. 8192 dirents per page, with each dirent being ~500 bytes (assuming a 255char filename).
+    pub const DIRENTS_PER_PAGE: usize = 1 << 14;
+
     pub(crate) fn new(buf: Vec<u8>) -> Result<Self, InvalidFlatbuffer> {
         // root_as_dir_entry_page does validation of the flatbuffer
         let _ = root_as_dir_entry_page(&buf)?;

@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 mod dirent;
 mod dirent_index;
+mod staging;
 
 #[path = "./volume_header.fbs.rs"]
 #[allow(warnings)]
@@ -74,6 +75,15 @@ impl Volume {
         })
     }
 
+    /// Returns a Header, an accessor on top of the underlying FlatBuffer-encoded buffer.
+    #[inline]
+    pub fn header(&self) -> Header<'_> {
+        // root_as_header has validation overhead, but we've already validated in the ctor
+        // so we don't need to take the hit for that each time. this is zero overhead.
+        // this is UDB if the buffer was corrupted afterwards so beware of cosmic rays?
+        unsafe { root_as_header_unchecked(&self.buf) }
+    }
+
     /// Destroys the volume and returns a buffer that holds the volume header, the dirent index,
     /// and the dirent pages.
     pub fn into_flatbuffer(self) -> Vec<u8> {
@@ -84,12 +94,6 @@ impl Volume {
         header.into_iter().chain(index).chain(pages).collect()
     }
 
-    /// Returns a Header, an accessor on top of the underlying FlatBuffer-encoded buffer.
-    pub fn header(&self) -> Header<'_> {
-        unsafe { root_as_header_unchecked(&self.buf) }
-    }
-
-    #[cfg(test)]
     pub fn from_flatbuffer(mut buf: Vec<u8>) -> anyhow::Result<Self> {
         // validate that the beginning of this buffer is a valid FlatBuffer-encoded Header, and
         // grab the offset + length of the dirent index (which is also part of this buffer)
@@ -165,7 +169,7 @@ mod test {
         let mut header_buf = header_fbb.finished_data().to_vec();
         header_buf.resize(HeaderOwned::FIXED_SIZE, 0);
 
-        // the overall buffer we can use to reconstruct the volume
+        // the overall buffer we can use to reconstruct the volume, sans dirent pages and files
         let buf: Vec<_> = header_buf.into_iter().chain(index_buf).collect();
 
         // make sure the serialization produces the same buf

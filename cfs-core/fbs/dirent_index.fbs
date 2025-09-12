@@ -8,7 +8,7 @@ struct Entry {
 struct Page {
   // page number
   pageno: ushort (key);
-  // offset in S3 object where the FlatBuffer-encoded DirEntryPage begins
+  // byte offset into the page section that tells us where this page begins
   page_offset: ulong;
   // size of the DirEntryPage in bytes
   page_size: ulong;

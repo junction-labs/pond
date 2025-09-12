@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 flatbuffers.workspace = true
+fuser = "0.15.1"
 uuid = "1.18.1"

@@ -98,120 +98,134 @@ impl<'a> flatbuffers::Verifiable for FileType {
 }
 
 impl flatbuffers::SimpleToVerifyInSlice for FileType {}
-pub enum TimespecOffset {}
-#[derive(Copy, Clone, PartialEq)]
-
-pub struct Timespec<'a> {
-  pub _tab: flatbuffers::Table<'a>,
+// struct Timespec, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Timespec(pub [u8; 16]);
+impl Default for Timespec { 
+  fn default() -> Self { 
+    Self([0; 16])
+  }
+}
+impl core::fmt::Debug for Timespec {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    f.debug_struct("Timespec")
+      .field("sec", &self.sec())
+      .field("nsec", &self.nsec())
+      .finish()
+  }
 }
 
-impl<'a> flatbuffers::Follow<'a> for Timespec<'a> {
-  type Inner = Timespec<'a>;
+impl flatbuffers::SimpleToVerifyInSlice for Timespec {}
+impl<'a> flatbuffers::Follow<'a> for Timespec {
+  type Inner = &'a Timespec;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    unsafe { <&'a Timespec>::follow(buf, loc) }
   }
 }
-
-impl<'a> Timespec<'a> {
-  pub const VT_SEC: flatbuffers::VOffsetT = 4;
-  pub const VT_NSEC: flatbuffers::VOffsetT = 6;
-
+impl<'a> flatbuffers::Follow<'a> for &'a Timespec {
+  type Inner = &'a Timespec;
   #[inline]
-  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    Timespec { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args TimespecArgs
-  ) -> flatbuffers::WIPOffset<Timespec<'bldr>> {
-    let mut builder = TimespecBuilder::new(_fbb);
-    builder.add_sec(args.sec);
-    builder.add_nsec(args.nsec);
-    builder.finish()
-  }
-
-
-  #[inline]
-  pub fn sec(&self) -> i64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<i64>(Timespec::VT_SEC, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn nsec(&self) -> i32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<i32>(Timespec::VT_NSEC, Some(0)).unwrap()}
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { flatbuffers::follow_cast_ref::<Timespec>(buf, loc) }
   }
 }
+impl<'b> flatbuffers::Push for Timespec {
+    type Output = Timespec;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Timespec as *const u8, <Self as flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> flatbuffers::PushAlignment {
+        flatbuffers::PushAlignment::new(8)
+    }
+}
 
-impl flatbuffers::Verifiable for Timespec<'_> {
+impl<'a> flatbuffers::Verifiable for Timespec {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
-    v.visit_table(pos)?
-     .visit_field::<i64>("sec", Self::VT_SEC, false)?
-     .visit_field::<i32>("nsec", Self::VT_NSEC, false)?
-     .finish();
-    Ok(())
-  }
-}
-pub struct TimespecArgs {
-    pub sec: i64,
-    pub nsec: i32,
-}
-impl<'a> Default for TimespecArgs {
-  #[inline]
-  fn default() -> Self {
-    TimespecArgs {
-      sec: 0,
-      nsec: 0,
-    }
+    v.in_buffer::<Self>(pos)
   }
 }
 
-pub struct TimespecBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
-}
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TimespecBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_sec(&mut self, sec: i64) {
-    self.fbb_.push_slot::<i64>(Timespec::VT_SEC, sec, 0);
+impl<'a> Timespec {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    sec: u64,
+    nsec: u32,
+  ) -> Self {
+    let mut s = Self([0; 16]);
+    s.set_sec(sec);
+    s.set_nsec(nsec);
+    s
   }
-  #[inline]
-  pub fn add_nsec(&mut self, nsec: i32) {
-    self.fbb_.push_slot::<i32>(Timespec::VT_NSEC, nsec, 0);
+
+  pub fn sec(&self) -> u64 {
+    let mut mem = core::mem::MaybeUninit::<<u64 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
   }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> TimespecBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    TimespecBuilder {
-      fbb_: _fbb,
-      start_: start,
+
+  pub fn set_sec(&mut self, x: u64) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        core::mem::size_of::<<u64 as EndianScalar>::Scalar>(),
+      );
     }
   }
-  #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<Timespec<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    flatbuffers::WIPOffset::new(o.value())
+
+  pub fn nsec(&self) -> u32 {
+    let mut mem = core::mem::MaybeUninit::<<u32 as EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    EndianScalar::from_little_endian(unsafe {
+      core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<<u32 as EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
   }
+
+  pub fn set_nsec(&mut self, x: u32) {
+    let x_le = x.to_little_endian();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        core::mem::size_of::<<u32 as EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
 }
 
-impl core::fmt::Debug for Timespec<'_> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("Timespec");
-      ds.field("sec", &self.sec());
-      ds.field("nsec", &self.nsec());
-      ds.finish()
-  }
-}
 pub enum DirEntryOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -314,25 +328,25 @@ impl<'a> DirEntry<'a> {
     unsafe { self._tab.get::<u64>(DirEntry::VT_BLOCKS, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn atime(&self) -> Timespec<'a> {
+  pub fn atime(&self) -> &'a Timespec {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Timespec>>(DirEntry::VT_ATIME, None).unwrap()}
+    unsafe { self._tab.get::<Timespec>(DirEntry::VT_ATIME, None).unwrap()}
   }
   #[inline]
-  pub fn mtime(&self) -> Timespec<'a> {
+  pub fn mtime(&self) -> &'a Timespec {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Timespec>>(DirEntry::VT_MTIME, None).unwrap()}
+    unsafe { self._tab.get::<Timespec>(DirEntry::VT_MTIME, None).unwrap()}
   }
   #[inline]
-  pub fn ctime(&self) -> Timespec<'a> {
+  pub fn ctime(&self) -> &'a Timespec {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Timespec>>(DirEntry::VT_CTIME, None).unwrap()}
+    unsafe { self._tab.get::<Timespec>(DirEntry::VT_CTIME, None).unwrap()}
   }
   #[inline]
   pub fn kind(&self) -> FileType {
@@ -410,9 +424,9 @@ impl flatbuffers::Verifiable for DirEntry<'_> {
      .visit_field::<u64>("parent_ino", Self::VT_PARENT_INO, false)?
      .visit_field::<u64>("size", Self::VT_SIZE, false)?
      .visit_field::<u64>("blocks", Self::VT_BLOCKS, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Timespec>>("atime", Self::VT_ATIME, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Timespec>>("mtime", Self::VT_MTIME, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Timespec>>("ctime", Self::VT_CTIME, true)?
+     .visit_field::<Timespec>("atime", Self::VT_ATIME, true)?
+     .visit_field::<Timespec>("mtime", Self::VT_MTIME, true)?
+     .visit_field::<Timespec>("ctime", Self::VT_CTIME, true)?
      .visit_field::<FileType>("kind", Self::VT_KIND, false)?
      .visit_field::<u16>("perm", Self::VT_PERM, false)?
      .visit_field::<u32>("nlink", Self::VT_NLINK, false)?
@@ -431,9 +445,9 @@ pub struct DirEntryArgs<'a> {
     pub parent_ino: u64,
     pub size: u64,
     pub blocks: u64,
-    pub atime: Option<flatbuffers::WIPOffset<Timespec<'a>>>,
-    pub mtime: Option<flatbuffers::WIPOffset<Timespec<'a>>>,
-    pub ctime: Option<flatbuffers::WIPOffset<Timespec<'a>>>,
+    pub atime: Option<&'a Timespec>,
+    pub mtime: Option<&'a Timespec>,
+    pub ctime: Option<&'a Timespec>,
     pub kind: FileType,
     pub perm: u16,
     pub nlink: u32,
@@ -490,16 +504,16 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DirEntryBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(DirEntry::VT_BLOCKS, blocks, 0);
   }
   #[inline]
-  pub fn add_atime(&mut self, atime: flatbuffers::WIPOffset<Timespec<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Timespec>>(DirEntry::VT_ATIME, atime);
+  pub fn add_atime(&mut self, atime: &Timespec) {
+    self.fbb_.push_slot_always::<&Timespec>(DirEntry::VT_ATIME, atime);
   }
   #[inline]
-  pub fn add_mtime(&mut self, mtime: flatbuffers::WIPOffset<Timespec<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Timespec>>(DirEntry::VT_MTIME, mtime);
+  pub fn add_mtime(&mut self, mtime: &Timespec) {
+    self.fbb_.push_slot_always::<&Timespec>(DirEntry::VT_MTIME, mtime);
   }
   #[inline]
-  pub fn add_ctime(&mut self, ctime: flatbuffers::WIPOffset<Timespec<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Timespec>>(DirEntry::VT_CTIME, ctime);
+  pub fn add_ctime(&mut self, ctime: &Timespec) {
+    self.fbb_.push_slot_always::<&Timespec>(DirEntry::VT_CTIME, ctime);
   }
   #[inline]
   pub fn add_kind(&mut self, kind: FileType) {

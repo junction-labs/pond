@@ -5,11 +5,11 @@ enum FileType : byte {
   // no support for block device, char device, fifo, socket
 }
 
-table Timespec {
+struct Timespec {
   // seconds since epoch
-  sec: long;
+  sec: ulong;
   // nanoseconds
-  nsec: int;
+  nsec: uint;
 }
 
 // A DirEntry contains all applicable fields from fuser::FileAttr.
@@ -57,7 +57,8 @@ table DirEntry {
   // file/directory name
   name: string (required);
 
-  // offset in S3 object where file data begins
+  // byte offset into the file section of the volume that tells us where this
+  // dirent starts
   s3_offset: ulong;
 
   // size of file data (in bytes) in S3 object
