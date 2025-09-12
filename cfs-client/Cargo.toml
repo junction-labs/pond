@@ -1,0 +1,10 @@
+[package]
+name = "cfs-client"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+thiserror = "2.0.16"
+tokio.workspace = true
