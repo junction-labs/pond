@@ -6,7 +6,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-cfs-md.workspace = true
 cfs-client.workspace = true
 
 clap = { workspace = true, features = ["derive"] }

@@ -208,9 +208,9 @@ checksum = "2fd1289c04a9ea8cb22300a459a72a385d7c73d3259e2ed7dcb2af674838cfa9"
 
 [[package]]
 name = "cfs-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
- "cfs-md",
+ "cfs-client",
  "clap",
  "http",
  "reqwest",
@@ -219,8 +219,11 @@ dependencies = [
 
 [[package]]
 name = "cfs-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
+ "cfs-core",
+ "cfs-md",
+ "reqwest",
  "thiserror",
  "tokio",
 ]
@@ -244,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "cfs-server"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",

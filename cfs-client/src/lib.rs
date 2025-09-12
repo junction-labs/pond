@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use cfs_md::VolumeInfo;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 // TODO: We're starting with a Reader/Writer split for modifying files in a volume
@@ -18,7 +19,28 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 #[derive(Debug, thiserror::Error)]
 #[error("something went wrong")]
-pub struct Error {}
+pub struct Error {
+    kind: ErrorKind,
+}
+
+impl<E> From<E> for Error
+where
+    E: Into<ErrorKind>,
+{
+    fn from(err: E) -> Self {
+        let kind = err.into();
+        Self { kind }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ErrorKind {
+    #[error("http request failed: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("unknown: {0}")]
+    Unknown(Box<dyn std::error::Error + Send + Sync>),
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum FileType {
@@ -65,26 +87,54 @@ impl DirEntry {
 /// process_data(reader);
 /// # }
 /// ```
-pub struct Client {}
+#[derive(Clone)]
+pub struct Client {
+    http: reqwest::Client,
+}
 
 impl Client {
-    #[deprecated = "stub method"]
     pub fn new() -> Self {
-        unimplemented!()
+        static USER_AGENT: &'static str = concat!("coolfs/", env!("CARGO_PKG_VERSION"),);
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("failed to initialize tls backend");
+
+        Self { http }
     }
 
     /// List all available volumes.
     ///
     /// *TODO*: This should return volume metadata.
     pub async fn volumes(&self) -> Result<Vec<String>, Error> {
-        unimplemented!()
+        let resp = self
+            .http
+            .get("http://localhost:8888/volumes")
+            .send()
+            .await?;
+
+        let resp = resp.error_for_status()?;
+        let bytes = resp.bytes().await?;
+
+        let info = VolumeInfo::from_bytes(&bytes).map_err(|e| ErrorKind::Unknown(e.into()))?;
+        Ok(info.names().map(|s| s.to_string()).collect())
     }
 
     /// List all versions of a specific volume.
     ///
     /// *TODO*: This should return volume-version metadata.
     pub async fn versions(&self, volume: &str) -> Result<Vec<String>, Error> {
-        unimplemented!()
+        let resp = self
+            .http
+            .get(format!("http://localhost:8888/volumes/{volume}"))
+            .send()
+            .await?;
+
+        let resp = resp.error_for_status()?;
+        let bytes = resp.bytes().await?;
+
+        let info = VolumeInfo::from_bytes(&bytes).map_err(|e| ErrorKind::Unknown(e.into()))?;
+        Ok(info.versions().map(|s| s.to_string()).collect())
     }
 
     /// Load a volume at a specific version. Returns an error if the

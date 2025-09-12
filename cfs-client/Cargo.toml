@@ -6,5 +6,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+cfs-core.workspace = true
+cfs-md.workspace = true
+
+reqwest.workspace = true
 thiserror = "2.0.16"
 tokio.workspace = true

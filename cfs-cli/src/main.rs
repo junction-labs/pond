@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use cfs_md::VolumeInfo;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -17,29 +16,20 @@ enum Cmd {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let client = reqwest::Client::new();
+    let client = cfs_client::Client::new();
 
     match args.cmd {
         Cmd::List { url } => list(&client, url.as_ref()).await,
     };
 }
 
-async fn list(client: &reqwest::Client, url: Option<impl AsRef<str>>) {
+async fn list(client: &cfs_client::Client, url: Option<impl AsRef<str>>) {
     match url {
         // list all volumes
         None => {
-            let resp = client
-                .get("http://localhost:8888/volumes")
-                .send()
-                .await
-                .unwrap();
-
-            let resp = resp.error_for_status().unwrap();
-            let bs = resp.bytes().await.unwrap();
-
-            let info = VolumeInfo::from_bytes(&bs).unwrap();
-            for name in info.names() {
-                println!("{name}");
+            let volumes = client.volumes().await.unwrap();
+            for volume in volumes {
+                println!("{volume}");
             }
         }
         // list versions of a volume
@@ -52,17 +42,8 @@ async fn list(client: &reqwest::Client, url: Option<impl AsRef<str>>) {
             if let Some(volume) = url.authority() {
                 let volume = volume.host();
 
-                let resp = client
-                    .get(&format!("http://localhost:8888/volumes/{volume}"))
-                    .send()
-                    .await
-                    .unwrap();
-
-                let resp = resp.error_for_status().unwrap();
-                let bs = resp.bytes().await.unwrap();
-
-                let info = VolumeInfo::from_bytes(&bs).unwrap();
-                for version in info.versions() {
+                let versions = client.versions(volume).await.unwrap();
+                for version in versions {
                     println!("{version}");
                 }
             }
