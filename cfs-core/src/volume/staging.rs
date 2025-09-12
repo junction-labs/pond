@@ -8,13 +8,16 @@ use std::{
 
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
-use crate::volume::{
-    Header, HeaderArgs, HeaderOwned,
-    dirent::{
-        DirEntry, DirEntryArgs, DirEntryPage, DirEntryPageArgs, DirEntryPageOwned, FileType,
-        Timespec,
+use crate::{
+    flatbuffer::IntoFlatBuffer,
+    volume::{
+        Header, HeaderArgs, HeaderOwned,
+        dirent::{
+            DirEntry, DirEntryArgs, DirEntryPage, DirEntryPageArgs, DirEntryPageOwned, FileType,
+            Timespec,
+        },
+        dirent_index::{Entry, Index, IndexArgs, Page},
     },
-    dirent_index::{Entry, Index, IndexArgs, Page},
 };
 
 #[allow(dead_code)]
@@ -191,8 +194,10 @@ impl Staging {
 
         Ok(())
     }
+}
 
-    pub(crate) fn into_flatbuffer(self) -> Vec<u8> {
+impl IntoFlatBuffer for Staging {
+    fn into_flatbuffer(self) -> Vec<u8> {
         // dirents are sorted by parent_ino before being split into pages
         let mut dirents: Vec<_> = self.dirents.into_iter().collect();
         dirents.sort_by_key(|(_, file)| match file {

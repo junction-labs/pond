@@ -1,4 +1,7 @@
-use crate::volume::dirent::{DirEntry, DirEntryPageOwned};
+use crate::{
+    flatbuffer::IntoFlatBuffer,
+    volume::dirent::{DirEntry, DirEntryPageOwned},
+};
 use flatbuffers::InvalidFlatbuffer;
 use std::collections::BTreeMap;
 
@@ -56,17 +59,18 @@ impl DirEntryIndex {
             }
         }
     }
+}
 
-    /// Destroy the DirEntryIndex, returning the index buffer and pages buffer.
-    pub(crate) fn into_flatbuffer(self) -> (Vec<u8>, Vec<u8>) {
+impl IntoFlatBuffer for DirEntryIndex {
+    fn into_flatbuffer(self) -> Vec<u8> {
         let index_buf = self.buf;
-        let pages_buf = self
+        let pages_buf: Vec<_> = self
             .pages
             .into_values()
             .flat_map(|p| p.into_flatbuffer())
             .collect();
 
-        (index_buf, pages_buf)
+        index_buf.into_iter().chain(pages_buf).collect()
     }
 }
 

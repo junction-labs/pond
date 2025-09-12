@@ -9,6 +9,8 @@ pub use dirent_fbs::{
     root_as_dir_entry_page,
 };
 
+use crate::flatbuffer::IntoFlatBuffer;
+
 /// Wrapper around the buffer containing the FlatBuffer-encoded `DirEntryPage`. Provides zero-copy
 /// access to the individual `DirEntry`s within the Page.
 pub(crate) struct DirEntryPageOwned {
@@ -43,9 +45,10 @@ impl DirEntryPageOwned {
         // this assumes that the dirents are sorted by ino
         self.page().dirents().lookup_by_key(ino, cmp_ino)
     }
+}
 
-    /// Destroy the DirEntryPageOwned and return the underlying buffer.
-    pub(crate) fn into_flatbuffer(self) -> Vec<u8> {
+impl IntoFlatBuffer for DirEntryPageOwned {
+    fn into_flatbuffer(self) -> Vec<u8> {
         self.buf
     }
 }

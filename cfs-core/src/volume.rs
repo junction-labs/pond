@@ -12,7 +12,7 @@ mod volume_header_fbs;
 #[allow(unused_imports)]
 pub use volume_header_fbs::{Header, HeaderArgs, root_as_header, root_as_header_unchecked};
 
-use crate::volume::dirent_index::DirEntryIndex;
+use crate::{flatbuffer::IntoFlatBuffer, volume::dirent_index::DirEntryIndex};
 
 /// A fixed-sized header for the Volume. Contains information about volume, including the offsets
 /// and sizes of the dir entry index and dir entry pages.
@@ -35,9 +35,10 @@ impl HeaderOwned {
     pub(crate) fn header(&self) -> Header<'_> {
         unsafe { root_as_header_unchecked(&self.buf) }
     }
+}
 
-    /// Destroys the HeaderOwned, returning the FlatBuffer-encoded buffer.
-    pub(crate) fn into_flatbuffer(mut self) -> Vec<u8> {
+impl IntoFlatBuffer for HeaderOwned {
+    fn into_flatbuffer(mut self) -> Vec<u8> {
         debug_assert!(
             self.buf.len() <= Self::FIXED_SIZE,
             "header should not exceed 1KiB in size otherwise this will result in data loss"
@@ -84,16 +85,7 @@ impl Volume {
         unsafe { root_as_header_unchecked(&self.buf) }
     }
 
-    /// Destroys the volume and returns a buffer that holds the volume header, the dirent index,
-    /// and the dirent pages.
-    pub fn into_flatbuffer(self) -> Vec<u8> {
-        let header = self.buf;
-        let (index, pages) = self.index.into_flatbuffer();
-
-        // chains header + index + pages buffers
-        header.into_iter().chain(index).chain(pages).collect()
-    }
-
+    #[cfg(test)]
     pub fn from_flatbuffer(mut buf: Vec<u8>) -> anyhow::Result<Self> {
         // validate that the beginning of this buffer is a valid FlatBuffer-encoded Header, and
         // grab the offset + length of the dirent index (which is also part of this buffer)
@@ -124,6 +116,16 @@ impl Volume {
             index,
             buf,
         })
+    }
+}
+
+impl IntoFlatBuffer for Volume {
+    fn into_flatbuffer(self) -> Vec<u8> {
+        let header = self.buf;
+        let index_and_pages = self.index.into_flatbuffer();
+
+        // flattens it all together
+        header.into_iter().chain(index_and_pages).collect()
     }
 }
 
