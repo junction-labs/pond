@@ -1,4 +1,6 @@
 mod flatbuffer;
+#[allow(dead_code)]
+mod read;
 mod volume;
 
 use std::time::SystemTime;

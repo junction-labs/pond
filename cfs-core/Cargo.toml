@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 flatbuffers.workspace = true
+futures.workspace = true
 uuid.workspace = true
