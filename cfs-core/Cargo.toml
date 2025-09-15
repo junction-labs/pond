@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+dashmap.workspace = true
 flatbuffers.workspace = true
 futures.workspace = true
+object_store.workspace = true
 uuid.workspace = true

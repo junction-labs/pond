@@ -1,14 +1,17 @@
 use bytes::Bytes;
-use futures::future::{BoxFuture, Shared};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, RwLock},
+use dashmap::DashMap;
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Shared},
 };
+use object_store::{ObjectStore, path::Path};
+use std::sync::Arc;
 
+/// A boxed future that resolves to bytes.
 pub(crate) type BytesFuture = Shared<BoxFuture<'static, bytes::Bytes>>;
 
 /// Similar to std::ops::Range, but the former does not implement ordering.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ByteRange {
     /// start of range, inclusive
     pub(crate) start: u64,
@@ -24,6 +27,27 @@ impl ByteRange {
     pub(crate) fn len(&self) -> u64 {
         self.end - self.start
     }
+}
+
+impl From<ByteRange> for std::ops::Range<u64> {
+    fn from(range: ByteRange) -> Self {
+        std::ops::Range {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+pub(crate) struct ReadAheadPolicy {
+    /// Size of read-ahead in bytes. if you read a byte at index i, we will pre-fetch the byte at
+    /// index i + size in the background.
+    size: Option<u64>,
+
+    /// Whether we should pre-fetch past the read-range boundary given to the AsyncReader. If
+    /// enabled, we will pre-fetch the bytes of the next subsequent file. compaction policy of the
+    /// files determines which file will get pre-fetched, but it will always be the data of the
+    /// file that is immediately after the file we just read.
+    prefetch_past_read_boundary: bool,
 }
 
 /// Read handle for a file.
@@ -44,8 +68,8 @@ pub(crate) struct AsyncReader {
     /// if the chunk is already cached, this future resolves immediately.
     chunk: BytesFuture,
 
-    /// if provided, the number of bytes to read ahead for this AsyncReader
-    read_ahead_size: Option<u64>,
+    /// if provided, performs readaheads based on the given policy
+    readahead: Option<ReadAheadPolicy>,
 
     /// TODO: handle into the FileChunkCache so we can trigger read-aheads and swap out our chunk
     /// for subsequent chunks
@@ -87,23 +111,26 @@ impl AsyncReader {
 
 /// Describes a chunk within Volume. Does not map directly to a file, just an arbitrary chunk of
 /// bytes within the volume.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct VolumeChunk {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
     volume: String,
     range: ByteRange,
 }
 
+/// Abstraction over Volumes in object storage. Volumes are partitioned up into fixed-size chunks.
+/// Requests to read a file (given a volume and byte range) are given an AsyncReader which drives
+/// the reads on the volume (wrt read-aheads, caching).
 // TODO: eviction policy, fixed cache size? LRU-2 or something?
-pub(crate) struct VolumeChunks {
-    /// Cache from the chunk described by VolumeChunk to the future that fetches the data from
-    /// object storage.
-    read_futures: Arc<Mutex<BTreeMap<VolumeChunk, BytesFuture>>>,
-    /// The underlying bytes for the chunk described by VolumeChunk. The bytes are served by the
-    /// BytesFuture.
-    cache: Arc<RwLock<BTreeMap<VolumeChunk, Bytes>>>,
+pub struct VolumeChunks {
+    /// Cache from the chunk described by CacheKey to the future that fetches the data from
+    /// object storage. The future returns the underlying bytes for the chunk.
+    cache: Arc<DashMap<CacheKey, BytesFuture>>,
 
-    /// client to query chunks from volumes
-    object_storage_client: Option<()>, // placeholder
+    /// size of each chunk in bytes
+    chunk_size: u64,
+
+    /// object store to query chunks from volumes
+    object_store: Arc<dyn ObjectStore>,
 }
 
 impl VolumeChunks {
@@ -113,7 +140,7 @@ impl VolumeChunks {
     /// from object storage.
     ///
     /// Lookups into the cache relies on BTreeMap::range. For a specific volume and byte
-    /// range, we want to check if the VolumeChunk that contains the head of this offset + size
+    /// range, we want to check if the CacheKey that contains the head of this offset + size
     /// we've requested already exists. We search using a std::ops::RangeTo with a partial end-key
     /// to find cache entries that are less than or equal to the volume + offset. We use that to
     /// find whether the chunk we're looking for exists.
@@ -122,49 +149,62 @@ impl VolumeChunks {
         volume: String,
         offset: u64,
         size: u64,
-        read_ahead_size: Option<u64>,
+        readahead: Option<ReadAheadPolicy>,
     ) -> AsyncReader {
-        let cache = self.read_futures.lock().expect("poisoned");
-
-        let range = Self::cache_search_range(volume.clone(), offset);
-        let mut range = cache.range(range);
-        // make sure the entry that was returned actually contains our bytes.
-        if let Some((key, value)) = range.next_back()
-            && key.range.contains(offset)
-        {
-            return AsyncReader {
-                volume,
-                file_cursor: offset,
-                volume_range: ByteRange {
-                    start: offset,
-                    end: offset + size,
-                },
-                chunk_range: ByteRange {
-                    start: offset - key.range.start,
-                    end: std::cmp::min(key.range.end, offset - key.range.start + size),
-                },
-                chunk: value.clone(),
-                read_ahead_size,
-                cache_handle: None,
-            };
-        }
-
-        // TODO: populate it.
-        unimplemented!()
-    }
-
-    /// Returns a range to search the Cache for entries that are less than or equal to the given
-    /// volume and offset. A partial key is constructed to be used as the end of the range by using
-    /// u64::MAX as the size.
-    fn cache_search_range(volume: String, offset: u64) -> std::ops::RangeTo<VolumeChunk> {
-        std::ops::RangeTo {
-            end: VolumeChunk {
-                volume,
-                range: ByteRange {
-                    start: offset,
-                    end: u64::MAX,
-                },
+        let aligned_chunk_start = offset / self.chunk_size * self.chunk_size;
+        let key = CacheKey {
+            volume: volume.clone(),
+            range: ByteRange {
+                start: aligned_chunk_start,
+                end: aligned_chunk_start + self.chunk_size,
             },
+        };
+
+        let chunk_future = match self.cache.entry(key.clone()) {
+            // if the chunk isn't cached, shoot off a fetch from object storage and store a future
+            // that will resolve when the fetch is done
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let chunk_future = chunk_from_object_store(
+                    self.object_store.clone(),
+                    entry.key().volume.clone(),
+                    entry.key().range,
+                )
+                .boxed()
+                .shared();
+
+                entry.insert(chunk_future.clone());
+                chunk_future
+            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+        };
+
+        AsyncReader {
+            volume,
+            file_cursor: offset,
+            volume_range: ByteRange {
+                start: offset,
+                end: offset + size,
+            },
+            chunk_range: ByteRange {
+                start: offset - key.range.start,
+                end: std::cmp::min(key.range.end, offset - key.range.start + size),
+            },
+            chunk: chunk_future,
+            readahead,
+            cache_handle: None,
         }
     }
+}
+
+// TODO: we should drive the future to completion without waiting for the first user to await it
+async fn chunk_from_object_store(
+    store: Arc<dyn ObjectStore>,
+    key: String,
+    range: ByteRange,
+) -> Bytes {
+    let path = Path::from(key);
+    store
+        .get_range(&path, range.into())
+        .await
+        .expect("what error handling?")
 }
