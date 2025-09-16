@@ -1,0 +1,63 @@
+enum FileType : byte {
+    Regular,
+    Directory,
+    Symlink,
+}
+
+struct Timespec {
+    sec: uint64;
+    nsec: uint32;
+}
+
+struct ByteRange {
+    offset: uint64;
+    length: uint64;
+}
+
+table S3Location {
+    bucket: string (required);
+    key: string (required);
+}
+
+table LocalLocation {
+    path: string (required);
+}
+
+union Location {
+    local: LocalLocation,
+    s3: S3Location,
+}
+
+// vec of unions isn't supported in rust?
+table LocationWrapper {
+    location: Location;
+}
+
+table LocationRef {
+    location_index: uint16;
+    byte_range: ByteRange;
+}
+
+table FileAttrs {
+    ino: uint64 (key);
+    size: uint64;
+    mtime: Timespec (required);
+    ctime: Timespec (required);
+    kind: FileType;
+}
+
+table Entry {
+    name: string (required);
+    parent_ino: uint64;
+    attrs: FileAttrs (required);
+    location_ref: LocationRef;
+}
+
+
+table Volume {
+    version: uint64;
+    locations: [LocationWrapper] (required);
+    entries: [Entry] (required);
+}
+
+root_type Volume;

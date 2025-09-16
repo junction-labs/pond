@@ -1,181 +1,651 @@
-use flatbuffers::InvalidFlatbuffer;
-use uuid::Uuid;
+use std::{
+    borrow::{Borrow, Cow},
+    collections::{BTreeMap, btree_map},
+    hash::{DefaultHasher, Hash, Hasher},
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-mod dirent;
-mod dirent_index;
-mod staging;
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
-#[path = "./volume_header.fbs.rs"]
+#[path = "./volume.fbs.rs"]
 #[allow(warnings)]
 #[rustfmt::skip]
-mod volume_header_fbs;
-#[allow(unused_imports)]
-pub use volume_header_fbs::{Header, HeaderArgs, root_as_header, root_as_header_unchecked};
+mod fb;
 
-use crate::{flatbuffer::IntoFlatBuffer, volume::dirent_index::DirEntryIndex};
+use crate::{ByteRange, FileAttr, FileType, Location};
 
-/// A fixed-sized header for the Volume. Contains information about volume, including the offsets
-/// and sizes of the dir entry index and dir entry pages.
-pub struct HeaderOwned {
-    buf: Vec<u8>,
+#[derive(Debug, PartialEq, Eq)]
+pub enum VolumeError {
+    Invalid { message: Cow<'static, str> },
+    NotADirectory,
+    DoesNotExist,
+    Exists,
+    IsADirectory,
 }
 
-#[allow(unused)]
-impl HeaderOwned {
-    /// fixed size of the header in bytes. it will always take this much space in the volume.
-    pub const FIXED_SIZE: usize = 1024;
-
-    pub(crate) fn new(buf: Vec<u8>) -> Result<Self, InvalidFlatbuffer> {
-        // validate the buffer as a FlatBuffer-encoded Header
-        let _ = root_as_header(&buf)?;
-
-        Ok(Self { buf })
-    }
-
-    pub(crate) fn header(&self) -> Header<'_> {
-        unsafe { root_as_header_unchecked(&self.buf) }
+impl VolumeError {
+    fn invalid<S: Into<Cow<'static, str>>>(msg: S) -> Self {
+        Self::Invalid {
+            message: msg.into(),
+        }
     }
 }
 
-impl IntoFlatBuffer for HeaderOwned {
-    fn into_flatbuffer(mut self) -> Vec<u8> {
-        debug_assert!(
-            self.buf.len() <= Self::FIXED_SIZE,
-            "header should not exceed 1KiB in size otherwise this will result in data loss"
-        );
-
-        self.buf.resize(Self::FIXED_SIZE, 0);
-        self.buf
-    }
-}
-
-#[allow(unused)]
+// TODO: we duplicate file/dir names as strings in data values and entry keys.
+// have to figure out how to intern somewhere if we want to stop, and probably
+// have to get name: String out of FileAttr.
+//
+// TODO: right now you have to make two calls to "open" a file - a lookup and a
+// read - even though we're doing the same btree walk for both. should we bother
+// returning the location info in lookup?
+#[derive(Debug)]
 pub struct Volume {
-    /// S3 bucket the volume lives in
-    s3_bucket: String,
-    /// S3 key to the volume
-    s3_key: String,
+    locations: Vec<Location>,
+    // ino -> location key
+    data: BTreeMap<u64, Entry>,
+    // (parent, name) -> ino
+    dirs: BTreeMap<EntryKey<'static>, u64>,
+}
 
-    /// Index over `DirEntryPage`s, allowing access to `DirEntry`s using inode.
-    index: DirEntryIndex,
+#[derive(Debug, Clone)]
+struct Entry {
+    name: Cow<'static, str>,
+    attr: FileAttr,
+    parent_ino: u64,
+    data: EntryData,
+}
 
-    // buffer that holds the FlatBuffer-encoded Header
-    buf: Vec<u8>,
+impl Entry {
+    fn is_dir(&self) -> bool {
+        matches!(self.data, EntryData::Directory)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EntryData {
+    Directory,
+    File {
+        location_idx: usize,
+        byte_range: ByteRange,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EntryKeyRef<'a> {
+    ino: u64,
+    name: Cow<'a, str>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EntryKey<'a>(EntryKeyRef<'a>);
+
+impl<'a> From<(u64, &'a str)> for EntryKey<'a> {
+    fn from((ino, name): (u64, &'a str)) -> Self {
+        EntryKey(EntryKeyRef {
+            ino,
+            name: name.into(),
+        })
+    }
+}
+
+impl From<(u64, String)> for EntryKey<'static> {
+    fn from((ino, name): (u64, String)) -> Self {
+        EntryKey(EntryKeyRef {
+            ino,
+            name: name.into(),
+        })
+    }
+}
+
+impl<'r, 'k> Borrow<EntryKeyRef<'r>> for EntryKey<'k>
+where
+    'k: 'r,
+{
+    fn borrow(&self) -> &EntryKeyRef<'r> {
+        &self.0
+    }
 }
 
 #[allow(unused)]
 impl Volume {
-    pub async fn mount(_volume: &str, _version: &Uuid) -> anyhow::Result<Self> {
-        // TODO: talk to metadata server to get the s3 object, load up the object's header.
-        // then load up the dirents index
-        Ok(Self {
-            s3_bucket: "bucket".to_string(),
-            s3_key: "key".to_string(),
-            index: DirEntryIndex::new(Vec::new())?,
-            buf: Vec::new(),
+    const ROOT: Entry = Entry {
+        name: Cow::Borrowed("/"),
+        parent_ino: 0,
+        attr: FileAttr {
+            ino: 0,
+            size: 0,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            kind: FileType::Directory,
+        },
+        data: EntryData::Directory,
+    };
+
+    /// Create a new empty volume.
+    pub fn empty() -> Self {
+        Self {
+            locations: vec![],
+            data: BTreeMap::new(),
+            dirs: BTreeMap::new(),
+        }
+    }
+
+    /// Create a new directory.
+    ///
+    /// Returns an error if the parent directory does not exist, or if it
+    /// already contains a file or directory with that name.
+    pub fn mkdir(&mut self, parent_ino: u64, name: String) -> Result<&FileAttr, VolumeError> {
+        // validate that it's okay to create the directory before any state is
+        // modified - don't want to undo anything if we can help it
+        let _ = self.dir_entry(parent_ino)?;
+        let ino = ino(parent_ino, &name);
+        let slot = match self.data.entry(ino) {
+            btree_map::Entry::Vacant(slot) => slot,
+            btree_map::Entry::Occupied(_) => return Err(VolumeError::Exists),
+        };
+
+        // start modifying things
+        let new_entry = Entry {
+            name: name.clone().into(),
+            parent_ino,
+            attr: FileAttr {
+                ino,
+                size: 0,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                kind: FileType::Directory,
+            },
+            data: EntryData::Directory,
+        };
+        let entry = slot.insert(new_entry);
+        self.dirs.insert((parent_ino, name).into(), ino);
+        Ok(&entry.attr)
+    }
+
+    /// Create a file.
+    ///
+    /// If
+    pub fn create(
+        &mut self,
+        parent_ino: u64,
+        name: String,
+        exclusive: bool,
+        location: Location,
+        byte_range: ByteRange,
+    ) -> Result<&FileAttr, VolumeError> {
+        // validate that the parent directory exists and we're allowed to
+        // create this file (permissions, O_EXCL, etc) before modifying
+        // any state
+        let _ = self.dir_entry(parent_ino)?;
+
+        let ino = ino(parent_ino, &name);
+        let slot = self.data.entry(ino);
+        if let btree_map::Entry::Occupied(slot) = &slot {
+            if exclusive {
+                return Err(VolumeError::Exists);
+            }
+            if slot.get().is_dir() {
+                return Err(VolumeError::IsADirectory);
+            }
+        }
+
+        // verification is okay, start modifying things
+        let location_idx = insert_sorted(&mut self.locations, location);
+        let new_entry = Entry {
+            name: name.clone().into(),
+            parent_ino,
+            attr: FileAttr {
+                ino,
+                size: byte_range.len,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                kind: FileType::Regular,
+            },
+            data: EntryData::File {
+                location_idx,
+                byte_range,
+            },
+        };
+
+        let entry = match slot {
+            btree_map::Entry::Vacant(slot) => slot.insert(new_entry),
+            btree_map::Entry::Occupied(slot) => {
+                let entry = slot.into_mut();
+                *entry = new_entry;
+                entry
+            }
+        };
+        self.dirs.insert((parent_ino, name).into(), ino);
+        Ok(&entry.attr)
+    }
+
+    fn insert_location(&mut self, location: Location) -> usize {
+        match self.locations.binary_search(&location) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                self.locations.insert(idx, location);
+                idx
+            }
+        }
+    }
+
+    /// Iterate over the entires in a directory.
+    pub fn readdir(
+        &self,
+        ino: u64,
+    ) -> Result<impl Iterator<Item = (&str, &FileAttr)>, VolumeError> {
+        let dot = self.dir_entry(ino)?;
+        let dotdot = self.dir_entry(dot.parent_ino)?;
+
+        let start: EntryKey = (ino, "").into();
+        let end: EntryKey = (ino + 1, "").into();
+        let dirents = self.dirs.range(start..end).map(|(k, ino)| {
+            let dent = self.data.get(ino).unwrap();
+            (k.0.name.as_ref(), &dent.attr)
+        });
+
+        Ok([(".", &dot.attr), ("..", &dotdot.attr)]
+            .into_iter()
+            .chain(dirents))
+    }
+
+    /// Lookup a directory entry by name.
+    pub fn lookup(&self, parent_ino: u64, name: &str) -> Option<&FileAttr> {
+        let k = EntryKey::from((parent_ino, name));
+        self.dirs
+            .get(&k)
+            .and_then(|ino| self.data.get(ino))
+            .map(|dent| &dent.attr)
+    }
+
+    /// Return the attributes for a file.
+    pub fn stat(&self, ino: u64) -> Option<&FileAttr> {
+        self.data.get(&ino).map(|dent| &dent.attr)
+    }
+
+    #[inline]
+    fn dir_entry(&self, ino: u64) -> Result<&Entry, VolumeError> {
+        if ino == 0 {
+            return Ok(&Self::ROOT);
+        }
+
+        let entry = self.data.get(&ino).ok_or(VolumeError::DoesNotExist)?;
+        if !entry.is_dir() {
+            return Err(VolumeError::NotADirectory);
+        }
+        Ok(entry)
+    }
+
+    /// Get a file's physical location for opening and reading.
+    ///
+    /// Attempting to get the physical location of a directory or a symlink
+    /// returns and error.
+    pub fn location(&self, ino: u64) -> Option<(&Location, &ByteRange)> {
+        self.data.get(&ino).and_then(|entry| match &entry.data {
+            // directories have no location
+            EntryData::Directory => None,
+            // files need to map to blob list
+            EntryData::File {
+                location_idx,
+                byte_range,
+            } => {
+                let location = self.locations.get(*location_idx)?;
+                Some((location, byte_range))
+            }
         })
     }
 
-    /// Returns a Header, an accessor on top of the underlying FlatBuffer-encoded buffer.
-    #[inline]
-    pub fn header(&self) -> Header<'_> {
-        // root_as_header has validation overhead, but we've already validated in the ctor
-        // so we don't need to take the hit for that each time. this is zero overhead.
-        // this is UDB if the buffer was corrupted afterwards so beware of cosmic rays?
-        unsafe { root_as_header_unchecked(&self.buf) }
-    }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut fbb = FlatBufferBuilder::new();
 
-    #[cfg(test)]
-    pub fn from_flatbuffer(mut buf: Vec<u8>) -> anyhow::Result<Self> {
-        // validate that the beginning of this buffer is a valid FlatBuffer-encoded Header, and
-        // grab the offset + length of the dirent index (which is also part of this buffer)
-        let (dirent_index_offset, dirent_index_size) = {
-            let header = root_as_header(&buf)?;
-            (
-                header.dirent_index_offset() as usize,
-                header.dirent_index_size() as usize,
-            )
+        let locations = {
+            let mut locations = Vec::with_capacity(self.locations.len());
+            for location in &self.locations {
+                locations.push(to_fb_location(&mut fbb, location))
+            }
+            fbb.create_vector(&locations)
+        };
+        let entries = {
+            let mut dir_entries = Vec::with_capacity(self.data.len());
+            for entry in self.data.values() {
+                dir_entries.push(to_fb_entry(&mut fbb, entry));
+            }
+            fbb.create_vector(&dir_entries)
         };
 
-        // truncates buf and copies the tail over to the returned vec
-        let mut index_buf = buf.split_off(dirent_index_offset);
+        let volume = fb::Volume::create(
+            &mut fbb,
+            &fb::VolumeArgs {
+                version: 0xBEEF,
+                locations: Some(locations),
+                entries: Some(entries),
+            },
+        );
+        fbb.finish(volume, None);
+        fbb.finished_data().into()
+    }
 
-        if index_buf.len() < dirent_index_size {
-            return Err(anyhow::anyhow!(
-                "the buffer contains an incomplete index -- we didn't fetch a large enough block from s3"
-            ));
+    pub fn from_bytes(bs: &[u8]) -> Result<Self, VolumeError> {
+        let fb_volume =
+            fb::root_as_volume(bs).map_err(|_| VolumeError::invalid("invalid bytes"))?;
+
+        if fb_volume.version() != 0xBEEF {
+            return Err(VolumeError::invalid("invalid version"));
         }
 
-        // truncate it since we may have fetched more than the index
-        index_buf.truncate(dirent_index_size);
-        let index = DirEntryIndex::new(index_buf)?;
+        let locations = fb_volume
+            .locations()
+            .iter()
+            .map(from_fb_location)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Volume {
-            s3_bucket: "bucket".to_string(),
-            s3_key: "key".to_string(),
-            index,
-            buf,
+        let mut data = BTreeMap::new();
+        let mut entries = BTreeMap::new();
+        for entry in fb_volume.entries().iter() {
+            let k = (entry.parent_ino(), entry.name().to_string()).into();
+            let entry = from_fb_entry(&entry)?;
+            entries.insert(k, entry.attr.ino);
+            data.insert(entry.attr.ino, entry);
+        }
+
+        Ok(Self {
+            locations,
+            data,
+            dirs: entries,
         })
     }
 }
 
-impl IntoFlatBuffer for Volume {
-    fn into_flatbuffer(self) -> Vec<u8> {
-        let header = self.buf;
-        let index_and_pages = self.index.into_flatbuffer();
+fn ino(parent_ino: u64, name: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (parent_ino, &name).hash(&mut hasher);
+    hasher.finish()
+}
 
-        // flattens it all together
-        header.into_iter().chain(index_and_pages).collect()
+fn insert_sorted<T: Ord>(vec: &mut Vec<T>, location: T) -> usize {
+    match vec.binary_search(&location) {
+        Ok(idx) => idx,
+        Err(idx) => {
+            vec.insert(idx, location);
+            idx
+        }
+    }
+}
+
+fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<fb::Entry<'a>> {
+    let attrs = fb::FileAttrs::create(
+        fbb,
+        &fb::FileAttrsArgs {
+            ino: entry.attr.ino,
+            size: entry.attr.size,
+            mtime: Some(&entry.attr.mtime.into()),
+            ctime: Some(&entry.attr.ctime.into()),
+            kind: entry.attr.kind.into(),
+        },
+    );
+    let location_ref = match &entry.data {
+        EntryData::File {
+            location_idx,
+            byte_range,
+        } => Some({
+            let byte_range = fb::ByteRange::new(byte_range.offset, byte_range.len);
+            fb::LocationRef::create(
+                fbb,
+                &fb::LocationRefArgs {
+                    location_index: *location_idx as u16,
+                    byte_range: Some(&byte_range),
+                },
+            )
+        }),
+        _ => None,
+    };
+
+    let name = fbb.create_string(&entry.name);
+    fb::Entry::create(
+        fbb,
+        &fb::EntryArgs {
+            name: Some(name),
+            parent_ino: entry.parent_ino,
+            attrs: Some(attrs),
+            location_ref,
+        },
+    )
+}
+
+fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
+    let name = fb_entry.name().to_string().into();
+    let parent_ino = fb_entry.parent_ino();
+    let attr = {
+        let fb_attr = fb_entry.attrs();
+        FileAttr {
+            ino: fb_attr.ino(),
+            size: fb_attr.size(),
+            mtime: fb_attr.mtime().into(),
+            ctime: fb_attr.ctime().into(),
+            kind: fb_attr.kind().try_into()?,
+        }
+    };
+
+    let data = match attr.kind {
+        FileType::Regular => {
+            let Some(location_ref) = fb_entry.location_ref() else {
+                return Err(VolumeError::invalid("missing file data pointer"));
+            };
+            let Some(byte_range) = location_ref.byte_range() else {
+                return Err(VolumeError::invalid("missing file data range"));
+            };
+            EntryData::File {
+                location_idx: location_ref.location_index() as usize,
+                byte_range: ByteRange {
+                    offset: byte_range.offset(),
+                    len: byte_range.length(),
+                },
+            }
+        }
+        FileType::Directory => EntryData::Directory,
+        FileType::Symlink => return Err(VolumeError::invalid("symlinks are not yet supported")),
+    };
+
+    Ok(Entry {
+        name,
+        attr,
+        parent_ino,
+        data,
+    })
+}
+
+impl From<SystemTime> for fb::Timespec {
+    fn from(time: SystemTime) -> Self {
+        let since_epoch = time
+            .duration_since(UNIX_EPOCH)
+            .expect("time before unix epoch");
+        fb::Timespec::new(since_epoch.as_secs(), since_epoch.subsec_nanos())
+    }
+}
+
+impl From<&fb::Timespec> for SystemTime {
+    fn from(time: &fb::Timespec) -> Self {
+        UNIX_EPOCH + Duration::new(time.sec(), time.nsec())
+    }
+}
+
+impl From<FileType> for fb::FileType {
+    fn from(ft: FileType) -> Self {
+        match ft {
+            FileType::Regular => fb::FileType::Regular,
+            FileType::Directory => fb::FileType::Directory,
+            FileType::Symlink => fb::FileType::Symlink,
+        }
+    }
+}
+
+impl TryFrom<fb::FileType> for FileType {
+    type Error = VolumeError;
+
+    fn try_from(ft: fb::FileType) -> Result<Self, Self::Error> {
+        match ft {
+            fb::FileType::Regular => Ok(FileType::Regular),
+            fb::FileType::Directory => Ok(FileType::Directory),
+            fb::FileType::Symlink => Ok(FileType::Symlink),
+            ft => Err(VolumeError::invalid(format!(
+                "unknown file type: code={code}, name={name}",
+                code = ft.0,
+                name = ft.variant_name().unwrap_or("")
+            ))),
+        }
+    }
+}
+
+fn to_fb_location<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    location: &Location,
+) -> WIPOffset<fb::LocationWrapper<'a>> {
+    let union = match location {
+        Location::Local(path_buf) => {
+            // FIXME: what do we do about non-utf8 paths?
+            let path = fbb.create_string(path_buf.to_str().unwrap());
+            let location =
+                fb::LocalLocation::create(fbb, &fb::LocalLocationArgs { path: Some(path) });
+            location.as_union_value()
+        }
+        Location::ObjectStorage { bucket, key } => {
+            let bucket = fbb.create_shared_string(bucket);
+            let key = fbb.create_string(key);
+            let location = fb::S3Location::create(
+                fbb,
+                &fb::S3LocationArgs {
+                    bucket: Some(bucket),
+                    key: Some(key),
+                },
+            );
+            location.as_union_value()
+        }
+    };
+
+    fb::LocationWrapper::create(
+        fbb,
+        &fb::LocationWrapperArgs {
+            location: Some(union),
+            location_type: match location {
+                Location::Local(_) => fb::Location::local,
+                Location::ObjectStorage { .. } => fb::Location::s3,
+            },
+        },
+    )
+}
+
+fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, VolumeError> {
+    match fb_location.location_type() {
+        fb::Location::local => {
+            let fb_location = fb_location.location_as_local().unwrap();
+            let path = PathBuf::from(fb_location.path());
+            Ok(Location::Local(path))
+        }
+        fb::Location::s3 => {
+            let fb_location = fb_location.location_as_s_3().unwrap();
+            let bucket = fb_location.bucket().to_string();
+            let key = fb_location.key().to_string();
+            Ok(Location::ObjectStorage { bucket, key })
+        }
+        lt => Err(VolumeError::invalid(format!(
+            "unknown location type: code={code} name={name}",
+            code = lt.0,
+            name = lt.variant_name().unwrap_or("")
+        ))),
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::volume::dirent_index::{Entry, Index, IndexArgs, Page};
-
     use super::*;
-    use flatbuffers::FlatBufferBuilder;
 
     #[test]
-    fn test_volume_flatbuffer_roundtrip() {
-        // building the index flatbuffer
-        let mut index_fbb = FlatBufferBuilder::new();
-        let entries = index_fbb.create_vector(&[Entry::new(100, 0), Entry::new(200, 1)]);
-        let pages = index_fbb.create_vector(&[Page::new(0, 1024, 1024), Page::new(1, 2048, 1024)]);
-        let index = Index::create(
-            &mut index_fbb,
-            &IndexArgs {
-                entries: Some(entries),
-                pages: Some(pages),
-            },
+    fn test_volume_lookup() {
+        let mut volume = Volume::empty();
+        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
+        let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
+
+        volume
+            .create(
+                c.ino,
+                "test.txt".to_string(),
+                true,
+                Location::ObjectStorage {
+                    bucket: "test-bucket".to_string(),
+                    key: "test.txt".to_string(),
+                },
+                ByteRange { offset: 0, len: 64 },
+            )
+            .unwrap();
+
+        assert_eq!(
+            volume
+                .readdir(0)
+                .unwrap()
+                .map(|(n, _attr)| n)
+                .collect::<Vec<_>>(),
+            vec![".", "..", "a"],
         );
-        index_fbb.finish(index, None);
-        let index_buf = index_fbb.finished_data().to_vec();
-
-        // building the header flatbuffer
-        let mut header_fbb = FlatBufferBuilder::new();
-        let version_bytes = uuid::Uuid::nil().to_bytes_le();
-        let version = header_fbb.create_vector(&version_bytes);
-        let header = Header::create(
-            &mut header_fbb,
-            &HeaderArgs {
-                version: Some(version),
-                // dirent index starts right after the header
-                dirent_index_offset: HeaderOwned::FIXED_SIZE as u64,
-                dirent_index_size: index_buf.len() as u64,
-                dirent_pages_offset: (HeaderOwned::FIXED_SIZE + index_buf.len()) as u64,
-                dirent_pages_size: 0,
-            },
+        assert_eq!(
+            volume
+                .readdir(a.ino)
+                .unwrap()
+                .map(|(n, _attr)| n)
+                .collect::<Vec<_>>(),
+            vec![".", "..", "b"],
         );
-        header_fbb.finish(header, None);
-        let mut header_buf = header_fbb.finished_data().to_vec();
-        header_buf.resize(HeaderOwned::FIXED_SIZE, 0);
+        assert_eq!(
+            volume
+                .readdir(b.ino)
+                .unwrap()
+                .map(|(n, _attr)| n)
+                .collect::<Vec<_>>(),
+            vec![".", "..", "c"],
+        );
 
-        // the overall buffer we can use to reconstruct the volume, sans dirent pages and files
-        let buf: Vec<_> = header_buf.into_iter().chain(index_buf).collect();
+        assert_read_test_txt(&volume);
+    }
 
-        // make sure the serialization produces the same buf
-        let volume = Volume::from_flatbuffer(buf.clone()).unwrap();
-        assert_eq!(volume.into_flatbuffer(), buf);
+    #[test]
+    fn test_volume_read_write() {
+        let mut volume = Volume::empty();
+        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
+        let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
+        volume
+            .create(
+                c.ino,
+                "test.txt".to_string(),
+                true,
+                Location::ObjectStorage {
+                    bucket: "test-bucket".to_string(),
+                    key: "test.txt".to_string(),
+                },
+                ByteRange { offset: 0, len: 64 },
+            )
+            .unwrap();
+
+        let bs = volume.to_bytes();
+        assert_read_test_txt(&Volume::from_bytes(&bs).unwrap());
+    }
+
+    fn assert_read_test_txt(volume: &Volume) {
+        let a = volume.lookup(0, "a").unwrap().clone();
+        let b = volume.lookup(a.ino, "b").unwrap().clone();
+        let c = volume.lookup(b.ino, "c").unwrap().clone();
+        let test_txt = volume.lookup(c.ino, "test.txt").unwrap().clone();
+
+        assert_eq!(
+            volume.location(test_txt.ino).unwrap(),
+            (
+                &Location::ObjectStorage {
+                    bucket: "test-bucket".to_string(),
+                    key: "test.txt".to_string(),
+                },
+                &ByteRange { offset: 0, len: 64 },
+            )
+        );
     }
 }

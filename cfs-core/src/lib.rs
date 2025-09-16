@@ -1,11 +1,9 @@
-mod flatbuffer;
-#[allow(dead_code)]
 mod read;
 mod volume;
 
-use std::time::SystemTime;
+use std::{path::PathBuf, time::SystemTime};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
     /// A regular file.
     Regular,
@@ -27,10 +25,26 @@ pub struct FileAttr {
     pub ctime: SystemTime,
     /// Kind of file (directory, file, pipe, etc)
     pub kind: FileType,
-    /// Permissions
-    pub perm: u16,
-    /// User id
-    pub uid: u32,
-    /// Group id
-    pub gid: u32,
+}
+
+impl FileAttr {
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind, FileType::Regular)
+    }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self.kind, FileType::Directory)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Location {
+    Local(PathBuf),
+    ObjectStorage { bucket: String, key: String },
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub len: u64,
 }
