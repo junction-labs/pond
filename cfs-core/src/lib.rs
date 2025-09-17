@@ -1,6 +1,5 @@
-#[allow(unused)]
-mod read;
-
+pub mod file;
+pub mod read;
 pub mod volume;
 
 use std::{path::PathBuf, time::SystemTime};
