@@ -1,3 +1,4 @@
+use crate::ByteRange;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{
@@ -9,34 +10,6 @@ use std::sync::Arc;
 
 /// A boxed future that resolves to bytes.
 pub(crate) type BytesFuture = Shared<BoxFuture<'static, Bytes>>;
-
-/// Similar to std::ops::Range<u64>.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ByteRange {
-    /// Start of range, inclusive
-    pub(crate) start: u64,
-    /// End of range, exclusive
-    pub(crate) end: u64,
-}
-
-impl ByteRange {
-    pub(crate) fn contains(&self, idx: u64) -> bool {
-        self.start <= idx && idx < self.end
-    }
-
-    pub(crate) fn len(&self) -> u64 {
-        self.end - self.start
-    }
-}
-
-impl From<ByteRange> for std::ops::Range<u64> {
-    fn from(range: ByteRange) -> Self {
-        std::ops::Range {
-            start: range.start,
-            end: range.end,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ReadAheadPolicy {
@@ -166,8 +139,8 @@ impl ChunkedVolumeStore {
         CacheKey {
             volume: volume.clone(),
             range: ByteRange {
-                start: aligned,
-                end: aligned + self.chunk_size,
+                offset: aligned,
+                len: self.chunk_size,
             },
         }
     }
@@ -188,7 +161,7 @@ async fn chunk_from_object_store(
     let path = Path::from(key);
     // TODO: figure out what happens when the read fails ...
     store
-        .get_range(&path, range.into())
+        .get_range(&path, range.as_range_u64())
         .await
         .expect("what error handling?")
 }
@@ -223,7 +196,7 @@ mod test {
         let (range, _) = volume_chunk_store.get(volume.clone(), 234, &Some(readahead.clone()));
 
         // every byte in the readahead-window is cached
-        for offset in range.start..(range.start + readahead.size) {
+        for offset in range.offset..(range.offset + readahead.size) {
             assert!(volume_chunk_store.cached(volume.clone(), offset));
         }
 

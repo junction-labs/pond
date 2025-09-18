@@ -1,6 +1,9 @@
-use crate::read::{ByteRange, BytesFuture, ChunkedVolumeStore, ReadAheadPolicy};
+use crate::{
+    ByteRange,
+    read::{BytesFuture, ChunkedVolumeStore, ReadAheadPolicy},
+};
 use futures::FutureExt;
-use std::{io::SeekFrom, pin::Pin, sync::Arc, task::Poll};
+use std::{cmp::min, io::SeekFrom, pin::Pin, sync::Arc, task::Poll};
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
 /// Handle for a file on a volume.
@@ -43,18 +46,21 @@ impl VolumeFile {
     ) -> Self {
         // read the first chunk into memory
         let (absolute_chunk_range, chunk) =
-            volume_chunk_store.get(volume.clone(), volume_read_range.start, &readahead);
+            volume_chunk_store.get(volume.clone(), volume_read_range.offset, &readahead);
+        let offset = volume_read_range.offset - absolute_chunk_range.offset;
         let relative_chunk_range = ByteRange {
-            start: volume_read_range.start - absolute_chunk_range.start,
-            end: std::cmp::min(
-                volume_read_range.end - absolute_chunk_range.start,
-                absolute_chunk_range.len(),
+            offset,
+            len: min(
+                // remaining bytes in the fetched chunk from our position
+                absolute_chunk_range.end() - volume_read_range.offset,
+                // remaining bytes in our read range from our position
+                volume_read_range.len,
             ),
         };
 
         Self {
             volume,
-            volume_read_cursor: volume_read_range.start,
+            volume_read_cursor: volume_read_range.offset,
             volume_read_range,
             chunk_read_range: relative_chunk_range,
             chunk,
@@ -78,11 +84,15 @@ impl VolumeFile {
         );
 
         // update the internal current chunk state
+        let offset = self.volume_read_cursor - absolute_chunk_range.offset;
         self.chunk_read_range = ByteRange {
-            start: self.volume_read_cursor - absolute_chunk_range.start,
-            end: std::cmp::min(
-                self.volume_read_range.end - absolute_chunk_range.start,
-                absolute_chunk_range.len(),
+            offset,
+            len: min(
+                // end of fetched chunk to our offset
+                absolute_chunk_range.end() - self.volume_read_cursor,
+                // end of volume_read_range to our offset (when our read_range ends somewhere in
+                // the middle of the chunk)
+                self.volume_read_range.end() - self.volume_read_cursor,
             ),
         };
         self.chunk = chunk;
@@ -90,12 +100,12 @@ impl VolumeFile {
 
     /// Returns the offset of what we've seeked to, relative to the start of the file.
     fn relative_read_cursor(&self) -> u64 {
-        self.volume_read_cursor - self.volume_read_range.start
+        self.volume_read_cursor - self.volume_read_range.offset
     }
 
     /// Return whether the VolumeFile has exhausted the reads within self.volume_read_range.
     fn finished(&self) -> bool {
-        self.volume_read_cursor == self.volume_read_range.end
+        self.volume_read_cursor == self.volume_read_range.end()
     }
 }
 
@@ -117,14 +127,11 @@ impl AsyncRead for VolumeFile {
             Poll::Pending => Poll::Pending,
             Poll::Ready(bytes) => {
                 let buf_capacity = buf.remaining();
-                if buf_capacity as u64 >= mut_inner.chunk_read_range.len() {
+                if buf_capacity as u64 >= mut_inner.chunk_read_range.len {
                     // there's enough space in the buffer to read the whole chunk. push it into buf
                     // and load the next chunk.
-                    buf.put_slice(&bytes.slice(std::ops::Range {
-                        start: mut_inner.chunk_read_range.start as usize,
-                        end: mut_inner.chunk_read_range.end as usize,
-                    }));
-                    mut_inner.volume_read_cursor += mut_inner.chunk_read_range.len();
+                    buf.put_slice(&bytes.slice(mut_inner.chunk_read_range.as_range_usize()));
+                    mut_inner.volume_read_cursor += mut_inner.chunk_read_range.len;
                     mut_inner.load_next_chunk();
 
                     Poll::Ready(Ok(()))
@@ -132,11 +139,11 @@ impl AsyncRead for VolumeFile {
                     // partial read of the chunk since buf is too small for the chunk. push what we
                     // can and update the internal cursor + range.
                     buf.put_slice(&bytes.slice(std::ops::Range {
-                        start: mut_inner.chunk_read_range.start as usize,
-                        end: mut_inner.chunk_read_range.start as usize + buf_capacity,
+                        start: mut_inner.chunk_read_range.offset as usize,
+                        end: mut_inner.chunk_read_range.offset as usize + buf_capacity,
                     }));
                     mut_inner.volume_read_cursor += buf_capacity as u64;
-                    mut_inner.chunk_read_range.start += buf_capacity as u64;
+                    mut_inner.chunk_read_range.advance(buf_capacity as u64);
 
                     Poll::Ready(Ok(()))
                 }
@@ -148,8 +155,8 @@ impl AsyncRead for VolumeFile {
 impl AsyncSeek for VolumeFile {
     fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
         let new_read_cursor = match position {
-            SeekFrom::Start(delta) => self.volume_read_range.start.checked_add(delta),
-            SeekFrom::End(delta) => self.volume_read_range.end.checked_add_signed(delta),
+            SeekFrom::Start(delta) => self.volume_read_range.offset.checked_add(delta),
+            SeekFrom::End(delta) => self.volume_read_range.end().checked_add_signed(delta),
             SeekFrom::Current(delta) => self.volume_read_cursor.checked_add_signed(delta),
         };
         let Some(new_read_cursor) = new_read_cursor else {
@@ -175,11 +182,14 @@ impl AsyncSeek for VolumeFile {
 
         // update the internal current chunk state
         mut_inner.volume_read_cursor = new_read_cursor;
+        let offset = mut_inner.volume_read_cursor - absolute_chunk_range.offset;
         mut_inner.chunk_read_range = ByteRange {
-            start: mut_inner.volume_read_cursor - absolute_chunk_range.start,
-            end: std::cmp::min(
-                mut_inner.volume_read_range.end - absolute_chunk_range.start,
-                absolute_chunk_range.len(),
+            offset,
+            len: min(
+                // remaining bytes in the fetched chunk from our position
+                absolute_chunk_range.end() - new_read_cursor,
+                // remaining bytes in our read range from our position
+                mut_inner.volume_read_range.end() - new_read_cursor,
             ),
         };
         mut_inner.chunk = chunk;
@@ -239,8 +249,8 @@ mod test {
             volume_chunk_store.clone(),
             volume,
             ByteRange {
-                start: 0,
-                end: data.len() as u64,
+                offset: 0,
+                len: data.len() as u64,
             },
             None,
         )
@@ -266,8 +276,8 @@ mod test {
         // read the middle 1/3 of the volume, this is a weird number so partial chunks should be
         // read. this maps to reading bytes (21845..43690] which doesn't get chunked up cleanly!
         let read_range = ByteRange {
-            start: (data.len() / 3) as u64,
-            end: (2 * data.len() / 3) as u64,
+            offset: (data.len() / 3) as u64,
+            len: (data.len() / 3) as u64,
         };
         let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, read_range, None).await;
         let mut file_data = Vec::with_capacity(data.len());
@@ -275,9 +285,9 @@ mod test {
             .read_to_end(&mut file_data)
             .await
             .expect("read should be ok");
-        assert_eq!(bytes_read, read_range.len() as usize);
+        assert_eq!(bytes_read, read_range.len as usize);
 
-        let slice = data.slice(read_range.start as usize..read_range.end as usize);
+        let slice = data.slice(read_range.as_range_usize());
         assert_eq!(slice.as_ref(), file_data);
     }
 
@@ -292,10 +302,9 @@ mod test {
 
         // 10 KiB file in the middle of the volume (file offset at 1KiB into the volume)
         let file_start = 1 << 10; // 1 KiB offset
-        let file_size = 10 * (1 << 10); // 10 KiB
         let file_range = ByteRange {
-            start: file_start,
-            end: file_start + file_size,
+            offset: file_start,
+            len: 10 * (1 << 10), // 10 KiB
         };
         let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, file_range, None).await;
 
@@ -332,10 +341,10 @@ mod test {
 
         let volume_chunk_store = Arc::new(ChunkedVolumeStore::new(256, object_store));
 
-        // create a file with a volume range of [100, 600) (size: 500 bytes)
+        // create a file with a volume range of [100, 600)
         let file_range = ByteRange {
-            start: 100,
-            end: 600,
+            offset: 100,
+            len: 500,
         };
         let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, file_range, None).await;
         // seek should be at pos 0
