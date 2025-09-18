@@ -6,6 +6,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// TODO: we duplicate file/dir names as strings in data values and entry keys.
+// have to figure out how to intern somewhere if we want to stop, and probably
+// have to get name: String out of FileAttr.
+//
+// TODO: right now you have to make two calls to "open" a file - a lookup and a
+// read - even though we're doing the same btree walk for both. should we bother
+// returning the location info in lookup?
+//
+// TODO: the double-calls for open is even sillier if you're doing a file walk.
+// should we put Location in the fileattr thing? should we have some public
+// dentry that exposes both metadata and data?
+
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 #[path = "./volume.fbs.rs"]
@@ -19,9 +31,9 @@ use crate::{ByteRange, FileAttr, FileType, Location};
 pub enum VolumeError {
     Invalid { message: Cow<'static, str> },
     NotADirectory,
+    IsADirectory,
     DoesNotExist,
     Exists,
-    IsADirectory,
 }
 
 impl VolumeError {
@@ -32,13 +44,6 @@ impl VolumeError {
     }
 }
 
-// TODO: we duplicate file/dir names as strings in data values and entry keys.
-// have to figure out how to intern somewhere if we want to stop, and probably
-// have to get name: String out of FileAttr.
-//
-// TODO: right now you have to make two calls to "open" a file - a lookup and a
-// read - even though we're doing the same btree walk for both. should we bother
-// returning the location info in lookup?
 #[derive(Debug)]
 pub struct Volume {
     locations: Vec<Location>,
@@ -142,7 +147,13 @@ impl Volume {
         let ino = ino(parent_ino, &name);
         let slot = match self.data.entry(ino) {
             btree_map::Entry::Vacant(slot) => slot,
-            btree_map::Entry::Occupied(_) => return Err(VolumeError::Exists),
+            btree_map::Entry::Occupied(slot) => {
+                return if !slot.get().is_dir() {
+                    Err(VolumeError::NotADirectory)
+                } else {
+                    Err(VolumeError::Exists)
+                };
+            }
         };
 
         // start modifying things
@@ -163,9 +174,51 @@ impl Volume {
         Ok(&entry.attr)
     }
 
+    /// Create a sequence of intermediate directories.
+    ///
+    /// Creation will fail if a file with the same name as an intermediate directory
+    /// already exists or if the passed path was empty.
+    pub fn mkdir_all(
+        &mut self,
+        parent_ino: u64,
+        dir_names: impl IntoIterator<Item = String>,
+    ) -> Result<&FileAttr, VolumeError> {
+        let parent = self.dir_entry(parent_ino)?;
+
+        // this is a little bit gross - we should get the final attr out of
+        // mkdir but lifetime rules mean we have an annoying time holding onto
+        // the returned reference. hack it by just making `dir` an ino and then
+        // doing one final lookup at the end.
+        //
+        // the clone for dir_name when checking EEXIST is a little gross too,
+        // and can probably only get fixed by messing with mkdir's return type.
+        let mut dir = parent.attr.ino;
+        for dir_name in dir_names {
+            dir = match self.mkdir(dir, dir_name.clone()) {
+                Ok(attr) => attr.ino,
+                Err(VolumeError::Exists) => {
+                    self.lookup(dir, &dir_name)
+                        .expect("lookup after eexists")
+                        .ino
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // you gotta pass something man
+        if dir == 0 {
+            return Err(VolumeError::invalid("empty path"));
+        }
+
+        Ok(&self.data.get(&dir).unwrap().attr)
+    }
+
     /// Create a file.
     ///
-    /// If
+    /// If `exclusive` is set and the file already exists, creation will fail
+    /// otherwise any existing file will be overwritten. Creation will always
+    /// fail if the parent directory does not exist or a directory with the same
+    /// name already exists.
     pub fn create(
         &mut self,
         parent_ino: u64,
@@ -230,26 +283,6 @@ impl Volume {
         }
     }
 
-    /// Iterate over the entires in a directory.
-    pub fn readdir(
-        &self,
-        ino: u64,
-    ) -> Result<impl Iterator<Item = (&str, &FileAttr)>, VolumeError> {
-        let dot = self.dir_entry(ino)?;
-        let dotdot = self.dir_entry(dot.parent_ino)?;
-
-        let start: EntryKey = (ino, "").into();
-        let end: EntryKey = (ino + 1, "").into();
-        let dirents = self.dirs.range(start..end).map(|(k, ino)| {
-            let dent = self.data.get(ino).unwrap();
-            (k.0.name.as_ref(), &dent.attr)
-        });
-
-        Ok([(".", &dot.attr), ("..", &dotdot.attr)]
-            .into_iter()
-            .chain(dirents))
-    }
-
     /// Lookup a directory entry by name.
     pub fn lookup(&self, parent_ino: u64, name: &str) -> Option<&FileAttr> {
         let k = EntryKey::from((parent_ino, name));
@@ -259,9 +292,48 @@ impl Volume {
             .map(|dent| &dent.attr)
     }
 
-    /// Return the attributes for a file.
+    /// Obtain information about a file based only on its `ino`.
     pub fn stat(&self, ino: u64) -> Option<&FileAttr> {
         self.data.get(&ino).map(|dent| &dent.attr)
+    }
+
+    /// Iterate over the entires in a directory. Returns an iterator of
+    /// `(filename, attr)` pairs.
+    ///
+    /// Iterator order is not guaranteed to be stable.
+    pub fn readdir<'a>(&'a self, ino: u64) -> Result<ReadDir<'a>, VolumeError> {
+        let _ = self.dir_entry(ino)?;
+
+        let start: EntryKey = (ino, "").into();
+        let end: EntryKey = (ino + 1, "").into();
+        Ok(ReadDir {
+            range: self.dirs.range(start..end),
+            data: &self.data,
+        })
+    }
+
+    /// Walk a subtree starting from a directory. Walks are done in depth-first
+    /// order, but order of items in a directory is not guaranteed to be stable.
+    ///
+    /// Returns an iterator over `(filename, ancestors, attrs)` tuples, where
+    /// `filename` and `attrs` are the same values that would be yielded from
+    /// calling `readdir` on a directory and `ancestors` is a `Vec` of ancestor
+    /// directory names.
+    pub fn walk<'a>(&'a self, ino: u64) -> Result<WalkIter<'a>, VolumeError> {
+        let root_dir = self.dir_entry(ino)?;
+
+        let start: EntryKey = (ino, "").into();
+        let end: EntryKey = (ino + 1, "").into();
+        let root_iter = ReadDir {
+            range: self.dirs.range(start..end),
+            data: &self.data,
+        };
+
+        Ok(WalkIter {
+            volume: self,
+            readdirs: vec![root_iter],
+            ancestors: Vec::new(),
+        })
     }
 
     #[inline]
@@ -296,6 +368,7 @@ impl Volume {
         })
     }
 
+    /// Serialize this volume to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut fbb = FlatBufferBuilder::new();
 
@@ -326,6 +399,8 @@ impl Volume {
         fbb.finished_data().into()
     }
 
+    /// Read a serialized volume. Returns an error if the volume is invalid or
+    /// inconsistent.
     pub fn from_bytes(bs: &[u8]) -> Result<Self, VolumeError> {
         let fb_volume =
             fb::root_as_volume(bs).map_err(|_| VolumeError::invalid("invalid bytes"))?;
@@ -354,6 +429,67 @@ impl Volume {
             data,
             dirs: entries,
         })
+    }
+}
+
+/// The iterator returned from [readdir][Volume::readdir].
+pub struct ReadDir<'a> {
+    data: &'a BTreeMap<u64, Entry>,
+    range: btree_map::Range<'a, EntryKey<'static>, u64>,
+}
+
+impl<'a> Iterator for ReadDir<'a> {
+    type Item = (&'a str, &'a FileAttr);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next().map(|(EntryKey(k), ino)| {
+            let dent = self.data.get(ino).unwrap();
+            (k.name.as_ref(), &dent.attr)
+        })
+    }
+}
+
+/// The iterator returned from [walk][Volume::walk].
+pub struct WalkIter<'a> {
+    volume: &'a Volume,
+
+    // a stack of entry iterators
+    readdirs: Vec<ReadDir<'a>>,
+
+    // the names of all the directories opened to get here
+    ancestors: Vec<&'a str>,
+}
+
+impl<'a> Iterator for WalkIter<'a> {
+    // TODO: it's a big gnarly to be cloning and returning the ancestors path
+    // every time but the lifetime on returning a slice referencing self
+    // is a pain to express.
+    type Item = (&'a str, Vec<&'a str>, &'a FileAttr);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while !self.readdirs.is_empty() {
+            let next = self.readdirs.last_mut().unwrap().next();
+            match next {
+                Some((name, attr)) => {
+                    let ancestors = if attr.is_directory() {
+                        let next = self.volume.readdir(attr.ino).unwrap();
+                        let ancestors = self.ancestors.clone();
+                        self.readdirs.push(next);
+                        self.ancestors.push(name);
+                        ancestors
+                    } else {
+                        self.ancestors.clone()
+                    };
+                    return Some((name, ancestors, attr));
+                }
+                None => {
+                    self.readdirs.pop();
+                    self.ancestors.pop();
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -586,7 +722,7 @@ mod test {
                 .unwrap()
                 .map(|(n, _attr)| n)
                 .collect::<Vec<_>>(),
-            vec![".", "..", "a"],
+            vec!["a"],
         );
         assert_eq!(
             volume
@@ -594,7 +730,7 @@ mod test {
                 .unwrap()
                 .map(|(n, _attr)| n)
                 .collect::<Vec<_>>(),
-            vec![".", "..", "b"],
+            vec!["b"],
         );
         assert_eq!(
             volume
@@ -602,10 +738,87 @@ mod test {
                 .unwrap()
                 .map(|(n, _attr)| n)
                 .collect::<Vec<_>>(),
-            vec![".", "..", "c"],
+            vec!["c"],
         );
 
         assert_read_test_txt(&volume);
+    }
+
+    #[test]
+    fn mkdir_all() {
+        let mut volume = Volume::empty();
+        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        assert!(a.is_directory());
+
+        let b = volume
+            .mkdir_all(0, ["a".to_string(), "b".to_string()])
+            .unwrap()
+            .clone();
+        assert!(b.is_directory());
+        assert_eq!(volume.lookup(a.ino, "b").unwrap().ino, b.ino);
+
+        let c = volume
+            .mkdir_all(0, ["a".to_string(), "b".to_string(), "c".to_string()])
+            .unwrap()
+            .clone();
+        assert!(c.is_directory());
+        assert_eq!(volume.lookup(b.ino, "c").unwrap().ino, c.ino);
+
+        // try a partially overlapping directory
+        volume
+            .mkdir_all(
+                a.ino,
+                ["b".to_string(), "potato".to_string(), "tomato".to_string()],
+            )
+            .unwrap();
+        let potato = volume.lookup(b.ino, "potato").unwrap().clone();
+        let tomato = volume.lookup(potato.ino, "tomato").unwrap().clone();
+        assert!(tomato.is_directory());
+    }
+
+    #[test]
+    fn walk() {
+        let mut volume = Volume::empty();
+        let b = volume
+            .mkdir_all(0, ["a".to_string(), "b".to_string()])
+            .unwrap()
+            .clone();
+        volume
+            .create(
+                b.ino,
+                "c.txt".to_string(),
+                true,
+                Location::Local("foo.txt".into()),
+                (0, 10).into(),
+            )
+            .unwrap();
+
+        let c = volume
+            .mkdir_all(0, ["a".to_string(), "c".to_string(), "e".to_string()])
+            .unwrap()
+            .clone();
+        volume
+            .create(
+                c.ino,
+                "f.txt".to_string(),
+                true,
+                Location::Local("foo.bin".into()),
+                (0, 10).into(),
+            )
+            .unwrap();
+
+        let names: Vec<_> = volume
+            .walk(0)
+            .unwrap()
+            .map(|(name, mut dirs, _)| {
+                dirs.push(name);
+                dirs.join("/")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["a", "a/b", "a/b/c.txt", "a/c", "a/c/e", "a/c/e/f.txt"],
+        )
     }
 
     #[test]

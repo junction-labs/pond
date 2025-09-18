@@ -1,5 +1,7 @@
+#[allow(unused)]
 mod read;
-mod volume;
+
+pub mod volume;
 
 use std::{path::PathBuf, time::SystemTime};
 
@@ -47,4 +49,11 @@ pub enum Location {
 pub struct ByteRange {
     pub offset: u64,
     pub len: u64,
+}
+
+impl From<(u64, u64)> for ByteRange {
+    fn from(val: (u64, u64)) -> Self {
+        let (offset, len) = val;
+        ByteRange { offset, len }
+    }
 }
