@@ -40,8 +40,16 @@ impl FileAttr {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Location {
-    Local(PathBuf),
-    ObjectStorage { bucket: String, key: String },
+    Staged(usize),
+    Local {
+        path: PathBuf,
+        len: usize,
+    },
+    ObjectStorage {
+        bucket: String,
+        key: String,
+        len: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

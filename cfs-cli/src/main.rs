@@ -1,5 +1,6 @@
 use std::{io::Write, path::Path, str::FromStr};
 
+use cfs_core::{Location, volume::Volume};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -11,13 +12,19 @@ struct Args {
 #[derive(Subcommand)]
 enum Cmd {
     /// Lists available volumes, or the version of a specified volume (e.g. cfs://volume-name)
-    List { url: Option<String> },
+    List {
+        url: Option<String>,
+    },
 
     /// *Experimental* - Pack a directory into an volume blob for testing.
     Pack {
         dir: String,
         volume: String,
         data: String,
+    },
+
+    Dump {
+        volume: String,
     },
 }
 
@@ -29,6 +36,7 @@ async fn main() {
     match args.cmd {
         Cmd::List { url } => list(&client, url.as_ref()).await,
         Cmd::Pack { dir, volume, data } => pack(&dir, &volume, &data).unwrap(),
+        Cmd::Dump { volume } => dump(&volume).unwrap(),
     };
 }
 
@@ -60,6 +68,51 @@ async fn list(client: &cfs_client::Client, url: Option<impl AsRef<str>>) {
     }
 }
 
+fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
+    fn location_path(l: &Location) -> String {
+        match l {
+            Location::Staged(i) => format!("staged({i})"),
+            Location::Local { path, .. } => format!("{path}", path = path.display()),
+            Location::ObjectStorage { bucket, key, .. } => format!("s3://{bucket}/{key}"),
+        }
+    }
+
+    let bs = std::fs::read(volume.as_ref()).unwrap();
+    let volume = Volume::from_bytes(&bs).unwrap();
+
+    for (name, path, attrs) in volume.walk(0).unwrap() {
+        let kind;
+        let location;
+        let offset;
+        let len;
+
+        let path = {
+            let mut full_path = path;
+            full_path.push(name);
+            full_path.join("/")
+        };
+        match attrs.kind {
+            cfs_core::FileType::Regular => {
+                kind = "f";
+                let (l, b) = volume.location(attrs.ino).unwrap();
+                location = location_path(l);
+                offset = b.offset;
+                len = b.len;
+            }
+            cfs_core::FileType::Directory => {
+                kind = "d";
+                location = "".to_string();
+                offset = 0;
+                len = 0;
+            }
+            cfs_core::FileType::Symlink => todo!(),
+        }
+        println!("{kind:4} {location:16} {offset:12} {len:8} {path:40}");
+    }
+
+    Ok(())
+}
+
 fn pack(
     dir: impl AsRef<Path>,
     volume: impl AsRef<Path>,
@@ -67,11 +120,12 @@ fn pack(
 ) -> anyhow::Result<()> {
     use cfs_core::volume::Volume;
 
+    let data = data.as_ref().to_path_buf();
     let root: &Path = dir.as_ref();
     let mut data_f = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(data)
+        .open(&data)
         .unwrap();
     let mut volume_f = std::fs::OpenOptions::new()
         .create_new(true)
@@ -81,6 +135,9 @@ fn pack(
 
     let mut volume = Volume::empty();
     let mut cursor = 0u64;
+
+    // create a staging blob
+    let staging = Location::Staged(0);
 
     let walker = walkdir::WalkDir::new(root).min_depth(1);
     for entry in walker {
@@ -126,10 +183,7 @@ fn pack(
                     dir_ino,
                     name.to_string_lossy().to_string(),
                     true,
-                    cfs_core::Location::ObjectStorage {
-                        bucket: "fake".to_string(),
-                        key: "fake".to_string(),
-                    },
+                    staging.clone(),
                     cfs_core::ByteRange {
                         offset: cursor,
                         len: n,
@@ -141,7 +195,17 @@ fn pack(
         }
     }
 
-    volume_f.write_all(&volume.to_bytes()).unwrap();
+    volume
+        .relocate(
+            &staging,
+            Location::Local {
+                path: data,
+                len: cursor as usize,
+            },
+        )
+        .unwrap();
+
+    volume_f.write_all(&volume.to_bytes().unwrap()).unwrap();
 
     Ok(())
 }

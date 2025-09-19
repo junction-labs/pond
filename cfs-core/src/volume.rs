@@ -29,11 +29,11 @@ use crate::{ByteRange, FileAttr, FileType, Location};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum VolumeError {
-    Invalid { message: Cow<'static, str> },
     NotADirectory,
     IsADirectory,
     DoesNotExist,
     Exists,
+    Invalid { message: Cow<'static, str> },
 }
 
 impl VolumeError {
@@ -44,6 +44,27 @@ impl VolumeError {
     }
 }
 
+/// A Volume holds all of file and directory metadata for a coolfs volume. Volumes
+/// are extremely low-level, and working with a volume requires understanding the
+/// structure of your filesystem.
+///
+/// # Staging
+///
+/// Existing Volumes can be mutated and modified to create a new version of the
+/// same volume. Volumes can be used for metdaddata bookeeping while building
+/// new physical storage by passing a [Staged location][Location] when creating
+/// or updating files.
+///
+/// A staged location allows creating a blob locally, uploading it to object
+/// storage, and then finalizing a volume. It does not help when relocating an
+/// object inside a physical blob.
+///
+/// Because staged locations are effectively dangling pointers, volumes cannot
+/// be serialized while they're being staged.
+//
+// # TODO:
+//
+// - Should we guarantee inodes are stable?
 #[derive(Debug)]
 pub struct Volume {
     locations: Vec<Location>,
@@ -134,6 +155,47 @@ impl Volume {
             data: BTreeMap::new(),
             dirs: BTreeMap::new(),
         }
+    }
+
+    /// Check whether this volume is being staged. Staged volumes contain
+    /// unstable data references and can't be serialized.
+    pub fn is_staged(&self) -> bool {
+        self.locations
+            .iter()
+            .any(|l| matches!(l, Location::Staged(_)))
+    }
+
+    /// Change the phyical location of a data blob.
+    ///
+    /// This is most often used when rewriting a volume to change data locations.
+    ///
+    /// ```no_run
+    /// # use cfs_core::{ByteRange, Location, volume::{Volume, VolumeError}};
+    /// # use std::path::PathBuf;
+    /// # fn doc() -> Result<(), VolumeError> {
+    /// let mut volume = Volume::empty();
+    ///
+    /// volume.create(
+    ///     0,
+    ///     "test.txt".to_string(),
+    ///     true,
+    ///     Location::Staged(0),
+    ///     ByteRange { offset: 0, len: 64 },
+    /// )?;
+    ///
+    /// volume.relocate(&Location::Staged(0), Location::Local {
+    ///   path: PathBuf::from("./test.txt"),
+    ///   len: 64,
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
+        let Some(from) = find_mut_sorted(&mut self.locations, from) else {
+            return Err(VolumeError::invalid("unknown location"));
+        };
+        *from = to;
+        Ok(())
     }
 
     /// Create a new directory.
@@ -369,13 +431,13 @@ impl Volume {
     }
 
     /// Serialize this volume to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, VolumeError> {
         let mut fbb = FlatBufferBuilder::new();
 
         let locations = {
             let mut locations = Vec::with_capacity(self.locations.len());
             for location in &self.locations {
-                locations.push(to_fb_location(&mut fbb, location))
+                locations.push(to_fb_location(&mut fbb, location)?)
             }
             fbb.create_vector(&locations)
         };
@@ -396,7 +458,7 @@ impl Volume {
             },
         );
         fbb.finish(volume, None);
-        fbb.finished_data().into()
+        Ok(fbb.finished_data().into())
     }
 
     /// Read a serialized volume. Returns an error if the volume is invalid or
@@ -499,11 +561,18 @@ fn ino(parent_ino: u64, name: &str) -> u64 {
     hasher.finish()
 }
 
-fn insert_sorted<T: Ord>(vec: &mut Vec<T>, location: T) -> usize {
-    match vec.binary_search(&location) {
+fn find_mut_sorted<'v, T: Ord>(vec: &'v mut Vec<T>, item: &T) -> Option<&'v mut T> {
+    match vec.binary_search(item) {
+        Ok(idx) => vec.get_mut(idx),
+        Err(_) => None,
+    }
+}
+
+fn insert_sorted<T: Ord>(vec: &mut Vec<T>, item: T) -> usize {
+    match vec.binary_search(&item) {
         Ok(idx) => idx,
         Err(idx) => {
-            vec.insert(idx, location);
+            vec.insert(idx, item);
             idx
         }
     }
@@ -636,16 +705,21 @@ impl TryFrom<fb::FileType> for FileType {
 fn to_fb_location<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     location: &Location,
-) -> WIPOffset<fb::LocationWrapper<'a>> {
+) -> Result<WIPOffset<fb::LocationWrapper<'a>>, VolumeError> {
     let union = match location {
-        Location::Local(path_buf) => {
+        Location::Local { path, len } => {
             // FIXME: what do we do about non-utf8 paths?
-            let path = fbb.create_string(path_buf.to_str().unwrap());
-            let location =
-                fb::LocalLocation::create(fbb, &fb::LocalLocationArgs { path: Some(path) });
+            let path = fbb.create_string(path.to_str().unwrap());
+            let location = fb::LocalLocation::create(
+                fbb,
+                &fb::LocalLocationArgs {
+                    path: Some(path),
+                    length: *len as u64,
+                },
+            );
             location.as_union_value()
         }
-        Location::ObjectStorage { bucket, key } => {
+        Location::ObjectStorage { bucket, key, len } => {
             let bucket = fbb.create_shared_string(bucket);
             let key = fbb.create_string(key);
             let location = fb::S3Location::create(
@@ -653,22 +727,31 @@ fn to_fb_location<'a>(
                 &fb::S3LocationArgs {
                     bucket: Some(bucket),
                     key: Some(key),
+                    length: *len as u64,
                 },
             );
             location.as_union_value()
         }
+        _ => {
+            return Err(VolumeError::invalid(
+                "can't serialize a volume with staged data",
+            ));
+        }
     };
 
-    fb::LocationWrapper::create(
+    let location_type = match location {
+        Location::Local { .. } => fb::Location::local,
+        Location::ObjectStorage { .. } => fb::Location::s3,
+        _ => panic!("BUG: unknown location type"),
+    };
+
+    Ok(fb::LocationWrapper::create(
         fbb,
         &fb::LocationWrapperArgs {
             location: Some(union),
-            location_type: match location {
-                Location::Local(_) => fb::Location::local,
-                Location::ObjectStorage { .. } => fb::Location::s3,
-            },
+            location_type,
         },
-    )
+    ))
 }
 
 fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, VolumeError> {
@@ -676,13 +759,21 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
         fb::Location::local => {
             let fb_location = fb_location.location_as_local().unwrap();
             let path = PathBuf::from(fb_location.path());
-            Ok(Location::Local(path))
+            let len = fb_location
+                .length()
+                .try_into()
+                .map_err(|_| VolumeError::invalid("length overflow"))?;
+            Ok(Location::Local { path, len })
         }
         fb::Location::s3 => {
             let fb_location = fb_location.location_as_s_3().unwrap();
             let bucket = fb_location.bucket().to_string();
             let key = fb_location.key().to_string();
-            Ok(Location::ObjectStorage { bucket, key })
+            let len = fb_location
+                .length()
+                .try_into()
+                .map_err(|_| VolumeError::invalid("length overflow"))?;
+            Ok(Location::ObjectStorage { bucket, key, len })
         }
         lt => Err(VolumeError::invalid(format!(
             "unknown location type: code={code} name={name}",
@@ -697,7 +788,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_volume_lookup() {
+    fn lookup() {
         let mut volume = Volume::empty();
         let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
         let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
@@ -708,10 +799,7 @@ mod test {
                 c.ino,
                 "test.txt".to_string(),
                 true,
-                Location::ObjectStorage {
-                    bucket: "test-bucket".to_string(),
-                    key: "test.txt".to_string(),
-                },
+                test_location(),
                 ByteRange { offset: 0, len: 64 },
             )
             .unwrap();
@@ -788,7 +876,7 @@ mod test {
                 b.ino,
                 "c.txt".to_string(),
                 true,
-                Location::Local("foo.txt".into()),
+                test_location(),
                 (0, 10).into(),
             )
             .unwrap();
@@ -802,7 +890,7 @@ mod test {
                 c.ino,
                 "f.txt".to_string(),
                 true,
-                Location::Local("foo.bin".into()),
+                test_location(),
                 (0, 10).into(),
             )
             .unwrap();
@@ -822,7 +910,7 @@ mod test {
     }
 
     #[test]
-    fn test_volume_read_write() {
+    fn volume_to_from_bytes() {
         let mut volume = Volume::empty();
         let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
         let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
@@ -832,15 +920,12 @@ mod test {
                 c.ino,
                 "test.txt".to_string(),
                 true,
-                Location::ObjectStorage {
-                    bucket: "test-bucket".to_string(),
-                    key: "test.txt".to_string(),
-                },
+                test_location(),
                 ByteRange { offset: 0, len: 64 },
             )
             .unwrap();
 
-        let bs = volume.to_bytes();
+        let bs = volume.to_bytes().unwrap();
         assert_read_test_txt(&Volume::from_bytes(&bs).unwrap());
     }
 
@@ -852,13 +937,15 @@ mod test {
 
         assert_eq!(
             volume.location(test_txt.ino).unwrap(),
-            (
-                &Location::ObjectStorage {
-                    bucket: "test-bucket".to_string(),
-                    key: "test.txt".to_string(),
-                },
-                &ByteRange { offset: 0, len: 64 },
-            )
+            (&test_location(), &ByteRange { offset: 0, len: 64 },)
         );
+    }
+
+    fn test_location() -> Location {
+        Location::ObjectStorage {
+            bucket: "test-bucket".to_string(),
+            key: "test-key.txt".to_string(),
+            len: 123,
+        }
     }
 }
