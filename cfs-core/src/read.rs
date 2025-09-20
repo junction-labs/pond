@@ -38,6 +38,7 @@ struct CacheKey {
 /// Abstraction over Volumes in object storage. Volumes are partitioned up into fixed-size chunks.
 /// Read requests (given a volume and byte offset) are served from cache, or fetched from object
 /// storage if not already loaded.
+#[derive(Debug)]
 pub struct ChunkedVolumeStore {
     /// Cache from the chunk described by CacheKey to the future that fetches the data from
     /// object storage. The future returns the underlying bytes for the chunk.

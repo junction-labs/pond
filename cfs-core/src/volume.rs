@@ -27,12 +27,17 @@ mod fb;
 
 use crate::{ByteRange, FileAttr, FileType, Location};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum VolumeError {
+    #[error("not a directory")]
     NotADirectory,
+    #[error("is a directory")]
     IsADirectory,
+    #[error("does not exist")]
     DoesNotExist,
-    Exists,
+    #[error("already exists")]
+    AlreadyExists,
+    #[error("{message}")]
     Invalid { message: Cow<'static, str> },
 }
 
@@ -213,7 +218,7 @@ impl Volume {
                 return if !slot.get().is_dir() {
                     Err(VolumeError::NotADirectory)
                 } else {
-                    Err(VolumeError::Exists)
+                    Err(VolumeError::AlreadyExists)
                 };
             }
         };
@@ -258,7 +263,7 @@ impl Volume {
         for dir_name in dir_names {
             dir = match self.mkdir(dir, dir_name.clone()) {
                 Ok(attr) => attr.ino,
-                Err(VolumeError::Exists) => {
+                Err(VolumeError::AlreadyExists) => {
                     self.lookup(dir, &dir_name)
                         .expect("lookup after eexists")
                         .ino
@@ -298,7 +303,7 @@ impl Volume {
         let slot = self.data.entry(ino);
         if let btree_map::Entry::Occupied(slot) = &slot {
             if exclusive {
-                return Err(VolumeError::Exists);
+                return Err(VolumeError::AlreadyExists);
             }
             if slot.get().is_dir() {
                 return Err(VolumeError::IsADirectory);

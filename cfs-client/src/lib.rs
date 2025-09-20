@@ -1,7 +1,7 @@
-#![allow(unused)]
-
+use cfs_core::{FileAttr, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume};
 use cfs_md::VolumeInfo;
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use std::{pin::Pin, sync::Arc};
+use tokio::io::{AsyncRead, AsyncSeek};
 
 // TODO: We're starting with a Reader/Writer split for modifying files in a volume
 // to make it clear that you're either getting an input or output stream, not doing
@@ -16,6 +16,8 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 // deal with won't enforce that. Since we're hiding object paths we have to figure
 // out what we want to do about other encodings. Path/PathBuf are OsString under the
 // hood which is right if we want to support that.
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("something went wrong")]
@@ -38,31 +40,17 @@ pub enum ErrorKind {
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("not found")]
+    NotFound,
+
+    #[error("volume error: {0}")]
+    Volume(#[from] cfs_core::volume::VolumeError),
+
+    #[error("open error: {0}")]
+    Open(#[from] std::io::Error),
+
     #[error("unknown: {0}")]
     Unknown(Box<dyn std::error::Error + Send + Sync>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum FileType {
-    File,
-    Directory,
-    SymLink,
-}
-
-pub struct DirEntry {}
-
-impl DirEntry {
-    pub fn name(&self) -> &str {
-        unimplemented!()
-    }
-
-    pub fn file_type(&self) -> FileType {
-        unimplemented!()
-    }
-
-    pub fn path(&self) -> &str {
-        unimplemented!()
-    }
 }
 
 /// A CoolFS client that provides access to a cluster and all of the volumes
@@ -78,23 +66,24 @@ impl DirEntry {
 ///
 /// assert_eq!(client.volumes().await.unwrap(), vec!["now_thats_what_i_call_data"]);
 ///
-/// let volume = client
+/// let mounted_client = client
 ///     .mount("now_thats_what_i_call_data", "vol3")
 ///     .await
 ///     .unwrap();
 ///
-/// let reader = volume.read("/data/all_star.hdf5").await.unwrap();
+/// let reader = mounted_client.open(42, 0).await.unwrap();
 /// process_data(reader);
 /// # }
 /// ```
 #[derive(Clone)]
 pub struct Client {
+    /// HTTP Client for metadata
     http: reqwest::Client,
 }
 
 impl Client {
     pub fn new() -> Self {
-        static USER_AGENT: &'static str = concat!("coolfs/", env!("CARGO_PKG_VERSION"),);
+        static USER_AGENT: &str = concat!("coolfs/", env!("CARGO_PKG_VERSION"));
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .build()
@@ -106,7 +95,7 @@ impl Client {
     /// List all available volumes.
     ///
     /// *TODO*: This should return volume metadata.
-    pub async fn volumes(&self) -> Result<Vec<String>, Error> {
+    pub async fn volumes(&self) -> Result<Vec<String>> {
         let resp = self
             .http
             .get("http://localhost:8888/volumes")
@@ -123,7 +112,7 @@ impl Client {
     /// List all versions of a specific volume.
     ///
     /// *TODO*: This should return volume-version metadata.
-    pub async fn versions(&self, volume: &str) -> Result<Vec<String>, Error> {
+    pub async fn versions(&self, volume: &str) -> Result<Vec<String>> {
         let resp = self
             .http
             .get(format!("http://localhost:8888/volumes/{volume}"))
@@ -141,161 +130,83 @@ impl Client {
     /// volume doesn't exist or can't be loaded.
     pub async fn mount(
         &self,
-        volume: impl AsRef<str>,
-        version: impl AsRef<str>,
-    ) -> Result<Volume, Error> {
-        unimplemented!()
-    }
-
-    // TODO: should we have read-only ops here too? ls, cat, etc?
-}
-
-/// An CoolFS volume at a specific version.
-///
-/// Changes to a volume are staged locally, and not written back until
-/// [commit](Self::commit) is called. Writes can be read locally
-pub struct Volume {}
-
-impl Volume {
-    /// List directory contents.
-    pub async fn ls(&self, path: impl AsRef<str>) -> Result<ReadDir, Error> {
-        unimplemented!()
-    }
-
-    /// Open a file for reading.
-    ///
-    /// Directories cannot be opened, use `ls` to list the contents of a directory.
-    pub async fn read(&self, path: impl AsRef<str>) -> Result<Reader, Error> {
-        unimplemented!()
-    }
-
-    /// Open a file for writing.
-    ///
-    /// Opening a file for writing replaces the contents of the file entirely, and
-    /// does not preserve any existing content.
-    pub async fn write(&mut self, path: impl AsRef<str>) -> Result<Writer, Error> {
-        unimplemented!()
-    }
-
-    /// Copy a file into CoolFS from the local filesystem.
-    ///
-    /// This is logically equivalent to opening a writer with `write` and
-    /// calling `tokio::io::copy` to write the bytes into the file but is
-    /// specialized to avoid making an extra copy of the data.
-    pub async fn write_file(
-        &mut self,
-        path: impl AsRef<str>,
-        local_path: impl AsRef<std::path::Path>,
-    ) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    /// Create a directory.
-    pub async fn mkdir(&mut self, path: impl AsRef<str>) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    /// Create a directory and any intermediate directories as required.
-    pub async fn mkdir_all(&mut self, path: impl AsRef<str>) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    /// Remove a directory.
-    ///
-    /// Directories must be empty before being removed.
-    pub async fn rmdir(&mut self, path: impl AsRef<str>) {
-        unimplemented!()
-    }
-
-    /// Check to see if a volume has staged changes that have not yet been comitted.
-    pub async fn has_staged_changes(&self) -> bool {
-        unimplemented!()
-    }
-
-    /// Save all staged writes to the current volume. Returns the generated
-    /// name of the new version once all of the changes have been persisted.
-    pub async fn commit(&mut self) -> Result<String, Error> {
+        _volume: impl AsRef<str>,
+        _version: impl AsRef<str>,
+    ) -> Result<MountedClient> {
         unimplemented!()
     }
 }
 
-pub struct ReadDir;
-
-/// FIXME: should this be an async iterator/stream/etc or is sync okay?
-impl Iterator for ReadDir {
-    type Item = DirEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+impl Default for Client {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-pub struct Reader {}
+pub trait AsyncFileReader: AsyncRead + AsyncSeek {}
+impl<T: AsyncRead + AsyncSeek> AsyncFileReader for T {}
 
-impl AsyncRead for Reader {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
-    }
+pub struct MountedClient {
+    /// HTTP Client for metadata
+    http: reqwest::Client,
+
+    // TODO: this could be multiple volume versions?
+    // so if we have the most recent version, and it isn't compacted yet, then we kind of need a
+    // chained-volume lookup here. this might be as simple as a ptr to another Volume, which we use
+    // as a fallback if current version doesn't have anything.
+    volume: Volume,
+
+    /// Store that handles fetching files from object storage.
+    object_store: Arc<ChunkedVolumeStore>,
 }
 
-impl AsyncSeek for Reader {
-    fn start_seek(
-        self: std::pin::Pin<&mut Self>,
-        position: std::io::SeekFrom,
-    ) -> std::io::Result<()> {
-        todo!()
+impl MountedClient {
+    pub fn getattr(&self, ino: u64) -> Result<&FileAttr> {
+        match self.volume.stat(ino) {
+            Some(attr) => Ok(attr),
+            None => Err(Error {
+                kind: ErrorKind::NotFound,
+            }),
+        }
     }
 
-    fn poll_complete(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<u64>> {
-        todo!()
-    }
-}
-
-pub struct Writer {}
-
-impl AsyncWrite for Writer {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        todo!()
+    pub fn lookup(&self, parent_ino: u64, name: String) -> Result<&FileAttr> {
+        match self.volume.lookup(parent_ino, &name) {
+            Some(attr) => Ok(attr),
+            None => Err(Error {
+                kind: ErrorKind::NotFound,
+            }),
+        }
     }
 
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        todo!()
+    pub async fn readdir(&self, ino: u64, _fh: u64, offset: u64) -> Result<Vec<(&str, &FileAttr)>> {
+        let reader = self.volume.readdir(ino).map_err(Error::from)?;
+        let entries: Vec<_> = reader.into_iter().skip(offset as usize).collect();
+        Ok(entries)
     }
 
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        todo!()
-    }
-}
+    pub async fn open(&self, ino: u64, _flags: i32) -> Result<Pin<Box<dyn AsyncFileReader>>> {
+        let (location, byterange) = self.volume.location(ino).ok_or(Error {
+            kind: ErrorKind::NotFound,
+        })?;
 
-impl AsyncSeek for Writer {
-    fn start_seek(
-        self: std::pin::Pin<&mut Self>,
-        position: std::io::SeekFrom,
-    ) -> std::io::Result<()> {
-        todo!()
-    }
+        let file: Pin<Box<dyn AsyncFileReader>> = match location {
+            cfs_core::Location::Local { path, .. } => {
+                let file = tokio::fs::File::open(path).await.map_err(Error::from)?;
+                Box::pin(file)
+            }
+            cfs_core::Location::ObjectStorage {
+                bucket: _bucket,
+                key,
+                ..
+            } => {
+                let file =
+                    VolumeFile::new(self.object_store.clone(), key.clone(), *byterange, None).await;
+                Box::pin(file)
+            }
+            cfs_core::Location::Staged(i) => unimplemented!(),
+        };
 
-    fn poll_complete(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<u64>> {
-        todo!()
+        Ok(file)
     }
 }

@@ -10,5 +10,5 @@ cfs-core.workspace = true
 cfs-md.workspace = true
 
 reqwest.workspace = true
-thiserror = "2.0.16"
+thiserror.workspace = true
 tokio.workspace = true
