@@ -1,9 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 
-use cfs_client::MountedClient;
+use cfs_client::{AsyncFileReader, MountedClient};
 use cfs_core::volume::Volume;
 
 use clap::Parser;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[derive(Parser)]
 struct Args {
@@ -27,7 +28,7 @@ fn main() {
 
     let volume = MountedClient::new(volume);
 
-    let cfs = Cfs { volume };
+    let cfs = Cfs::new(volume);
 
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
@@ -50,6 +51,35 @@ fn main() {
 
 struct Cfs {
     volume: MountedClient,
+    runtime: tokio::runtime::Runtime,
+    next_fh: u64,
+    fhs: HashMap<u64, Pin<Box<dyn AsyncFileReader>>>,
+}
+
+impl Cfs {
+    fn new(volume: MountedClient) -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap();
+
+        Self {
+            volume,
+            runtime,
+            next_fh: 1,
+            fhs: Default::default(),
+        }
+    }
+
+    fn create_fh(&mut self, reader: Pin<Box<dyn AsyncFileReader>>) -> u64 {
+        // FIXME: we should check for available filehandles instead of
+        // trying to just limit this with a counter or wrapper or whatever.
+        let fh = self.next_fh;
+        self.next_fh = self.next_fh.checked_add(1).expect("filehandle overflow");
+        self.fhs.insert(fh, reader);
+        fh
+    }
 }
 
 impl fuser::Filesystem for Cfs {
@@ -123,6 +153,54 @@ impl fuser::Filesystem for Cfs {
             }
         }
         reply.ok();
+    }
+
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        eprintln!("open({ino}, {_flags:#0x?})");
+
+        let Ok(reader) = self.runtime.block_on(self.volume.open(ino.into())) else {
+            // TODO: actually check error
+            reply.error(libc::EIO);
+            return;
+        };
+
+        let fh = dbg!(self.create_fh(reader));
+        reply.opened(fh, 0);
+    }
+
+    fn read(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        eprintln!("read({_ino}, {fh}, {offset}, {size}, {_flags:#0x?})");
+        let Some(reader) = self.fhs.get_mut(&fh) else {
+            reply.error(libc::EBADF);
+            return;
+        };
+
+        // TODO: FUSE_READ specifies offset as uint64_t in current versions,
+        // which makes it weird that it's an i64 here. cast it away for now.
+        let offset = offset as u64;
+        if offset > 0 {
+            if let Err(_e) = self.runtime.block_on(reader.seek(SeekFrom::Start(offset))) {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        // TODO: re-use a scratch buffer instead of allocating here
+        let mut buf = vec![0u8; size as usize];
+        match self.runtime.block_on(reader.read(&mut buf)) {
+            Ok(n) => reply.data(&buf[..n]),
+            Err(_) => reply.error(libc::EIO),
+        }
     }
 }
 

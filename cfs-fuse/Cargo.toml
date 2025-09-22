@@ -12,3 +12,4 @@ cfs-core.workspace = true
 clap = {workspace = true, features = ["derive"]}
 fuser = { workspace = true, default_features = false, features = []}
 libc.workspace = true
+tokio.workspace = true

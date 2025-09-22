@@ -282,6 +282,7 @@ dependencies = [
  "clap",
  "fuser",
  "libc",
+ "tokio",
 ]
 
 [[package]]
