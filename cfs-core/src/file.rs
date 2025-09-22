@@ -35,9 +35,14 @@ pub struct VolumeFile {
 
     /// Handle into our chunked object store cache.
     volume_chunk_store: Arc<ChunkedVolumeStore>,
+
+    /// Number of errors encountered while trying to read this chunk.
+    num_read_errors: u8,
 }
 
 impl VolumeFile {
+    const READ_ERROR_THRESHOLD: u8 = 3;
+
     pub async fn new(
         mut volume_chunk_store: Arc<ChunkedVolumeStore>,
         volume: String,
@@ -66,6 +71,7 @@ impl VolumeFile {
             chunk,
             readahead,
             volume_chunk_store,
+            num_read_errors: 0,
         }
     }
 
@@ -121,11 +127,15 @@ impl AsyncRead for VolumeFile {
         }
 
         let mut_inner = self.get_mut();
+
         // chunk is a shared Future, it's cheap to clone. we need to clone since we may do
         // a partial read of the chunk.
-        match mut_inner.chunk.clone().poll_unpin(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(bytes) => {
+        let Poll::Ready(result) = mut_inner.chunk.clone().poll_unpin(cx) else {
+            return Poll::Pending;
+        };
+
+        match result {
+            Ok(bytes) => {
                 let buf_capacity = buf.remaining();
                 if buf_capacity as u64 >= mut_inner.chunk_read_range.len {
                     // there's enough space in the buffer to read the whole chunk. push it into buf
@@ -146,6 +156,24 @@ impl AsyncRead for VolumeFile {
                     mut_inner.chunk_read_range.advance(buf_capacity as u64);
 
                     Poll::Ready(Ok(()))
+                }
+            }
+            Err(e) if mut_inner.num_read_errors >= Self::READ_ERROR_THRESHOLD => {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    format!(
+                        "failed to seek to file pos {} (pos {} in volume): {e}",
+                        mut_inner.relative_read_cursor(),
+                        mut_inner.volume_read_cursor
+                    ),
+                )))
+            }
+            Err(_) => {
+                mut_inner.num_read_errors += 1;
+                let mut pinned = std::pin::pin!(mut_inner);
+                match pinned.as_mut().start_seek(SeekFrom::Current(0)) {
+                    Ok(()) => Poll::Pending,
+                    Err(e) => Poll::Ready(Err(e)),
                 }
             }
         }
@@ -207,11 +235,33 @@ impl AsyncSeek for VolumeFile {
         }
 
         let mut_inner = self.get_mut();
+
         // chunk is a shared Future, it's cheap to clone. we're cloning it since we still
         // want to be able to await it later on.
-        match mut_inner.chunk.clone().poll_unpin(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(_) => Poll::Ready(Ok(mut_inner.relative_read_cursor())),
+        let Poll::Ready(result) = mut_inner.chunk.clone().poll_unpin(cx) else {
+            return Poll::Pending;
+        };
+
+        match result {
+            Ok(_) => Poll::Ready(Ok(mut_inner.relative_read_cursor())),
+            Err(e) if mut_inner.num_read_errors >= Self::READ_ERROR_THRESHOLD => {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    format!(
+                        "failed to seek to file pos {} (pos {} in volume): {e}",
+                        mut_inner.relative_read_cursor(),
+                        mut_inner.volume_read_cursor
+                    ),
+                )))
+            }
+            Err(_) => {
+                mut_inner.num_read_errors += 1;
+                let mut pinned = std::pin::pin!(mut_inner);
+                match pinned.as_mut().start_seek(SeekFrom::Current(0)) {
+                    Ok(()) => Poll::Pending,
+                    Err(e) => Poll::Ready(Err(e)),
+                }
+            }
         }
     }
 }

@@ -9,7 +9,16 @@ use object_store::{ObjectStore, path::Path};
 use std::sync::Arc;
 
 /// A boxed future that resolves to bytes.
-pub(crate) type BytesFuture = Shared<BoxFuture<'static, Bytes>>;
+pub(crate) type BytesFuture = Shared<BoxFuture<'static, Result<Bytes, ReadError>>>;
+
+#[derive(thiserror::Error, Debug, Clone)]
+pub(crate) enum ReadError {
+    #[error("generic error: {0}")]
+    Generic(String),
+    // TODO: take a look at object_store::Error and see how we can map it ourselves. unfortunately
+    // object_store::Error doesn't impl Clone so we cannot use #[from] <Error> ... sad
+    // but we do need more than just a Genreic error here lol
+}
 
 #[derive(Debug, Clone)]
 pub struct ReadAheadPolicy {
@@ -68,7 +77,7 @@ impl ChunkedVolumeStore {
     /// pre-fetch chunks according to the readahead policy.
     ///
     /// ChunkedVolumeStore::get(...) is thread-safe as the underlying cache is DashMap.
-    pub fn get(
+    pub(crate) fn get(
         self: &mut Arc<Self>,
         volume: String,
         offset: u64,
@@ -82,6 +91,7 @@ impl ChunkedVolumeStore {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let chunk_future = chunk_from_object_store(
                     self.object_store.clone(),
+                    self.clone(),
                     entry.key().volume.clone(),
                     entry.key().range,
                 )
@@ -104,6 +114,11 @@ impl ChunkedVolumeStore {
         (key.range, bytes_future)
     }
 
+    pub(crate) fn remove(self: &mut Arc<Self>, volume: String, offset: u64) {
+        let key = self.cache_key(volume, offset);
+        self.cache.remove(&key);
+    }
+
     /// Perform read-aheads based on the given ReadAheadPolicy. Ensures that the chunks that cover
     /// the byte range starting at offset until offset+readahead are loaded into cache from object
     /// storage.
@@ -119,6 +134,7 @@ impl ChunkedVolumeStore {
             if let dashmap::mapref::entry::Entry::Vacant(entry) = self.cache.entry(key) {
                 let chunk_future = chunk_from_object_store(
                     self.object_store.clone(),
+                    self.clone(),
                     entry.key().volume.clone(),
                     entry.key().range,
                 )
@@ -154,17 +170,26 @@ impl ChunkedVolumeStore {
 }
 
 /// Read a chunk (as specified by the key and byte range) from object storage.
+///
+/// When used in a Shared<Future<_>>, it is guaranteed to run exactly once.
 async fn chunk_from_object_store(
-    store: Arc<dyn ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
+    mut chunk_store: Arc<ChunkedVolumeStore>,
     key: String,
     range: ByteRange,
-) -> Bytes {
-    let path = Path::from(key);
-    // TODO: figure out what happens when the read fails ...
-    store
-        .get_range(&path, range.as_range_u64())
-        .await
-        .expect("what error handling?")
+) -> Result<Bytes, ReadError> {
+    let path = Path::from(key.clone());
+    match object_store.get_range(&path, range.as_range_u64()).await {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => {
+            // we failed to fetch it from object storage, so remove the BytesFuture from the cache.
+            // any concurrent readers that were batched into the same request will get a
+            // ReadError::Transient and will have to call ChunkedVolumeStore::get(..) again.
+            chunk_store.remove(key, range.offset);
+
+            Err(ReadError::Generic(e.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +234,19 @@ mod test {
         assert!(volume_chunk_store.cached(volume.clone(), 279));
         // 280 is the first byte in the chunk after the read-ahead, not cached
         assert!(!volume_chunk_store.cached(volume.clone(), 280));
+    }
+
+    #[tokio::test]
+    async fn test_bad_get_removes_entry() {
+        // empty, so ChunkedVolumeStore::get(..) will get an error
+        let object_store = Arc::new(InMemory::new());
+
+        let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(10, object_store));
+        let (_, result) = volume_chunk_store.get("fake".to_string(), 0, &None);
+
+        // get(..) returns a ReadError and the key+offset is no longer cached.
+        let result = result.await;
+        assert!(matches!(result, Err(ReadError::Generic(..))));
+        assert!(!volume_chunk_store.cached("fake".to_string(), 0));
     }
 }
