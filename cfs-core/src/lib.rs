@@ -14,10 +14,24 @@ pub enum FileType {
     Symlink,
 }
 
+// NOTE:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ino {
+    /// A missing or null ino. May be used to signal that a file is deleted or
+    /// invalid.
+    None,
+
+    /// The root inode of a volume.
     Root,
-    Id(u64),
+
+    /// A reserved inode. Reserved inodes are used by the system when
+    /// integrating with native filesystems.
+    ///
+    /// Reserved inode values are guaranteed to be in the range `[2, 15]`.
+    Reserved(u64),
+
+    /// A stable identifier for a file.
+    Regular(u64),
 }
 
 impl PartialOrd for Ino {
@@ -33,10 +47,19 @@ impl Ord for Ino {
 }
 
 impl Ino {
+    const NONE: u64 = 0;
+    const ROOT: u64 = 1;
+    const MIN_RESERVED: u64 = 2;
+    const MIN_REGULAR: u64 = 32;
+
+    pub const VERSION: Self = Ino::Reserved(2);
+
     pub fn as_u64(&self) -> u64 {
         match self {
-            Ino::Id(n) => *n,
-            Ino::Root => 1u64,
+            Ino::None => Self::NONE,
+            Ino::Root => Self::ROOT,
+            Ino::Reserved(n) => *n,
+            Ino::Regular(n) => *n,
         }
     }
 
@@ -45,6 +68,20 @@ impl Ino {
             .checked_add(n)
             .expect("BUG: ino overflowed u64")
             .into()
+    }
+
+    #[inline]
+    fn is_root(&self) -> bool {
+        matches!(self, Ino::Root)
+    }
+
+    #[inline]
+    pub fn is_regular(&self) -> bool {
+        matches!(self, Ino::Regular(_))
+    }
+
+    fn min_regular() -> Self {
+        Ino::Regular(Self::MIN_REGULAR)
     }
 }
 
@@ -57,8 +94,10 @@ impl From<Ino> for u64 {
 impl From<u64> for Ino {
     fn from(value: u64) -> Self {
         match value {
-            1 => Ino::Root,
-            n => Ino::Id(n),
+            Self::NONE => Ino::None,
+            Self::ROOT => Ino::Root,
+            Self::MIN_RESERVED..Self::MIN_REGULAR => Ino::Reserved(value),
+            n => Ino::Regular(n),
         }
     }
 }
@@ -87,7 +126,7 @@ impl FileAttr {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Location {
     Staged(usize),
     Local {

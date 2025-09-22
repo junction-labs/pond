@@ -2,6 +2,7 @@ use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -69,6 +70,9 @@ impl VolumeError {
 // # TODO: should we guarantee inodes are stable in the docs?
 #[derive(Debug)]
 pub struct Volume {
+    version: u64,
+    version_bytes: Arc<[u8]>,
+
     // the next availble ino. must start at Ino::Root.add(1) for an empty
     // volume.
     next_ino: Ino,
@@ -109,6 +113,7 @@ enum EntryData {
         location_idx: usize,
         byte_range: ByteRange,
     },
+    Dynamic,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,30 +154,63 @@ where
 
 #[allow(unused)]
 impl Volume {
-    const ROOT: Entry = Entry {
-        name: Cow::Borrowed("/"),
-        parent: Ino::Root,
-        attr: FileAttr {
-            ino: Ino::Root,
-            size: 0,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            kind: FileType::Directory,
-        },
-        data: EntryData::Directory,
-    };
-
     /// Create a new empty volume.
     pub fn empty() -> Self {
         let mut data = BTreeMap::new();
-        data.insert(Self::ROOT.attr.ino, Self::ROOT);
+        let mut dirs = BTreeMap::new();
+        for entry in Self::reserved_entries() {
+            if !entry.attr.ino.is_root() {
+                let dir_key = (Ino::Root, entry.name.to_string()).into();
+                dirs.insert(dir_key, entry.attr.ino);
+            }
+            data.insert(entry.attr.ino, entry);
+        }
 
         Self {
-            next_ino: Ino::Root.add(1),
+            version: 0xBEEF,
+            version_bytes: Arc::from(format!("{:#x}", 0xBEEF).into_bytes().as_slice()),
+            next_ino: Ino::min_regular(),
             locations: vec![],
             data,
-            dirs: BTreeMap::new(),
+            dirs,
         }
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn version_data(&self) -> Arc<[u8]> {
+        self.version_bytes.clone()
+    }
+
+    const fn reserved_entries() -> [Entry; 2] {
+        [
+            Entry {
+                name: Cow::Borrowed("/"),
+                parent: Ino::Root,
+                attr: FileAttr {
+                    ino: Ino::Root,
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Directory,
+                },
+                data: EntryData::Directory,
+            },
+            Entry {
+                name: Cow::Borrowed(".version"),
+                parent: Ino::Root,
+                attr: FileAttr {
+                    ino: Ino::Reserved(2),
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Regular,
+                },
+                data: EntryData::Dynamic,
+            },
+        ]
     }
 
     /// Check whether this volume is being staged. Staged volumes contain
@@ -374,7 +412,7 @@ impl Volume {
     }
 
     /// Obtain information about a file based only on its `ino`.
-    pub fn stat(&self, ino: u64) -> Option<&FileAttr> {
+    pub fn stat(&self, ino: Ino) -> Option<&FileAttr> {
         self.data.get(&ino.into()).map(|dent| &dent.attr)
     }
 
@@ -425,11 +463,9 @@ impl Volume {
     /// Get a file's physical location for opening and reading.
     ///
     /// Attempting to get the physical location of a directory or a symlink
-    /// returns and error.
+    /// returns an error.
     pub fn location(&self, ino: Ino) -> Option<(&Location, &ByteRange)> {
         self.data.get(&ino).and_then(|entry| match &entry.data {
-            // directories have no location
-            EntryData::Directory => None,
             // files need to map to blob list
             EntryData::File {
                 location_idx,
@@ -438,6 +474,8 @@ impl Volume {
                 let location = self.locations.get(*location_idx)?;
                 Some((location, byte_range))
             }
+            // no other file type has a location
+            _ => None,
         })
     }
 
@@ -454,7 +492,10 @@ impl Volume {
         };
         let entries = {
             let mut dir_entries = Vec::with_capacity(self.data.len());
-            for entry in self.data.values() {
+            for (ino, entry) in &self.data {
+                if !ino.is_regular() {
+                    continue;
+                }
                 dir_entries.push(to_fb_entry(&mut fbb, entry));
             }
             fbb.create_vector(&dir_entries)
@@ -492,29 +533,26 @@ impl Volume {
             return Err(VolumeError::invalid("no entries"));
         }
 
-        let mut data = BTreeMap::new();
-        let mut entries = BTreeMap::new();
+        // let mut data = BTreeMap::new();
+        // let mut entries = BTreeMap::new();
         let mut max_ino = Ino::Root;
+        let mut volume = Self::empty();
 
+        // set the locations
+        volume.locations = locations;
+
+        // walk the serialized entries and insert both the entries
+        // and their dir index entry
         for entry in fb_volume.entries().iter() {
             let parent_ino = entry.parent_ino().into();
-
-            let k = (parent_ino, entry.name().to_string()).into();
+            let dir_key = (parent_ino, entry.name().to_string()).into();
             let entry = from_fb_entry(&entry)?;
-
             max_ino = max_ino.max(entry.attr.ino);
-            if entry.attr.ino != Self::ROOT.attr.ino {
-                entries.insert(k, entry.attr.ino);
-            }
-            data.insert(entry.attr.ino, entry);
+            volume.dirs.insert(dir_key, entry.attr.ino);
+            volume.data.insert(entry.attr.ino, entry);
         }
 
-        Ok(Self {
-            next_ino: max_ino.add(1),
-            locations,
-            data,
-            dirs: entries,
-        })
+        Ok(volume)
     }
 }
 
@@ -871,13 +909,13 @@ mod test {
             )
             .unwrap();
 
-        assert_eq!(
+        // the root directory has some special files. ignore them.
+        assert!(
             volume
                 .readdir(Ino::Root)
                 .unwrap()
-                .map(|(n, _attr)| n)
-                .collect::<Vec<_>>(),
-            vec!["a"],
+                .find(|(name, attr)| *name == "a" && attr.is_directory())
+                .is_some()
         );
         assert_eq!(
             volume
@@ -936,16 +974,25 @@ mod test {
 
     #[test]
     fn walk() {
+        fn all_paths(volume: &Volume) -> Vec<String> {
+            volume
+                .walk(Ino::Root)
+                .unwrap()
+                .filter_map(|(name, mut dirs, attr)| {
+                    // skip any file at the root of the directory with size
+                    // zero. those are special files
+                    if dirs.is_empty() && attr.is_file() && attr.size == 0 {
+                        None
+                    } else {
+                        dirs.push(name);
+                        Some(dirs.join("/"))
+                    }
+                })
+                .collect()
+        }
+
         let mut volume = Volume::empty();
-        let names: Vec<_> = volume
-            .walk(Ino::Root)
-            .unwrap()
-            .map(|(name, mut dirs, _)| {
-                dirs.push(name);
-                dirs.join("/")
-            })
-            .collect();
-        assert!(names.is_empty());
+        assert!(all_paths(&volume).is_empty());
 
         let b = volume
             .mkdir_all(Ino::Root, ["a".to_string(), "b".to_string()])
@@ -978,16 +1025,8 @@ mod test {
             )
             .unwrap();
 
-        let names: Vec<_> = volume
-            .walk(Ino::Root)
-            .unwrap()
-            .map(|(name, mut dirs, _)| {
-                dirs.push(name);
-                dirs.join("/")
-            })
-            .collect();
         assert_eq!(
-            names,
+            all_paths(&volume),
             vec!["a", "a/b", "a/b/c.txt", "a/c", "a/c/e", "a/c/e/f.txt"],
         )
     }

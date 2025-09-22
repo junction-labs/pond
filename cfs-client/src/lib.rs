@@ -1,4 +1,6 @@
-use cfs_core::{FileAttr, Ino, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume};
+use cfs_core::{
+    FileAttr, Ino, Location, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume,
+};
 use cfs_md::VolumeInfo;
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -131,9 +133,6 @@ pub trait AsyncFileReader: AsyncRead + AsyncSeek {}
 impl<T: AsyncRead + AsyncSeek> AsyncFileReader for T {}
 
 pub struct MountedClient {
-    /// HTTP Client for metadata
-    http: reqwest::Client,
-
     // TODO: this could be multiple volume versions?
     // so if we have the most recent version, and it isn't compacted yet, then we kind of need a
     // chained-volume lookup here. this might be as simple as a ptr to another Volume, which we use
@@ -145,13 +144,10 @@ pub struct MountedClient {
 
 impl MountedClient {
     pub fn new(volume: Volume) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            volume,
-        }
+        Self { volume }
     }
 
-    pub fn getattr(&self, ino: u64) -> Result<&FileAttr> {
+    pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
         match self.volume.stat(ino) {
             Some(attr) => Ok(attr),
             None => Err(Error {
@@ -169,6 +165,11 @@ impl MountedClient {
     }
 
     pub async fn open(&self, ino: Ino) -> Result<Pin<Box<dyn AsyncFileReader>>> {
+        if let Ino::VERSION = ino {
+            let reader = Box::pin(std::io::Cursor::new(self.volume.version_data()));
+            return Ok(reader);
+        }
+
         let (location, byte_range) = self.volume.location(ino).ok_or(Error {
             kind: ErrorKind::NotFound,
         })?;

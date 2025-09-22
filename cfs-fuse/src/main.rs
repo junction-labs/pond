@@ -1,7 +1,13 @@
-use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
+use std::{
+    collections::HashMap,
+    io::{self, SeekFrom},
+    path::PathBuf,
+    pin::Pin,
+    time::Duration,
+};
 
 use cfs_client::{AsyncFileReader, MountedClient};
-use cfs_core::volume::Volume;
+use cfs_core::{Ino, volume::Volume};
 
 use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -100,6 +106,7 @@ impl fuser::Filesystem for Cfs {
         };
         let attr = match self.volume.lookup(parent.into(), name) {
             Ok(Some(attr)) => attr,
+            // nope
             Ok(None) => {
                 reply.error(libc::ENOENT);
                 return;
@@ -121,7 +128,7 @@ impl fuser::Filesystem for Cfs {
         reply: fuser::ReplyAttr,
     ) {
         eprintln!("getattr({ino}, {fh})", fh = _fh.unwrap_or_default());
-        let Ok(attr) = self.volume.getattr(ino) else {
+        let Ok(attr) = self.volume.getattr(ino.into()) else {
             reply.error(libc::ENOENT);
             return;
         };
@@ -159,13 +166,22 @@ impl fuser::Filesystem for Cfs {
         eprintln!("open({ino}, {_flags:#0x?})");
 
         let Ok(reader) = self.runtime.block_on(self.volume.open(ino.into())) else {
-            // TODO: actually check error
             reply.error(libc::EIO);
             return;
         };
+        let fh = self.create_fh(reader);
 
-        let fh = dbg!(self.create_fh(reader));
-        reply.opened(fh, 0);
+        let mut flags = 0;
+        // all special filehandles should set FOPEN_DIRECT_IO to bypass page
+        // cache both to keep values updating and to force the kernel to read
+        // a file even if we report it as length zero.
+        //
+        // https://www.kernel.org/doc/html/next/filesystems/fuse/fuse-io.html
+        if !Ino::from(ino).is_regular() {
+            flags |= fuser::consts::FOPEN_DIRECT_IO;
+        }
+
+        reply.opened(fh, flags);
     }
 
     fn read(
