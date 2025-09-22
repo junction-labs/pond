@@ -1,7 +1,6 @@
 use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
-    hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +24,7 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 #[rustfmt::skip]
 mod fb;
 
-use crate::{ByteRange, FileAttr, FileType, Location};
+use crate::{ByteRange, FileAttr, FileType, Ino, Location};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum VolumeError {
@@ -67,23 +66,33 @@ impl VolumeError {
 /// Because staged locations are effectively dangling pointers, volumes cannot
 /// be serialized while they're being staged.
 //
-// # TODO:
-//
-// - Should we guarantee inodes are stable?
+// # TODO: should we guarantee inodes are stable in the docs?
 #[derive(Debug)]
 pub struct Volume {
+    // the next availble ino. must start at Ino::Root.add(1) for an empty
+    // volume.
+    next_ino: Ino,
+
+    // interned list of locations that hold data blobs. this list must
+    // remain in a stable order. each Entry contains indexes into this
+    // vec, and re-ordering it invalidates those indexes.
     locations: Vec<Location>,
-    // ino -> location key
-    data: BTreeMap<u64, Entry>,
-    // (parent, name) -> ino
-    dirs: BTreeMap<EntryKey<'static>, u64>,
+
+    // Ino -> Entry
+    data: BTreeMap<Ino, Entry>,
+
+    // (Parent, Name) -> Ino
+    //
+    // a secondary index that represents directory entires. can be reconstructed
+    // from the parent Ino listed in Entry.
+    dirs: BTreeMap<EntryKey<'static>, Ino>,
 }
 
 #[derive(Debug, Clone)]
 struct Entry {
     name: Cow<'static, str>,
     attr: FileAttr,
-    parent_ino: u64,
+    parent: Ino,
     data: EntryData,
 }
 
@@ -104,15 +113,15 @@ enum EntryData {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKeyRef<'a> {
-    ino: u64,
+    ino: Ino,
     name: Cow<'a, str>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKey<'a>(EntryKeyRef<'a>);
 
-impl<'a> From<(u64, &'a str)> for EntryKey<'a> {
-    fn from((ino, name): (u64, &'a str)) -> Self {
+impl<'a> From<(Ino, &'a str)> for EntryKey<'a> {
+    fn from((ino, name): (Ino, &'a str)) -> Self {
         EntryKey(EntryKeyRef {
             ino,
             name: name.into(),
@@ -120,8 +129,8 @@ impl<'a> From<(u64, &'a str)> for EntryKey<'a> {
     }
 }
 
-impl From<(u64, String)> for EntryKey<'static> {
-    fn from((ino, name): (u64, String)) -> Self {
+impl From<(Ino, String)> for EntryKey<'static> {
+    fn from((ino, name): (Ino, String)) -> Self {
         EntryKey(EntryKeyRef {
             ino,
             name: name.into(),
@@ -142,9 +151,9 @@ where
 impl Volume {
     const ROOT: Entry = Entry {
         name: Cow::Borrowed("/"),
-        parent_ino: 0,
+        parent: Ino::Root,
         attr: FileAttr {
-            ino: 0,
+            ino: Ino::Root,
             size: 0,
             mtime: UNIX_EPOCH,
             ctime: UNIX_EPOCH,
@@ -155,9 +164,13 @@ impl Volume {
 
     /// Create a new empty volume.
     pub fn empty() -> Self {
+        let mut data = BTreeMap::new();
+        data.insert(Self::ROOT.attr.ino, Self::ROOT);
+
         Self {
+            next_ino: Ino::Root.add(1),
             locations: vec![],
-            data: BTreeMap::new(),
+            data,
             dirs: BTreeMap::new(),
         }
     }
@@ -175,13 +188,13 @@ impl Volume {
     /// This is most often used when rewriting a volume to change data locations.
     ///
     /// ```no_run
-    /// # use cfs_core::{ByteRange, Location, volume::{Volume, VolumeError}};
+    /// # use cfs_core::{ByteRange, Ino, Location, volume::{Volume, VolumeError}};
     /// # use std::path::PathBuf;
     /// # fn doc() -> Result<(), VolumeError> {
     /// let mut volume = Volume::empty();
     ///
     /// volume.create(
-    ///     0,
+    ///     Ino::Root,
     ///     "test.txt".to_string(),
     ///     true,
     ///     Location::Staged(0),
@@ -196,7 +209,7 @@ impl Volume {
     /// # }
     /// ```
     pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
-        let Some(from) = find_mut_sorted(&mut self.locations, from) else {
+        let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
             return Err(VolumeError::invalid("unknown location"));
         };
         *from = to;
@@ -207,26 +220,25 @@ impl Volume {
     ///
     /// Returns an error if the parent directory does not exist, or if it
     /// already contains a file or directory with that name.
-    pub fn mkdir(&mut self, parent_ino: u64, name: String) -> Result<&FileAttr, VolumeError> {
+    pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr, VolumeError> {
         // validate that it's okay to create the directory before any state is
         // modified - don't want to undo anything if we can help it
-        let _ = self.dir_entry(parent_ino)?;
-        let ino = ino(parent_ino, &name);
-        let slot = match self.data.entry(ino) {
-            btree_map::Entry::Vacant(slot) => slot,
-            btree_map::Entry::Occupied(slot) => {
-                return if !slot.get().is_dir() {
-                    Err(VolumeError::NotADirectory)
-                } else {
-                    Err(VolumeError::AlreadyExists)
-                };
-            }
-        };
+        //
+        // lookup checks parent is a directory.
+        let _ = self.dir_entry(parent)?;
+        if self.lookup_unchecked(parent, &name).is_some() {
+            return Err(VolumeError::AlreadyExists);
+        }
 
         // start modifying things
+        let ino = self.next_ino();
+        let slot = match self.data.entry(ino) {
+            btree_map::Entry::Vacant(slot) => slot,
+            btree_map::Entry::Occupied(slot) => unreachable!("BUG: inode reused"),
+        };
         let new_entry = Entry {
             name: name.clone().into(),
-            parent_ino,
+            parent,
             attr: FileAttr {
                 ino,
                 size: 0,
@@ -237,7 +249,7 @@ impl Volume {
             data: EntryData::Directory,
         };
         let entry = slot.insert(new_entry);
-        self.dirs.insert((parent_ino, name).into(), ino);
+        self.dirs.insert(EntryKey::from((parent, name)), ino);
         Ok(&entry.attr)
     }
 
@@ -247,10 +259,10 @@ impl Volume {
     /// already exists or if the passed path was empty.
     pub fn mkdir_all(
         &mut self,
-        parent_ino: u64,
+        parent: Ino,
         dir_names: impl IntoIterator<Item = String>,
     ) -> Result<&FileAttr, VolumeError> {
-        let parent = self.dir_entry(parent_ino)?;
+        let parent = self.dir_entry(parent)?;
 
         // this is a little bit gross - we should get the final attr out of
         // mkdir but lifetime rules mean we have an annoying time holding onto
@@ -260,12 +272,14 @@ impl Volume {
         // the clone for dir_name when checking EEXIST is a little gross too,
         // and can probably only get fixed by messing with mkdir's return type.
         let mut dir = parent.attr.ino;
+        let mut depth = 0;
         for dir_name in dir_names {
+            depth += 1;
             dir = match self.mkdir(dir, dir_name.clone()) {
                 Ok(attr) => attr.ino,
                 Err(VolumeError::AlreadyExists) => {
-                    self.lookup(dir, &dir_name)
-                        .expect("lookup after eexists")
+                    self.lookup_unchecked(dir, &dir_name)
+                        .expect("BUG: lookup failed after exists error")
                         .ino
                 }
                 Err(e) => return Err(e),
@@ -273,10 +287,9 @@ impl Volume {
         }
 
         // you gotta pass something man
-        if dir == 0 {
+        if depth == 0 {
             return Err(VolumeError::invalid("empty path"));
         }
-
         Ok(&self.data.get(&dir).unwrap().attr)
     }
 
@@ -288,7 +301,7 @@ impl Volume {
     /// name already exists.
     pub fn create(
         &mut self,
-        parent_ino: u64,
+        parent: Ino,
         name: String,
         exclusive: bool,
         location: Location,
@@ -297,24 +310,21 @@ impl Volume {
         // validate that the parent directory exists and we're allowed to
         // create this file (permissions, O_EXCL, etc) before modifying
         // any state
-        let _ = self.dir_entry(parent_ino)?;
-
-        let ino = ino(parent_ino, &name);
-        let slot = self.data.entry(ino);
-        if let btree_map::Entry::Occupied(slot) = &slot {
-            if exclusive {
-                return Err(VolumeError::AlreadyExists);
-            }
-            if slot.get().is_dir() {
-                return Err(VolumeError::IsADirectory);
-            }
+        let _ = self.dir_entry(parent)?;
+        match self.lookup_unchecked(parent, &name) {
+            Some(e) if exclusive => return Err(VolumeError::AlreadyExists),
+            Some(e) if e.is_directory() => return Err(VolumeError::IsADirectory),
+            _ => (), // ok!
         }
 
         // verification is okay, start modifying things
-        let location_idx = insert_sorted(&mut self.locations, location);
+        let ino = self.next_ino();
+        let slot = self.data.entry(ino);
+
+        let location_idx = insert_unique(&mut self.locations, location);
         let new_entry = Entry {
             name: name.clone().into(),
-            parent_ino,
+            parent,
             attr: FileAttr {
                 ino,
                 size: byte_range.len,
@@ -336,23 +346,27 @@ impl Volume {
                 entry
             }
         };
-        self.dirs.insert((parent_ino, name).into(), ino);
+        self.dirs.insert((parent, name).into(), ino);
         Ok(&entry.attr)
     }
 
-    fn insert_location(&mut self, location: Location) -> usize {
-        match self.locations.binary_search(&location) {
-            Ok(idx) => idx,
-            Err(idx) => {
-                self.locations.insert(idx, location);
-                idx
-            }
-        }
+    fn next_ino(&mut self) -> Ino {
+        let ino = self.next_ino;
+        self.next_ino = self.next_ino.add(1);
+        ino
     }
 
     /// Lookup a directory entry by name.
-    pub fn lookup(&self, parent_ino: u64, name: &str) -> Option<&FileAttr> {
-        let k = EntryKey::from((parent_ino, name));
+    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>, VolumeError> {
+        let _ = self.dir_entry(parent)?;
+
+        Ok(self.lookup_unchecked(parent, name))
+    }
+
+    #[inline]
+    fn lookup_unchecked(&self, parent: Ino, name: &str) -> Option<&FileAttr> {
+        let k = EntryKey::from((parent, name));
+
         self.dirs
             .get(&k)
             .and_then(|ino| self.data.get(ino))
@@ -361,22 +375,16 @@ impl Volume {
 
     /// Obtain information about a file based only on its `ino`.
     pub fn stat(&self, ino: u64) -> Option<&FileAttr> {
-        self.data.get(&ino).map(|dent| &dent.attr)
+        self.data.get(&ino.into()).map(|dent| &dent.attr)
     }
 
     /// Iterate over the entires in a directory. Returns an iterator of
     /// `(filename, attr)` pairs.
     ///
     /// Iterator order is not guaranteed to be stable.
-    pub fn readdir<'a>(&'a self, ino: u64) -> Result<ReadDir<'a>, VolumeError> {
+    pub fn readdir<'a>(&'a self, ino: Ino) -> Result<ReadDir<'a>, VolumeError> {
         let _ = self.dir_entry(ino)?;
-
-        let start: EntryKey = (ino, "").into();
-        let end: EntryKey = (ino + 1, "").into();
-        Ok(ReadDir {
-            range: self.dirs.range(start..end),
-            data: &self.data,
-        })
+        Ok(self.dir_iter(ino))
     }
 
     /// Walk a subtree starting from a directory. Walks are done in depth-first
@@ -386,16 +394,9 @@ impl Volume {
     /// `filename` and `attrs` are the same values that would be yielded from
     /// calling `readdir` on a directory and `ancestors` is a `Vec` of ancestor
     /// directory names.
-    pub fn walk<'a>(&'a self, ino: u64) -> Result<WalkIter<'a>, VolumeError> {
+    pub fn walk<'a>(&'a self, ino: Ino) -> Result<WalkIter<'a>, VolumeError> {
         let root_dir = self.dir_entry(ino)?;
-
-        let start: EntryKey = (ino, "").into();
-        let end: EntryKey = (ino + 1, "").into();
-        let root_iter = ReadDir {
-            range: self.dirs.range(start..end),
-            data: &self.data,
-        };
-
+        let root_iter = self.dir_iter(ino);
         Ok(WalkIter {
             volume: self,
             readdirs: vec![root_iter],
@@ -404,11 +405,7 @@ impl Volume {
     }
 
     #[inline]
-    fn dir_entry(&self, ino: u64) -> Result<&Entry, VolumeError> {
-        if ino == 0 {
-            return Ok(&Self::ROOT);
-        }
-
+    fn dir_entry(&self, ino: Ino) -> Result<&Entry, VolumeError> {
         let entry = self.data.get(&ino).ok_or(VolumeError::DoesNotExist)?;
         if !entry.is_dir() {
             return Err(VolumeError::NotADirectory);
@@ -416,11 +413,20 @@ impl Volume {
         Ok(entry)
     }
 
+    fn dir_iter(&'_ self, ino: Ino) -> ReadDir<'_> {
+        let start: EntryKey = (ino, "").into();
+        let end: EntryKey = (ino.add(1), "").into();
+        ReadDir {
+            range: self.dirs.range(start..end),
+            data: &self.data,
+        }
+    }
+
     /// Get a file's physical location for opening and reading.
     ///
     /// Attempting to get the physical location of a directory or a symlink
     /// returns and error.
-    pub fn location(&self, ino: u64) -> Option<(&Location, &ByteRange)> {
+    pub fn location(&self, ino: Ino) -> Option<(&Location, &ByteRange)> {
         self.data.get(&ino).and_then(|entry| match &entry.data {
             // directories have no location
             EntryData::Directory => None,
@@ -482,16 +488,29 @@ impl Volume {
             .map(from_fb_location)
             .collect::<Result<Vec<_>, _>>()?;
 
+        if fb_volume.entries().is_empty() {
+            return Err(VolumeError::invalid("no entries"));
+        }
+
         let mut data = BTreeMap::new();
         let mut entries = BTreeMap::new();
+        let mut max_ino = Ino::Root;
+
         for entry in fb_volume.entries().iter() {
-            let k = (entry.parent_ino(), entry.name().to_string()).into();
+            let parent_ino = entry.parent_ino().into();
+
+            let k = (parent_ino, entry.name().to_string()).into();
             let entry = from_fb_entry(&entry)?;
-            entries.insert(k, entry.attr.ino);
+
+            max_ino = max_ino.max(entry.attr.ino);
+            if entry.attr.ino != Self::ROOT.attr.ino {
+                entries.insert(k, entry.attr.ino);
+            }
             data.insert(entry.attr.ino, entry);
         }
 
         Ok(Self {
+            next_ino: max_ino.add(1),
             locations,
             data,
             dirs: entries,
@@ -499,10 +518,21 @@ impl Volume {
     }
 }
 
+fn insert_unique<T: std::cmp::PartialEq>(xs: &mut Vec<T>, x: T) -> usize {
+    match xs.iter().position(|e| e == &x) {
+        Some(idx) => idx,
+        None => {
+            let idx = xs.len();
+            xs.push(x);
+            idx
+        }
+    }
+}
+
 /// The iterator returned from [readdir][Volume::readdir].
 pub struct ReadDir<'a> {
-    data: &'a BTreeMap<u64, Entry>,
-    range: btree_map::Range<'a, EntryKey<'static>, u64>,
+    data: &'a BTreeMap<Ino, Entry>,
+    range: btree_map::Range<'a, EntryKey<'static>, Ino>,
 }
 
 impl<'a> Iterator for ReadDir<'a> {
@@ -560,34 +590,11 @@ impl<'a> Iterator for WalkIter<'a> {
     }
 }
 
-fn ino(parent_ino: u64, name: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    (parent_ino, &name).hash(&mut hasher);
-    hasher.finish()
-}
-
-fn find_mut_sorted<'v, T: Ord>(vec: &'v mut Vec<T>, item: &T) -> Option<&'v mut T> {
-    match vec.binary_search(item) {
-        Ok(idx) => vec.get_mut(idx),
-        Err(_) => None,
-    }
-}
-
-fn insert_sorted<T: Ord>(vec: &mut Vec<T>, item: T) -> usize {
-    match vec.binary_search(&item) {
-        Ok(idx) => idx,
-        Err(idx) => {
-            vec.insert(idx, item);
-            idx
-        }
-    }
-}
-
 fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<fb::Entry<'a>> {
     let attrs = fb::FileAttrs::create(
         fbb,
         &fb::FileAttrsArgs {
-            ino: entry.attr.ino,
+            ino: entry.attr.ino.into(),
             size: entry.attr.size,
             mtime: Some(&entry.attr.mtime.into()),
             ctime: Some(&entry.attr.ctime.into()),
@@ -616,7 +623,7 @@ fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<
         fbb,
         &fb::EntryArgs {
             name: Some(name),
-            parent_ino: entry.parent_ino,
+            parent_ino: entry.parent.into(),
             attrs: Some(attrs),
             location_ref,
         },
@@ -629,7 +636,7 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
     let attr = {
         let fb_attr = fb_entry.attrs();
         FileAttr {
-            ino: fb_attr.ino(),
+            ino: fb_attr.ino().into(),
             size: fb_attr.size(),
             mtime: fb_attr.mtime().into(),
             ctime: fb_attr.ctime().into(),
@@ -660,7 +667,7 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
     Ok(Entry {
         name,
         attr,
-        parent_ino,
+        parent: parent_ino.into(),
         data,
     })
 }
@@ -793,9 +800,64 @@ mod test {
     use super::*;
 
     #[test]
+    fn create() {
+        let mut volume = Volume::empty();
+        let f1 = volume
+            .create(
+                Ino::Root,
+                "zzzz".to_string(),
+                true,
+                Location::Local {
+                    path: PathBuf::from("zzzz"),
+                    len: 123,
+                },
+                ByteRange {
+                    offset: 0,
+                    len: 123,
+                },
+            )
+            .unwrap()
+            .clone();
+        // location should match what we just created with
+        let (l1, _) = volume.location(f1.ino).unwrap();
+        assert_eq!(local_path(l1), Some("zzzz"));
+
+        let f2 = volume
+            .create(
+                Ino::Root,
+                "aaaa".to_string(),
+                true,
+                Location::Local {
+                    path: PathBuf::from("aaaa"),
+                    len: 123,
+                },
+                ByteRange {
+                    offset: 0,
+                    len: 123,
+                },
+            )
+            .unwrap()
+            .clone();
+
+        // old locations should be stable
+        let (l1, _) = volume.location(f1.ino).unwrap();
+        assert_eq!(local_path(l1), Some("zzzz"));
+        // location should match what we just created with
+        let (l2, _) = volume.location(f2.ino).unwrap();
+        assert_eq!(local_path(l2), Some("aaaa"));
+    }
+
+    fn local_path(l: &Location) -> Option<&str> {
+        match l {
+            Location::Local { path, .. } => path.as_os_str().to_str(),
+            _ => None,
+        }
+    }
+
+    #[test]
     fn lookup() {
         let mut volume = Volume::empty();
-        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
         let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
         let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
 
@@ -811,7 +873,7 @@ mod test {
 
         assert_eq!(
             volume
-                .readdir(0)
+                .readdir(Ino::Root)
                 .unwrap()
                 .map(|(n, _attr)| n)
                 .collect::<Vec<_>>(),
@@ -840,22 +902,25 @@ mod test {
     #[test]
     fn mkdir_all() {
         let mut volume = Volume::empty();
-        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
         assert!(a.is_directory());
 
         let b = volume
-            .mkdir_all(0, ["a".to_string(), "b".to_string()])
+            .mkdir_all(Ino::Root, ["a".to_string(), "b".to_string()])
             .unwrap()
             .clone();
         assert!(b.is_directory());
-        assert_eq!(volume.lookup(a.ino, "b").unwrap().ino, b.ino);
+        assert_eq!(assert_lookup(&volume, a.ino, "b").ino, b.ino);
 
         let c = volume
-            .mkdir_all(0, ["a".to_string(), "b".to_string(), "c".to_string()])
+            .mkdir_all(
+                Ino::Root,
+                ["a".to_string(), "b".to_string(), "c".to_string()],
+            )
             .unwrap()
             .clone();
         assert!(c.is_directory());
-        assert_eq!(volume.lookup(b.ino, "c").unwrap().ino, c.ino);
+        assert_eq!(assert_lookup(&volume, b.ino, "c").ino, c.ino);
 
         // try a partially overlapping directory
         volume
@@ -864,16 +929,26 @@ mod test {
                 ["b".to_string(), "potato".to_string(), "tomato".to_string()],
             )
             .unwrap();
-        let potato = volume.lookup(b.ino, "potato").unwrap().clone();
-        let tomato = volume.lookup(potato.ino, "tomato").unwrap().clone();
+        let potato = assert_lookup(&volume, b.ino, "potato");
+        let tomato = assert_lookup(&volume, potato.ino, "tomato");
         assert!(tomato.is_directory());
     }
 
     #[test]
     fn walk() {
         let mut volume = Volume::empty();
+        let names: Vec<_> = volume
+            .walk(Ino::Root)
+            .unwrap()
+            .map(|(name, mut dirs, _)| {
+                dirs.push(name);
+                dirs.join("/")
+            })
+            .collect();
+        assert!(names.is_empty());
+
         let b = volume
-            .mkdir_all(0, ["a".to_string(), "b".to_string()])
+            .mkdir_all(Ino::Root, ["a".to_string(), "b".to_string()])
             .unwrap()
             .clone();
         volume
@@ -887,7 +962,10 @@ mod test {
             .unwrap();
 
         let c = volume
-            .mkdir_all(0, ["a".to_string(), "c".to_string(), "e".to_string()])
+            .mkdir_all(
+                Ino::Root,
+                ["a".to_string(), "c".to_string(), "e".to_string()],
+            )
             .unwrap()
             .clone();
         volume
@@ -901,7 +979,7 @@ mod test {
             .unwrap();
 
         let names: Vec<_> = volume
-            .walk(0)
+            .walk(Ino::Root)
             .unwrap()
             .map(|(name, mut dirs, _)| {
                 dirs.push(name);
@@ -917,7 +995,7 @@ mod test {
     #[test]
     fn volume_to_from_bytes() {
         let mut volume = Volume::empty();
-        let a = volume.mkdir(0, "a".to_string()).unwrap().clone();
+        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
         let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
         let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
         volume
@@ -934,11 +1012,15 @@ mod test {
         assert_read_test_txt(&Volume::from_bytes(&bs).unwrap());
     }
 
+    fn assert_lookup(v: &Volume, ino: Ino, name: &str) -> FileAttr {
+        v.lookup(ino, name).unwrap().unwrap().clone()
+    }
+
     fn assert_read_test_txt(volume: &Volume) {
-        let a = volume.lookup(0, "a").unwrap().clone();
-        let b = volume.lookup(a.ino, "b").unwrap().clone();
-        let c = volume.lookup(b.ino, "c").unwrap().clone();
-        let test_txt = volume.lookup(c.ino, "test.txt").unwrap().clone();
+        let a = assert_lookup(volume, Ino::Root, "a");
+        let b = assert_lookup(volume, a.ino, "b");
+        let c = assert_lookup(volume, b.ino, "c");
+        let test_txt = assert_lookup(volume, c.ino, "test.txt");
 
         assert_eq!(
             volume.location(test_txt.ino).unwrap(),

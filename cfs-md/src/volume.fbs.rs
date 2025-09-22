@@ -20,7 +20,7 @@ impl<'a> flatbuffers::Follow<'a> for VolumeRoot<'a> {
   type Inner = VolumeRoot<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -191,14 +191,14 @@ pub fn size_prefixed_root_as_volume_root_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `VolumeRoot`.
 pub unsafe fn root_as_volume_root_unchecked(buf: &[u8]) -> VolumeRoot {
-  flatbuffers::root_unchecked::<VolumeRoot>(buf)
+  unsafe { flatbuffers::root_unchecked::<VolumeRoot>(buf) }
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed VolumeRoot and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `VolumeRoot`.
 pub unsafe fn size_prefixed_root_as_volume_root_unchecked(buf: &[u8]) -> VolumeRoot {
-  flatbuffers::size_prefixed_root_unchecked::<VolumeRoot>(buf)
+  unsafe { flatbuffers::size_prefixed_root_unchecked::<VolumeRoot>(buf) }
 }
 #[inline]
 pub fn finish_volume_root_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(

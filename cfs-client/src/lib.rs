@@ -1,4 +1,4 @@
-use cfs_core::{FileAttr, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume};
+use cfs_core::{FileAttr, Ino, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume};
 use cfs_md::VolumeInfo;
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -55,26 +55,6 @@ pub enum ErrorKind {
 
 /// A CoolFS client that provides access to a cluster and all of the volumes
 /// it contains.
-///
-/// ```no_run
-/// # use cfs_client::Client;
-/// # use tokio::io::{AsyncRead, AsyncReadExt};
-/// async fn process_data<R: AsyncRead>(r: R) { /* do stuff here */ }
-///
-/// # async fn doc() {
-/// let client = Client::new();
-///
-/// assert_eq!(client.volumes().await.unwrap(), vec!["now_thats_what_i_call_data"]);
-///
-/// let mounted_client = client
-///     .mount("now_thats_what_i_call_data", "vol3")
-///     .await
-///     .unwrap();
-///
-/// let reader = mounted_client.open(42, 0).await.unwrap();
-/// process_data(reader);
-/// # }
-/// ```
 #[derive(Clone)]
 pub struct Client {
     /// HTTP Client for metadata
@@ -155,12 +135,18 @@ pub struct MountedClient {
     // chained-volume lookup here. this might be as simple as a ptr to another Volume, which we use
     // as a fallback if current version doesn't have anything.
     volume: Volume,
-
-    /// Store that handles fetching files from object storage.
-    object_store: Arc<ChunkedVolumeStore>,
+    // Store that handles fetching files from object storage.
+    // object_store: Arc<ChunkedVolumeStore>,
 }
 
 impl MountedClient {
+    pub fn new(volume: Volume) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            volume,
+        }
+    }
+
     pub fn getattr(&self, ino: u64) -> Result<&FileAttr> {
         match self.volume.stat(ino) {
             Some(attr) => Ok(attr),
@@ -170,23 +156,16 @@ impl MountedClient {
         }
     }
 
-    pub fn lookup(&self, parent_ino: u64, name: String) -> Result<&FileAttr> {
-        match self.volume.lookup(parent_ino, &name) {
-            Some(attr) => Ok(attr),
-            None => Err(Error {
-                kind: ErrorKind::NotFound,
-            }),
-        }
+    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
+        self.volume.lookup(parent, name).map_err(|e| e.into())
     }
 
-    pub async fn readdir(&self, ino: u64, _fh: u64, offset: u64) -> Result<Vec<(&str, &FileAttr)>> {
-        let reader = self.volume.readdir(ino).map_err(Error::from)?;
-        let entries: Vec<_> = reader.into_iter().skip(offset as usize).collect();
-        Ok(entries)
+    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = (&str, &FileAttr)>> {
+        self.volume.readdir(ino).map_err(Error::from)
     }
 
-    pub async fn open(&self, ino: u64, _flags: i32) -> Result<Pin<Box<dyn AsyncFileReader>>> {
-        let (location, byterange) = self.volume.location(ino).ok_or(Error {
+    pub async fn open(&self, ino: Ino) -> Result<Pin<Box<dyn AsyncFileReader>>> {
+        let (location, _byterange) = self.volume.location(ino).ok_or(Error {
             kind: ErrorKind::NotFound,
         })?;
 
@@ -200,11 +179,12 @@ impl MountedClient {
                 key,
                 ..
             } => {
-                let file =
-                    VolumeFile::new(self.object_store.clone(), key.clone(), *byterange, None).await;
-                Box::pin(file)
+                // let file =
+                //     VolumeFile::new(self.object_store.clone(), key.clone(), *byterange, None).await;
+                // Box::pin(file)
+                todo!()
             }
-            cfs_core::Location::Staged(i) => unimplemented!(),
+            cfs_core::Location::Staged(_) => unimplemented!(),
         };
 
         Ok(file)

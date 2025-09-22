@@ -14,10 +14,59 @@ pub enum FileType {
     Symlink,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ino {
+    Root,
+    Id(u64),
+}
+
+impl PartialOrd for Ino {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ino {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_u64().cmp(&other.as_u64())
+    }
+}
+
+impl Ino {
+    pub fn as_u64(&self) -> u64 {
+        match self {
+            Ino::Id(n) => *n,
+            Ino::Root => 1u64,
+        }
+    }
+
+    fn add(&self, n: u64) -> Ino {
+        self.as_u64()
+            .checked_add(n)
+            .expect("BUG: ino overflowed u64")
+            .into()
+    }
+}
+
+impl From<Ino> for u64 {
+    fn from(ino: Ino) -> Self {
+        ino.as_u64()
+    }
+}
+
+impl From<u64> for Ino {
+    fn from(value: u64) -> Self {
+        match value {
+            1 => Ino::Root,
+            n => Ino::Id(n),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileAttr {
     /// Inode number
-    pub ino: u64,
+    pub ino: Ino,
     /// Size in bytes
     pub size: u64,
     /// Time of last modification

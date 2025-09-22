@@ -1,6 +1,6 @@
 use std::{io::Write, path::Path, str::FromStr};
 
-use cfs_core::{Location, volume::Volume};
+use cfs_core::{Ino, Location, volume::Volume};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -80,7 +80,7 @@ fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
     let bs = std::fs::read(volume.as_ref()).unwrap();
     let volume = Volume::from_bytes(&bs).unwrap();
 
-    for (name, path, attrs) in volume.walk(0).unwrap() {
+    for (name, path, attrs) in volume.walk(Ino::Root).unwrap() {
         let kind;
         let location;
         let offset;
@@ -150,7 +150,7 @@ fn pack(
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            volume.mkdir_all(0, dirs).unwrap();
+            volume.mkdir_all(Ino::Root, dirs).unwrap();
         }
         // for a file:
         //
@@ -169,10 +169,9 @@ fn pack(
                 let dirs = dir
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string());
-
-                volume.mkdir_all(0, dirs).unwrap().ino
+                volume.mkdir_all(Ino::Root, dirs).unwrap().ino
             } else {
-                0 // root
+                Ino::Root
             };
 
             let mut file = std::fs::File::open(entry.path()).unwrap();

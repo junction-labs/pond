@@ -1,0 +1,14 @@
+[package]
+name = "cfs-fuse"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+cfs-client.workspace = true
+cfs-core.workspace = true
+
+clap = {workspace = true, features = ["derive"]}
+fuser = { workspace = true, default_features = false, features = []}
+libc.workspace = true

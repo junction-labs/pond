@@ -60,7 +60,7 @@ impl<'a> flatbuffers::Follow<'a> for FileType {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
     Self(b)
   }
 }
@@ -69,7 +69,7 @@ impl flatbuffers::Push for FileType {
     type Output = FileType;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
     }
 }
 
@@ -149,7 +149,7 @@ impl<'a> flatbuffers::Follow<'a> for Location {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
+    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
     Self(b)
   }
 }
@@ -158,7 +158,7 @@ impl flatbuffers::Push for Location {
     type Output = Location;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        flatbuffers::emplace_scalar::<u8>(dst, self.0);
+        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
     }
 }
 
@@ -212,21 +212,21 @@ impl<'a> flatbuffers::Follow<'a> for Timespec {
   type Inner = &'a Timespec;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    <&'a Timespec>::follow(buf, loc)
+    unsafe { <&'a Timespec>::follow(buf, loc) }
   }
 }
 impl<'a> flatbuffers::Follow<'a> for &'a Timespec {
   type Inner = &'a Timespec;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    flatbuffers::follow_cast_ref::<Timespec>(buf, loc)
+    unsafe { flatbuffers::follow_cast_ref::<Timespec>(buf, loc) }
   }
 }
 impl<'b> flatbuffers::Push for Timespec {
     type Output = Timespec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        let src = ::core::slice::from_raw_parts(self as *const Timespec as *const u8, <Self as flatbuffers::Push>::size());
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Timespec as *const u8, <Self as flatbuffers::Push>::size()) };
         dst.copy_from_slice(src);
     }
     #[inline]
@@ -340,21 +340,21 @@ impl<'a> flatbuffers::Follow<'a> for ByteRange {
   type Inner = &'a ByteRange;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    <&'a ByteRange>::follow(buf, loc)
+    unsafe { <&'a ByteRange>::follow(buf, loc) }
   }
 }
 impl<'a> flatbuffers::Follow<'a> for &'a ByteRange {
   type Inner = &'a ByteRange;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    flatbuffers::follow_cast_ref::<ByteRange>(buf, loc)
+    unsafe { flatbuffers::follow_cast_ref::<ByteRange>(buf, loc) }
   }
 }
 impl<'b> flatbuffers::Push for ByteRange {
     type Output = ByteRange;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        let src = ::core::slice::from_raw_parts(self as *const ByteRange as *const u8, <Self as flatbuffers::Push>::size());
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const ByteRange as *const u8, <Self as flatbuffers::Push>::size()) };
         dst.copy_from_slice(src);
     }
     #[inline]
@@ -456,7 +456,7 @@ impl<'a> flatbuffers::Follow<'a> for S3Location<'a> {
   type Inner = S3Location<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -589,7 +589,7 @@ impl<'a> flatbuffers::Follow<'a> for LocalLocation<'a> {
   type Inner = LocalLocation<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -704,7 +704,7 @@ impl<'a> flatbuffers::Follow<'a> for LocationWrapper<'a> {
   type Inner = LocationWrapper<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -872,7 +872,7 @@ impl<'a> flatbuffers::Follow<'a> for LocationRef<'a> {
   type Inner = LocationRef<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -986,7 +986,7 @@ impl<'a> flatbuffers::Follow<'a> for FileAttrs<'a> {
   type Inner = FileAttrs<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -1163,7 +1163,7 @@ impl<'a> flatbuffers::Follow<'a> for Entry<'a> {
   type Inner = Entry<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -1313,7 +1313,7 @@ impl<'a> flatbuffers::Follow<'a> for Volume<'a> {
   type Inner = Volume<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
@@ -1486,14 +1486,14 @@ pub fn size_prefixed_root_as_volume_with_opts<'b, 'o>(
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `Volume`.
 pub unsafe fn root_as_volume_unchecked(buf: &[u8]) -> Volume {
-  flatbuffers::root_unchecked::<Volume>(buf)
+  unsafe { flatbuffers::root_unchecked::<Volume>(buf) }
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed Volume and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `Volume`.
 pub unsafe fn size_prefixed_root_as_volume_unchecked(buf: &[u8]) -> Volume {
-  flatbuffers::size_prefixed_root_unchecked::<Volume>(buf)
+  unsafe { flatbuffers::size_prefixed_root_unchecked::<Volume>(buf) }
 }
 #[inline]
 pub fn finish_volume_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(
