@@ -3,6 +3,10 @@ use cfs_md::VolumeInfo;
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
 
+use crate::file::FileView;
+
+mod file;
+
 // TODO: We're starting with a Reader/Writer split for modifying files in a volume
 // to make it clear that you're either getting an input or output stream, not doing
 // random writes. If that changes we should switch to something more like a File
@@ -165,18 +169,19 @@ impl MountedClient {
     }
 
     pub async fn open(&self, ino: Ino) -> Result<Pin<Box<dyn AsyncFileReader>>> {
-        let (location, _byterange) = self.volume.location(ino).ok_or(Error {
+        let (location, byte_range) = self.volume.location(ino).ok_or(Error {
             kind: ErrorKind::NotFound,
         })?;
 
         let file: Pin<Box<dyn AsyncFileReader>> = match location {
             cfs_core::Location::Local { path, .. } => {
                 let file = tokio::fs::File::open(path).await.map_err(Error::from)?;
-                Box::pin(file)
+                let view = FileView::from_file(file, *byte_range).await?;
+                Box::pin(view)
             }
             cfs_core::Location::ObjectStorage {
                 bucket: _bucket,
-                key,
+                key: _key,
                 ..
             } => {
                 // let file =

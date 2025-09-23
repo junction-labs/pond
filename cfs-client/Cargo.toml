@@ -12,3 +12,6 @@ cfs-md.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -253,6 +253,7 @@ dependencies = [
  "cfs-core",
  "cfs-md",
  "reqwest",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
