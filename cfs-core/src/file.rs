@@ -38,6 +38,15 @@ pub struct VolumeFile {
 
     /// Number of errors encountered while trying to read this chunk.
     num_read_errors: u8,
+
+    /// We need to conditionally keep a second copy of Shared<Future<_>> here to allow to polling
+    /// the future multiple times. Shared<Future<_>> doesn't allow you to poll an already completed
+    /// future, but we do need this functionality if the read-buffer is smaller than our chunk
+    /// size. In those scenarios, the kernel might map multiple reads into a single object storage
+    /// range read. This inflight_fut is kept around because we need to keep a reference to the
+    /// waker (attached to the std::task::Context) alive so it wake up our AsyncRead/AsyncSeek.
+    /// Yeah, this is ugly ... not sure what else we can do though.
+    inflight_fut: Option<BytesFuture>,
 }
 
 impl VolumeFile {
@@ -72,6 +81,7 @@ impl VolumeFile {
             readahead,
             volume_chunk_store,
             num_read_errors: 0,
+            inflight_fut: None,
         }
     }
 
@@ -121,59 +131,78 @@ impl AsyncRead for VolumeFile {
         cx: &mut std::task::Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        // read_range is exhausted, return Ready(Ok(())) to indicate EOF.
-        if self.finished() {
-            return Poll::Ready(Ok(()));
-        }
-
         let mut_inner = self.get_mut();
 
-        // chunk is a shared Future, it's cheap to clone. we need to clone since we may do
-        // a partial read of the chunk.
-        let Poll::Ready(result) = mut_inner.chunk.clone().poll_unpin(cx) else {
-            return Poll::Pending;
-        };
+        loop {
+            // read_range is exhausted, return Ready(Ok(())) to indicate EOF.
+            if mut_inner.finished() {
+                return Poll::Ready(Ok(()));
+            }
 
-        match result {
-            Ok(bytes) => {
-                let buf_capacity = buf.remaining();
-                if buf_capacity as u64 >= mut_inner.chunk_read_range.len {
-                    // there's enough space in the buffer to read the whole chunk. push it into buf
-                    // and load the next chunk.
-                    buf.put_slice(&bytes.slice(mut_inner.chunk_read_range.as_range_usize()));
-                    mut_inner.volume_read_cursor += mut_inner.chunk_read_range.len;
-                    mut_inner.load_next_chunk();
+            let buf_capacity = buf.remaining();
 
-                    Poll::Ready(Ok(()))
-                } else {
-                    // partial read of the chunk since buf is too small for the chunk. push what we
-                    // can and update the internal cursor + range.
-                    buf.put_slice(&bytes.slice(std::ops::Range {
-                        start: mut_inner.chunk_read_range.offset as usize,
-                        end: mut_inner.chunk_read_range.offset as usize + buf_capacity,
-                    }));
-                    mut_inner.volume_read_cursor += buf_capacity as u64;
-                    mut_inner.chunk_read_range.advance(buf_capacity as u64);
+            // no more space in buffer, we're done
+            if buf_capacity == 0 {
+                return Poll::Ready(Ok(()));
+            }
 
-                    Poll::Ready(Ok(()))
+            // we keep a separate copy around each time we need to poll because (1) creating a new
+            // copy of the Shared<Future<_>> each time doesn't keep the waker around and (2)
+            // Shared<Future<_>> doesn't allow you to poll it if it's already completed .
+            // copying a shared future is cheap though! but this is ugly.
+            let chunk_handle = mut_inner
+                .inflight_fut
+                .get_or_insert_with(|| mut_inner.chunk.clone());
+
+            let Poll::Ready(result) = chunk_handle.poll_unpin(cx) else {
+                return Poll::Pending;
+            };
+            mut_inner.inflight_fut.take();
+
+            match result {
+                Ok(bytes) => {
+                    // successful read, reset num_read_errors
+                    mut_inner.num_read_errors = 0;
+
+                    if buf_capacity as u64 >= mut_inner.chunk_read_range.len {
+                        // can read the entire remaining chunk into the buf. load the next chunk
+                        // after pushing these into the buf, to see if we can jam more things into
+                        // it.
+                        buf.put_slice(&bytes.slice(mut_inner.chunk_read_range.as_range_usize()));
+                        mut_inner.volume_read_cursor += mut_inner.chunk_read_range.len;
+                        mut_inner.load_next_chunk();
+
+                        continue;
+                    } else {
+                        // partial read of the chunk since buf is too small for the chunk. push what we
+                        // can and update the internal cursor + range.
+                        buf.put_slice(&bytes.slice(std::ops::Range {
+                            start: mut_inner.chunk_read_range.offset as usize,
+                            end: mut_inner.chunk_read_range.offset as usize + buf_capacity,
+                        }));
+                        mut_inner.volume_read_cursor += buf_capacity as u64;
+                        mut_inner.chunk_read_range.advance(buf_capacity as u64);
+
+                        return Poll::Ready(Ok(()));
+                    }
                 }
-            }
-            Err(e) if mut_inner.num_read_errors >= Self::READ_ERROR_THRESHOLD => {
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    format!(
-                        "failed to seek to file pos {} (pos {} in volume): {e}",
-                        mut_inner.relative_read_cursor(),
-                        mut_inner.volume_read_cursor
-                    ),
-                )))
-            }
-            Err(_) => {
-                mut_inner.num_read_errors += 1;
-                let mut pinned = std::pin::pin!(mut_inner);
-                match pinned.as_mut().start_seek(SeekFrom::Current(0)) {
-                    Ok(()) => Poll::Pending,
-                    Err(e) => Poll::Ready(Err(e)),
+                Err(e) if mut_inner.num_read_errors >= Self::READ_ERROR_THRESHOLD => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        format!(
+                            "failed to seek to file pos {} (pos {} in volume): {e}",
+                            mut_inner.relative_read_cursor(),
+                            mut_inner.volume_read_cursor
+                        ),
+                    )));
+                }
+                Err(_) => {
+                    mut_inner.num_read_errors += 1;
+                    let mut pinned = std::pin::pin!(mut_inner);
+                    match pinned.as_mut().start_seek(SeekFrom::Current(0)) {
+                        Ok(()) => return Poll::Pending,
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
                 }
             }
         }
@@ -236,12 +265,19 @@ impl AsyncSeek for VolumeFile {
 
         let mut_inner = self.get_mut();
 
-        // chunk is a shared Future, it's cheap to clone. we're cloning it since we still
-        // want to be able to await it later on.
-        let Poll::Ready(result) = mut_inner.chunk.clone().poll_unpin(cx) else {
+        // we keep a separate copy around each time we need to poll because (1) creating a new copy
+        // of the Shared<Future<_>> each time doesn't keep the waker around and (2)
+        // Shared<Future<_>> doesn't allow you to poll it if it's already completed .
+        // copying a shared future is cheap though! but this is ugly.
+        let chunk_handle = mut_inner
+            .inflight_fut
+            .get_or_insert_with(|| mut_inner.chunk.clone());
+
+        let Poll::Ready(result) = chunk_handle.poll_unpin(cx) else {
             return Poll::Pending;
         };
 
+        mut_inner.inflight_fut.take();
         match result {
             Ok(_) => Poll::Ready(Ok(mut_inner.relative_read_cursor())),
             Err(e) if mut_inner.num_read_errors >= Self::READ_ERROR_THRESHOLD => {
@@ -311,7 +347,7 @@ mod test {
             .await
             .expect("read should be ok");
         assert_eq!(bytes_read, data.len());
-        assert_eq!(data.as_ref(), file_data);
+        assert_eq!(data.as_ref(), file_data,);
     }
 
     #[tokio::test]
