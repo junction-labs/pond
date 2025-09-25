@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    io::{self, SeekFrom},
-    path::PathBuf,
-    pin::Pin,
-    time::Duration,
-};
+use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 
 use cfs_client::{AsyncFileReader, MountedClient};
 use cfs_core::{Ino, volume::Volume};
