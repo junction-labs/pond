@@ -81,6 +81,10 @@ fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
     let volume = Volume::from_bytes(&bs).unwrap();
 
     for (name, path, attrs) in volume.walk(Ino::Root).unwrap() {
+        if path.is_empty() && !attrs.ino.is_regular() {
+            continue;
+        }
+
         let kind;
         let location;
         let offset;
