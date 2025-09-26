@@ -1,7 +1,0 @@
-table VolumeRoot {
-    name: string;
-    version: string;
-    s3_url: string;
-}
-
-root_type VolumeRoot;

@@ -6,12 +6,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-cfs-client.workspace = true
 cfs-core.workspace = true
 
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
-http.workspace = true
-reqwest.workspace = true
 tokio = { workspace = true, features = ["full"]}
 walkdir.workspace = true

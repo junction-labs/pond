@@ -24,7 +24,6 @@ fn main() -> anyhow::Result<()> {
     match args.cmd {
         Cmd::Generate => {
             generate_srcs(&sh, "cfs-core")?;
-            generate_srcs(&sh, "cfs-md")?;
         }
     }
 

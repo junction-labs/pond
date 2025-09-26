@@ -3,10 +3,10 @@
 resolver = "2"
 
 members = [
-    "cfs-cli", "cfs-client",
-    "cfs-core", "cfs-fuse",
-    "cfs-md",
-    "cfs-server",
+    "cfs-cli",
+    "cfs-client",
+    "cfs-core",
+    "cfs-fuse",
     "xtask",
 ]
 
@@ -40,4 +40,3 @@ walkdir = "2"
 
 cfs-core = { version = "0.1.0", path = "./cfs-core", default-features = false }
 cfs-client = { version = "0.1.0", path = "./cfs-client", default-features = false }
-cfs-md = { version = "0.1.0", path = "./cfs-md", default-features = false }
