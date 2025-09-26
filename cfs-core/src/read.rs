@@ -54,6 +54,16 @@ pub struct ReadAheadPolicy {
     // TODO: prefetch_past_read_boundary: bool,
 }
 
+impl ReadAheadPolicy {
+    pub fn new(size: u64) -> Self {
+        Self { size }
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 /// Describes a chunk within Volume. Does not map directly to a file, just an arbitrary chunk of
 /// bytes within the volume.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
