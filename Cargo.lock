@@ -270,6 +270,7 @@ dependencies = [
  "object_store",
  "paste",
  "rand",
+ "tempfile",
  "thiserror",
  "tokio",
  "uuid",

@@ -126,7 +126,7 @@ impl FileAttr {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
     Staged(usize),
     Local {

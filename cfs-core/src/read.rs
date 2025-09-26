@@ -1,4 +1,4 @@
-use crate::ByteRange;
+use crate::{ByteRange, Location};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{
@@ -6,7 +6,11 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use object_store::{ObjectStore, path::Path};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt},
+};
 
 /// A boxed future that resolves to bytes.
 pub(crate) type BytesFuture = Shared<BoxFuture<'static, Result<Bytes, ReadError>>>;
@@ -36,7 +40,7 @@ pub struct ReadAheadPolicy {
 /// bytes within the volume.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CacheKey {
-    volume: String,
+    location: Location,
     // TODO: maybe this only needs to be a single offset byte? unless we want dynamic chunk sizes
     // later on ...
     range: ByteRange,
@@ -79,43 +83,57 @@ impl ChunkedVolumeStore {
     /// ChunkedVolumeStore::get(...) is thread-safe as the underlying cache is DashMap.
     pub(crate) fn get(
         self: &mut Arc<Self>,
-        volume: String,
+        location: Location,
         offset: u64,
         readahead: &Option<ReadAheadPolicy>,
     ) -> (ByteRange, BytesFuture) {
-        let key = self.cache_key(volume.clone(), offset);
+        let key = self.cache_key(location.clone(), offset);
 
         let bytes_future = match self.cache.entry(key.clone()) {
             // if the chunk isn't cached, kick off a fetch from object storage and store a future
             // that will resolve when the fetch is done
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let chunk_future = chunk_from_object_store(
-                    self.object_store.clone(),
-                    self.clone(),
-                    entry.key().volume.clone(),
-                    entry.key().range,
-                )
-                .boxed()
-                .shared();
-
+                let fut = match &location {
+                    Location::Staged(_) => unimplemented!(),
+                    Location::Local { path, len: _ } => chunk_from_local_file(
+                        path.to_path_buf(),
+                        self.clone(),
+                        location.clone(),
+                        entry.key().range,
+                    )
+                    .boxed()
+                    .shared(),
+                    Location::ObjectStorage {
+                        bucket: _,
+                        key,
+                        len: _,
+                    } => chunk_from_object_store(
+                        self.object_store.clone(),
+                        self.clone(),
+                        location.clone(),
+                        key.clone(),
+                        entry.key().range,
+                    )
+                    .boxed()
+                    .shared(),
+                };
                 // run this in the background now instead of waiting for the first awaiter
-                tokio::spawn(chunk_future.clone());
-                entry.insert(chunk_future.clone());
-
-                chunk_future
+                tokio::spawn(fut.clone());
+                entry.insert(fut.clone());
+                fut
             }
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
         };
 
         if let Some(readahead) = readahead {
-            self.readahead(volume.clone(), offset, readahead);
+            self.readahead(location, offset, readahead);
         }
 
         (key.range, bytes_future)
     }
 
-    pub(crate) fn remove(self: &mut Arc<Self>, volume: String, offset: u64) {
-        let key = self.cache_key(volume, offset);
+    pub(crate) fn remove(self: &mut Arc<Self>, location: Location, offset: u64) {
+        let key = self.cache_key(location, offset);
         self.cache.remove(&key);
     }
 
@@ -124,37 +142,57 @@ impl ChunkedVolumeStore {
     /// storage.
     ///
     /// ChunkedVolumeStore::readahead(...) is thread-safe as the underlying cache is DashMap.
-    fn readahead(self: &mut Arc<Self>, volume: String, offset: u64, readahead: &ReadAheadPolicy) {
+    fn readahead(
+        self: &mut Arc<Self>,
+        location: Location,
+        offset: u64,
+        readahead: &ReadAheadPolicy,
+    ) {
         // kick off a read from object store for chunks within the byte range (offset, offset + readahead]
         let last_readahead_byte = offset + readahead.size - 1;
         let start_chunk = (offset / self.chunk_size) * self.chunk_size;
         let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
         for chunk_start in (start_chunk..=end_chunk).step_by(self.chunk_size as usize) {
-            let key = self.cache_key(volume.clone(), chunk_start);
+            let key = self.cache_key(location.clone(), chunk_start);
             if let dashmap::mapref::entry::Entry::Vacant(entry) = self.cache.entry(key) {
-                let chunk_future = chunk_from_object_store(
-                    self.object_store.clone(),
-                    self.clone(),
-                    entry.key().volume.clone(),
-                    entry.key().range,
-                )
-                .boxed()
-                .shared();
-
+                let fut = match &entry.key().location {
+                    Location::Staged(_) => unimplemented!(),
+                    Location::Local { path, len: _ } => chunk_from_local_file(
+                        path.to_path_buf(),
+                        self.clone(),
+                        location.clone(),
+                        entry.key().range,
+                    )
+                    .boxed()
+                    .shared(),
+                    Location::ObjectStorage {
+                        bucket: _,
+                        key,
+                        len: _,
+                    } => chunk_from_object_store(
+                        self.object_store.clone(),
+                        self.clone(),
+                        location.clone(),
+                        key.to_string(),
+                        entry.key().range,
+                    )
+                    .boxed()
+                    .shared(),
+                };
                 // run this in the background now instead of waiting for the first awaiter
-                tokio::spawn(chunk_future.clone());
-                entry.insert(chunk_future.clone());
+                tokio::spawn(fut.clone());
+                entry.insert(fut.clone());
             }
         }
     }
 
     /// For a given volume and offset, construct a CacheKey to the chunk that holds the byte
     /// pointed to by the offset.
-    fn cache_key(&self, volume: String, offset: u64) -> CacheKey {
+    fn cache_key(&self, location: Location, offset: u64) -> CacheKey {
         // the start of the chunk that contains offset
         let aligned = offset / self.chunk_size * self.chunk_size;
         CacheKey {
-            volume: volume.clone(),
+            location: location.clone(),
             range: ByteRange {
                 offset: aligned,
                 len: self.chunk_size,
@@ -163,8 +201,8 @@ impl ChunkedVolumeStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn cached(&self, volume: String, offset: u64) -> bool {
-        let key = self.cache_key(volume, offset);
+    pub(crate) fn cached(&self, location: Location, offset: u64) -> bool {
+        let key = self.cache_key(location, offset);
         self.cache.contains_key(&key)
     }
 }
@@ -175,6 +213,7 @@ impl ChunkedVolumeStore {
 async fn chunk_from_object_store(
     object_store: Arc<dyn ObjectStore>,
     mut chunk_store: Arc<ChunkedVolumeStore>,
+    location: Location,
     key: String,
     range: ByteRange,
 ) -> Result<Bytes, ReadError> {
@@ -185,11 +224,35 @@ async fn chunk_from_object_store(
             // we failed to fetch it from object storage, so remove the BytesFuture from the cache.
             // any concurrent readers that were batched into the same request will get a
             // ReadError::Transient and will have to call ChunkedVolumeStore::get(..) again.
-            chunk_store.remove(key, range.offset);
+            chunk_store.remove(location, range.offset);
 
             Err(ReadError::Generic(e.to_string()))
         }
     }
+}
+
+async fn chunk_from_local_file(
+    path: PathBuf,
+    mut chunk_store: Arc<ChunkedVolumeStore>,
+    location: Location,
+    range: ByteRange,
+) -> Result<Bytes, ReadError> {
+    let mut handle_error = |e: std::io::Error| {
+        // failed to read the chunk from local file, remove it from our cache.
+        chunk_store.remove(location.clone(), range.offset);
+        ReadError::Generic(e.to_string())
+    };
+
+    let mut f = File::open(path).await.map_err(&mut handle_error)?;
+    f.seek(std::io::SeekFrom::Start(range.offset))
+        .await
+        .map_err(&mut handle_error)?;
+
+    let mut buf = vec![0u8; range.len as usize];
+    let n = f.read(&mut buf).await.map_err(&mut handle_error)?;
+    buf.truncate(n);
+
+    Ok(Bytes::from(buf))
 }
 
 #[cfg(test)]
@@ -209,9 +272,13 @@ mod test {
 
     #[tokio::test]
     async fn test_readahead() {
-        let volume = "volume".to_string();
         let object_store =
-            object_store_with_data(volume.clone(), Bytes::from(vec![0u8; 1 << 10])).await;
+            object_store_with_data("volume".to_string(), Bytes::from(vec![0u8; 1 << 10])).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
 
         // volume store fetches/caches 10 byte chunks
         let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(10, object_store));
@@ -219,34 +286,39 @@ mod test {
         // readahead size of 40 bytes (4 chunks)
         let readahead = ReadAheadPolicy { size: 40 };
 
-        let (range, _) = volume_chunk_store.get(volume.clone(), 234, &Some(readahead.clone()));
+        let (range, _) = volume_chunk_store.get(location.clone(), 234, &Some(readahead.clone()));
 
         // every byte in the readahead-window is cached
         for offset in range.offset..(range.offset + readahead.size) {
-            assert!(volume_chunk_store.cached(volume.clone(), offset));
+            assert!(volume_chunk_store.cached(location.clone(), offset));
         }
 
         // 230 is cached because it's part of the same chunk as 234
-        assert!(volume_chunk_store.cached(volume.clone(), 230));
+        assert!(volume_chunk_store.cached(location.clone(), 230));
         // 229 is the last byte in the previous chunk, not cached
-        assert!(!volume_chunk_store.cached(volume.clone(), 229));
+        assert!(!volume_chunk_store.cached(location.clone(), 229));
         // 279 is cached because it's part of the same chunk as 234 + 40
-        assert!(volume_chunk_store.cached(volume.clone(), 279));
+        assert!(volume_chunk_store.cached(location.clone(), 279));
         // 280 is the first byte in the chunk after the read-ahead, not cached
-        assert!(!volume_chunk_store.cached(volume.clone(), 280));
+        assert!(!volume_chunk_store.cached(location.clone(), 280));
     }
 
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
         // empty, so ChunkedVolumeStore::get(..) will get an error
         let object_store = Arc::new(InMemory::new());
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "fake".to_string(),
+            len: 1 << 10,
+        };
 
         let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(10, object_store));
-        let (_, result) = volume_chunk_store.get("fake".to_string(), 0, &None);
+        let (_, result) = volume_chunk_store.get(location.clone(), 0, &None);
 
         // get(..) returns a ReadError and the key+offset is no longer cached.
         let result = result.await;
         assert!(matches!(result, Err(ReadError::Generic(..))));
-        assert!(!volume_chunk_store.cached("fake".to_string(), 0));
+        assert!(!volume_chunk_store.cached(location, 0));
     }
 }

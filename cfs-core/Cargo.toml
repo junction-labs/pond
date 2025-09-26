@@ -17,3 +17,4 @@ uuid.workspace = true
 [dev-dependencies]
 paste = "1.0.15"
 rand = "0.9.2"
+tempfile.workspace = true

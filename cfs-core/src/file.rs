@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange,
+    ByteRange, Location,
     read::{BytesFuture, ChunkedVolumeStore, ReadAheadPolicy, ReadError},
 };
 use futures::FutureExt;
@@ -17,8 +17,7 @@ enum State {
 // iterate over.
 // TODO: handle unexpected EOFs (e.g. end of volume when we requested a range that's too big)
 pub struct VolumeFile {
-    // TODO: smolstr? lots of cloning happening here.
-    volume: String,
+    location: Location,
 
     /// Offset that represents what we've read so far in the volume, an absolute offset relative to
     /// the start of the volume.
@@ -51,13 +50,13 @@ impl VolumeFile {
 
     pub async fn new(
         mut volume_chunk_store: Arc<ChunkedVolumeStore>,
-        volume: String,
+        location: Location,
         volume_read_range: ByteRange,
         readahead: Option<ReadAheadPolicy>,
     ) -> Self {
         // read the first chunk into memory
         let (absolute_chunk_range, chunk) =
-            volume_chunk_store.get(volume.clone(), volume_read_range.offset, &readahead);
+            volume_chunk_store.get(location.clone(), volume_read_range.offset, &readahead);
         let offset = volume_read_range.offset - absolute_chunk_range.offset;
         let relative_chunk_range = ByteRange {
             offset,
@@ -70,7 +69,7 @@ impl VolumeFile {
         };
 
         Self {
-            volume,
+            location,
             volume_read_cursor: volume_read_range.offset,
             volume_read_range,
             chunk_read_range: relative_chunk_range,
@@ -90,7 +89,7 @@ impl VolumeFile {
 
         // fetch the next chunk (and do readahead if a policy is given)
         let (absolute_chunk_range, chunk) = self.volume_chunk_store.get(
-            self.volume.clone(),
+            self.location.clone(),
             self.volume_read_cursor,
             &self.readahead,
         );
@@ -255,7 +254,7 @@ impl AsyncSeek for VolumeFile {
         let mut_inner = self.get_mut();
         // kick off an object store fetch for the chunk for new_read_cursor
         let (absolute_chunk_range, chunk) = mut_inner.volume_chunk_store.get(
-            mut_inner.volume.clone(),
+            mut_inner.location.clone(),
             new_read_cursor,
             &mut_inner.readahead,
         );
@@ -298,9 +297,12 @@ impl AsyncSeek for VolumeFile {
 
 #[cfg(test)]
 mod test {
+    use std::io::Write;
+
     use super::*;
     use bytes::Bytes;
     use object_store::{ObjectStore, PutPayload, memory::InMemory, path::Path};
+    use tempfile::NamedTempFile;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     fn random_bytes(n: usize) -> Bytes {
@@ -321,16 +323,20 @@ mod test {
             paste::paste! {
                 #[tokio::test]
                 async fn [<test_read_full_volume_chunksize_ $chunksize>]() {
-                    let volume = "volume".to_string();
                     let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data(volume.clone(), data.clone()).await;
+                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+                    let location = Location::ObjectStorage {
+                        bucket: "".to_string(),
+                        key: "volume".to_string(),
+                        len: 1 << 10,
+                    };
 
                     let volume_chunk_store =
                         Arc::new(ChunkedVolumeStore::new($chunksize, object_store));
 
                     let mut file = VolumeFile::new(
                         volume_chunk_store.clone(),
-                        volume,
+                        location,
                         ByteRange {
                             offset: 0,
                             len: data.len() as u64,
@@ -359,9 +365,13 @@ mod test {
             paste::paste! {
                 #[tokio::test]
                 async fn [<test_read_partial_volume_chunksize_ $chunksize>]() {
-                    let volume = "volume".to_string();
                     let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data(volume.clone(), data.clone()).await;
+                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+                    let location = Location::ObjectStorage {
+                        bucket: "".to_string(),
+                        key: "volume".to_string(),
+                        len: 1 << 10,
+                    };
 
                     let volume_chunk_store = Arc::new(ChunkedVolumeStore::new($chunksize, object_store));
 
@@ -371,7 +381,7 @@ mod test {
                         offset: (data.len() / 3) as u64,
                         len: (data.len() / 3) as u64,
                     };
-                    let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, read_range, None).await;
+                    let mut file = VolumeFile::new(volume_chunk_store.clone(), location, read_range, None).await;
                     let mut file_data = Vec::with_capacity(data.len());
                     let bytes_read = file
                         .read_to_end(&mut file_data)
@@ -394,16 +404,20 @@ mod test {
             paste::paste! {
                 #[tokio::test]
                 async fn [<test_read_full_volume_with_buf_chunksize_ $chunksize _bufsize_ $bufsize>]() {
-                    let volume = "volume".to_string();
                     let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data(volume.clone(), data.clone()).await;
+                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+                    let location = Location::ObjectStorage {
+                        bucket: "".to_string(),
+                        key: "volume".to_string(),
+                        len: 1 << 10,
+                    };
 
                     // volume store fetches/caches 8 KiB chunks
                     let volume_chunk_store = Arc::new(ChunkedVolumeStore::new($chunksize, object_store));
 
                     let mut file = VolumeFile::new(
                         volume_chunk_store.clone(),
-                        volume,
+                        location,
                         ByteRange {
                             offset: 0,
                             len: data.len() as u64,
@@ -433,10 +447,49 @@ mod test {
     test_objectstore_full_volume_with_buf!(1001, 77);
 
     #[tokio::test]
+    async fn test_local_full_volume() {
+        let volume_chunk_store =
+            Arc::new(ChunkedVolumeStore::new(1 << 4, Arc::new(InMemory::new())));
+
+        let mut tmpfile = NamedTempFile::new().unwrap();
+        let data = random_bytes(1 << 10); // 64 KiB
+        tmpfile.write_all(&data).unwrap();
+
+        let location = Location::Local {
+            path: tmpfile.path().to_path_buf(),
+            len: 1 << 10,
+        };
+
+        let mut file = VolumeFile::new(
+            volume_chunk_store.clone(),
+            location,
+            ByteRange {
+                offset: 0,
+                len: 1 << 10,
+            },
+            None,
+        )
+        .await;
+
+        let mut file_data = Vec::with_capacity(data.len());
+        let bytes_read = file
+            .read_to_end(&mut file_data)
+            .await
+            .expect("read should be ok");
+        assert_eq!(bytes_read, 1 << 10);
+
+        assert_eq!(data.as_ref(), file_data);
+    }
+
+    #[tokio::test]
     async fn test_seek_partial_volume() {
-        let volume = "volume".to_string();
         let data = random_bytes(1 << 14); // 16 KiB
-        let object_store = object_store_with_data(volume.clone(), data.clone()).await;
+        let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
 
         // volume store fetches/caches 1 KiB chunks
         let volume_chunk_store = Arc::new(ChunkedVolumeStore::new(1 << 10, object_store));
@@ -447,7 +500,8 @@ mod test {
             offset: file_start,
             len: 10 * (1 << 10), // 10 KiB
         };
-        let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, file_range, None).await;
+        let mut file =
+            VolumeFile::new(volume_chunk_store.clone(), location, file_range, None).await;
 
         // seek to the middle of the file (512 bytes into the 1 KiB file)
         let seek_offset = file.seek(SeekFrom::Start(512)).await.unwrap();
@@ -476,9 +530,13 @@ mod test {
 
     #[tokio::test]
     async fn test_bad_seeks() {
-        let volume = "volume".to_string();
         let data = random_bytes(1024); // 1 KiB
-        let object_store = object_store_with_data(volume.clone(), data.clone()).await;
+        let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
 
         let volume_chunk_store = Arc::new(ChunkedVolumeStore::new(256, object_store));
 
@@ -487,7 +545,8 @@ mod test {
             offset: 100,
             len: 500,
         };
-        let mut file = VolumeFile::new(volume_chunk_store.clone(), volume, file_range, None).await;
+        let mut file =
+            VolumeFile::new(volume_chunk_store.clone(), location, file_range, None).await;
         // seek should be at pos 0
         assert_eq!(file.stream_position().await.unwrap(), 0);
 
