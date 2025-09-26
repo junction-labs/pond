@@ -1,3 +1,5 @@
+mod trace;
+
 use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 
 use cfs_client::{AsyncFileReader, MountedClient};
@@ -8,6 +10,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[derive(Parser)]
 struct Args {
+    #[clap(short, long, default_value_t = false)]
+    debug: bool,
+
     #[clap(long)]
     allow_other: bool,
 
@@ -46,7 +51,12 @@ fn main() {
         ]);
     }
 
-    fuser::mount2(cfs, args.mountpoint, &opts).unwrap();
+    if args.debug {
+        tracing_subscriber::fmt::init();
+        fuser::mount2(trace::Trace::new(cfs), args.mountpoint, &opts).unwrap();
+    } else {
+        fuser::mount2(cfs, args.mountpoint, &opts).unwrap();
+    }
 }
 
 struct Cfs {
@@ -93,7 +103,6 @@ impl fuser::Filesystem for Cfs {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        eprintln!("lookup({parent}, {name:?})", name = name.display());
         let Some(name) = name.to_str() else {
             reply.error(libc::EINVAL);
             return;
@@ -121,7 +130,6 @@ impl fuser::Filesystem for Cfs {
         _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        eprintln!("getattr({ino}, {fh})", fh = _fh.unwrap_or_default());
         let Ok(attr) = self.volume.getattr(ino.into()) else {
             reply.error(libc::ENOENT);
             return;
@@ -137,7 +145,6 @@ impl fuser::Filesystem for Cfs {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        eprintln!("readdir({ino}, {_fh}, {offset})");
         let Ok(iter) = self.volume.readdir(ino.into()) else {
             reply.error(libc::ENOENT);
             return;
@@ -157,8 +164,6 @@ impl fuser::Filesystem for Cfs {
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        eprintln!("open({ino}, {_flags:#0x?})");
-
         let Ok(reader) = self.runtime.block_on(self.volume.open(ino.into())) else {
             reply.error(libc::EIO);
             return;
@@ -189,7 +194,6 @@ impl fuser::Filesystem for Cfs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        eprintln!("read({_ino}, {fh}, {offset}, {size}, {_flags:#0x?})");
         let Some(reader) = self.fhs.get_mut(&fh) else {
             reply.error(libc::EBADF);
             return;

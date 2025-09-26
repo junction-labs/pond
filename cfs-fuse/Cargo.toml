@@ -11,5 +11,7 @@ cfs-core.workspace = true
 
 clap = {workspace = true, features = ["derive"]}
 fuser = { workspace = true, default_features = false, features = []}
+tracing.workspace = true
+tracing-subscriber.workspace = true
 libc.workspace = true
 tokio.workspace = true
