@@ -116,10 +116,10 @@ impl VolumeFile {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<bytes::Bytes>> {
         loop {
-            match &self.state {
+            match &mut self.state {
                 State::Ready(bytes) => return Poll::Ready(Ok(bytes.clone())),
                 State::Loading(fut) => {
-                    let Poll::Ready(result) = fut.clone().poll_unpin(cx) else {
+                    let Poll::Ready(result) = fut.poll_unpin(cx) else {
                         return Poll::Pending;
                     };
 
@@ -183,6 +183,7 @@ impl AsyncRead for VolumeFile {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let mut_inner = self.get_mut();
+        let mut made_progress = false;
 
         loop {
             // read_range is exhausted or there's no space in the buffer, we're done
@@ -193,7 +194,12 @@ impl AsyncRead for VolumeFile {
             let bytes = match mut_inner.poll_chunk(cx) {
                 Poll::Ready(Ok(bytes)) => bytes,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if made_progress {
+                        return Poll::Ready(Ok(()));
+                    }
+                    return Poll::Pending;
+                }
             };
 
             let buf_capacity = buf.remaining();
@@ -204,6 +210,7 @@ impl AsyncRead for VolumeFile {
                 buf.put_slice(&bytes.slice(mut_inner.chunk_read_range.as_range_usize()));
                 mut_inner.volume_read_cursor += mut_inner.chunk_read_range.len;
                 mut_inner.load_next_chunk();
+                made_progress = true;
 
                 // since we haven't finished pushing everything we can into the buf, continue on in
                 // a loop. if we return Poll::Ready(Ok(())) with a buffer that isn't full then
@@ -309,7 +316,7 @@ mod test {
         object_store
     }
 
-    macro_rules! test_read_full_volume {
+    macro_rules! test_objectstore_full_volume {
         ($chunksize:literal) => {
             paste::paste! {
                 #[tokio::test]
@@ -343,11 +350,11 @@ mod test {
             }
         };
     }
-    test_read_full_volume!(1024);
-    test_read_full_volume!(7);
-    test_read_full_volume!(1234);
+    test_objectstore_full_volume!(1024);
+    test_objectstore_full_volume!(7);
+    test_objectstore_full_volume!(1234);
 
-    macro_rules! test_read_partial_volume {
+    macro_rules! test_objectstore_partial_volume {
         ($chunksize:literal) => {
             paste::paste! {
                 #[tokio::test]
@@ -378,11 +385,11 @@ mod test {
             }
         };
     }
-    test_read_partial_volume!(1024);
-    test_read_partial_volume!(7);
-    test_read_partial_volume!(1234);
+    test_objectstore_partial_volume!(1024);
+    test_objectstore_partial_volume!(7);
+    test_objectstore_partial_volume!(1234);
 
-    macro_rules! test_read_full_volume_with_buf {
+    macro_rules! test_objectstore_full_volume_with_buf {
         ($chunksize:literal, $bufsize:literal) => {
             paste::paste! {
                 #[tokio::test]
@@ -419,11 +426,11 @@ mod test {
             }
         };
     }
-    test_read_full_volume_with_buf!(1024, 23);
-    test_read_full_volume_with_buf!(1024, 123);
-    test_read_full_volume_with_buf!(500, 1333);
-    test_read_full_volume_with_buf!(777, 777);
-    test_read_full_volume_with_buf!(1001, 77);
+    test_objectstore_full_volume_with_buf!(1024, 23);
+    test_objectstore_full_volume_with_buf!(1024, 123);
+    test_objectstore_full_volume_with_buf!(500, 1333);
+    test_objectstore_full_volume_with_buf!(777, 777);
+    test_objectstore_full_volume_with_buf!(1001, 77);
 
     #[tokio::test]
     async fn test_seek_partial_volume() {
