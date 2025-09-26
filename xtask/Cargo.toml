@@ -8,6 +8,5 @@ cfs-core.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 glob.workspace = true
-tokio = { workspace = true, features = ["full"]}
 walkdir.workspace = true
 xshell.workspace = true

@@ -56,9 +56,6 @@ pub enum ErrorKind {
 
     #[error("object storage error: {0}")]
     ObjectStore(#[from] object_store::Error),
-
-    #[error("unknown: {0}")]
-    Unknown(Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub trait AsyncFileReader: AsyncRead + AsyncSeek {}

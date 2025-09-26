@@ -3,7 +3,6 @@
 resolver = "2"
 
 members = [
-    "cfs-client",
     "cfs-core",
     "cfs-fuse",
     "xtask",

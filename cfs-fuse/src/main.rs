@@ -1,11 +1,10 @@
+mod client;
 mod trace;
 
-use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
-
-use cfs_client::{AsyncFileReader, Client};
 use cfs_core::{Ino, volume::Volume};
-
 use clap::Parser;
+use client::{AsyncFileReader, Client};
+use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[derive(Parser)]
@@ -69,7 +68,7 @@ struct Cfs {
 }
 
 impl Cfs {
-    fn new(volume: Volume, bucket: String) -> Result<Self, cfs_client::Error> {
+    fn new(volume: Volume, bucket: String) -> Result<Self, client::Error> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
