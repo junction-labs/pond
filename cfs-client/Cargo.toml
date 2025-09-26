@@ -9,6 +9,7 @@ homepage.workspace = true
 cfs-core.workspace = true
 cfs-md.workspace = true
 
+object_store = { workspace = true, features = ["aws"] }
 reqwest.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

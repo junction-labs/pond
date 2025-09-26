@@ -1,13 +1,12 @@
 use cfs_core::{
-    FileAttr, Ino, Location, file::VolumeFile, read::ChunkedVolumeStore, volume::Volume,
+    FileAttr, Ino,
+    file::VolumeFile,
+    read::{ChunkedVolumeStore, ReadAheadPolicy},
+    volume::Volume,
 };
-use cfs_md::VolumeInfo;
+use object_store::aws::AmazonS3Builder;
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
-
-use crate::file::FileView;
-
-mod file;
 
 // TODO: We're starting with a Reader/Writer split for modifying files in a volume
 // to make it clear that you're either getting an input or output stream, not doing
@@ -55,96 +54,41 @@ pub enum ErrorKind {
     #[error("open error: {0}")]
     Open(#[from] std::io::Error),
 
+    #[error("object storage error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+
     #[error("unknown: {0}")]
     Unknown(Box<dyn std::error::Error + Send + Sync>),
-}
-
-/// A CoolFS client that provides access to a cluster and all of the volumes
-/// it contains.
-#[derive(Clone)]
-pub struct Client {
-    /// HTTP Client for metadata
-    http: reqwest::Client,
-}
-
-impl Client {
-    pub fn new() -> Self {
-        static USER_AGENT: &str = concat!("coolfs/", env!("CARGO_PKG_VERSION"));
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .expect("failed to initialize tls backend");
-
-        Self { http }
-    }
-
-    /// List all available volumes.
-    ///
-    /// *TODO*: This should return volume metadata.
-    pub async fn volumes(&self) -> Result<Vec<String>> {
-        let resp = self
-            .http
-            .get("http://localhost:8888/volumes")
-            .send()
-            .await?;
-
-        let resp = resp.error_for_status()?;
-        let bytes = resp.bytes().await?;
-
-        let info = VolumeInfo::from_bytes(&bytes).map_err(|e| ErrorKind::Unknown(e.into()))?;
-        Ok(info.names().map(|s| s.to_string()).collect())
-    }
-
-    /// List all versions of a specific volume.
-    ///
-    /// *TODO*: This should return volume-version metadata.
-    pub async fn versions(&self, volume: &str) -> Result<Vec<String>> {
-        let resp = self
-            .http
-            .get(format!("http://localhost:8888/volumes/{volume}"))
-            .send()
-            .await?;
-
-        let resp = resp.error_for_status()?;
-        let bytes = resp.bytes().await?;
-
-        let info = VolumeInfo::from_bytes(&bytes).map_err(|e| ErrorKind::Unknown(e.into()))?;
-        Ok(info.versions().map(|s| s.to_string()).collect())
-    }
-
-    /// Load a volume at a specific version. Returns an error if the
-    /// volume doesn't exist or can't be loaded.
-    pub async fn mount(
-        &self,
-        _volume: impl AsRef<str>,
-        _version: impl AsRef<str>,
-    ) -> Result<MountedClient> {
-        unimplemented!()
-    }
-}
-
-impl Default for Client {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 pub trait AsyncFileReader: AsyncRead + AsyncSeek {}
 impl<T: AsyncRead + AsyncSeek> AsyncFileReader for T {}
 
-pub struct MountedClient {
+pub struct Client {
     // TODO: this could be multiple volume versions?
     // so if we have the most recent version, and it isn't compacted yet, then we kind of need a
     // chained-volume lookup here. this might be as simple as a ptr to another Volume, which we use
     // as a fallback if current version doesn't have anything.
     volume: Volume,
     // Store that handles fetching files from object storage.
-    // object_store: Arc<ChunkedVolumeStore>,
+    object_store: Arc<ChunkedVolumeStore>,
 }
 
-impl MountedClient {
-    pub fn new(volume: Volume) -> Self {
-        Self { volume }
+impl Client {
+    pub async fn mount(volume: Volume, bucket: String) -> Result<Self> {
+        let s3 = AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_region("us-east-2")
+            .build()?;
+        let object_store = Arc::new(ChunkedVolumeStore::new(
+            1 << 24, // 16MiB chunks
+            Arc::new(s3),
+        ));
+
+        Ok(Self {
+            volume,
+            object_store,
+        })
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
@@ -174,25 +118,16 @@ impl MountedClient {
             kind: ErrorKind::NotFound,
         })?;
 
-        let file: Pin<Box<dyn AsyncFileReader>> = match location {
-            cfs_core::Location::Local { path, .. } => {
-                let file = tokio::fs::File::open(path).await.map_err(Error::from)?;
-                let view = FileView::from_file(file, *byte_range).await?;
-                Box::pin(view)
-            }
-            cfs_core::Location::ObjectStorage {
-                bucket: _bucket,
-                key: _key,
-                ..
-            } => {
-                // let file =
-                //     VolumeFile::new(self.object_store.clone(), key.clone(), *byterange, None).await;
-                // Box::pin(file)
-                todo!()
-            }
-            cfs_core::Location::Staged(_) => unimplemented!(),
-        };
+        let file = VolumeFile::new(
+            self.object_store.clone(),
+            location.clone(),
+            *byte_range,
+            Some(ReadAheadPolicy {
+                size: 8 * (1 << 24), // 4 * 16MiB chunk readahead
+            }),
+        )
+        .await;
 
-        Ok(file)
+        Ok(Box::pin(file))
     }
 }

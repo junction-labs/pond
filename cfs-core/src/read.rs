@@ -28,7 +28,7 @@ pub(crate) enum ReadError {
 pub struct ReadAheadPolicy {
     /// Size of read-ahead in bytes. if you read a byte at index i, we will pre-fetch the bytes
     /// within interval [i, i + size) in the background.
-    pub(crate) size: u64,
+    pub size: u64,
     // Whether we should pre-fetch past the read-range boundary given to the VolumeFile. If
     // enabled, we will pre-fetch the bytes of the next subsequent file. compaction policy of the
     // files determines which file will get pre-fetched, but it will always be the data of the

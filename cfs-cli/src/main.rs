@@ -1,7 +1,6 @@
-use std::{io::Write, path::Path, str::FromStr};
-
 use cfs_core::{Ino, Location, volume::Volume};
 use clap::{Parser, Subcommand};
+use std::{io::Write, path::Path};
 
 #[derive(Parser)]
 struct Args {
@@ -11,11 +10,6 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Lists available volumes, or the version of a specified volume (e.g. cfs://volume-name)
-    List {
-        url: Option<String>,
-    },
-
     /// *Experimental* - Pack a directory into an volume blob for testing.
     Pack {
         dir: String,
@@ -31,41 +25,11 @@ enum Cmd {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let client = cfs_client::Client::new();
 
     match args.cmd {
-        Cmd::List { url } => list(&client, url.as_ref()).await,
         Cmd::Pack { dir, volume, data } => pack(&dir, &volume, &data).unwrap(),
         Cmd::Dump { volume } => dump(&volume).unwrap(),
     };
-}
-
-async fn list(client: &cfs_client::Client, url: Option<impl AsRef<str>>) {
-    match url {
-        // list all volumes
-        None => {
-            let volumes = client.volumes().await.unwrap();
-            for volume in volumes {
-                println!("{volume}");
-            }
-        }
-        // list versions of a volume
-        Some(url) => {
-            let url: http::Uri = url.as_ref().parse().unwrap();
-            if url.scheme() != Some(&http::uri::Scheme::from_str("cfs").unwrap()) {
-                panic!("not a cool url");
-            }
-
-            if let Some(volume) = url.authority() {
-                let volume = volume.host();
-
-                let versions = client.versions(volume).await.unwrap();
-                for version in versions {
-                    println!("{version}");
-                }
-            }
-        }
-    }
 }
 
 fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -201,8 +165,9 @@ fn pack(
     volume
         .relocate(
             &staging,
-            Location::Local {
-                path: data,
+            Location::ObjectStorage {
+                bucket: String::from("junctionlabs"),
+                key: String::from("cfs/fivegib2/data.bin"),
                 len: cursor as usize,
             },
         )

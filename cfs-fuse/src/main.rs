@@ -2,7 +2,7 @@ mod trace;
 
 use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 
-use cfs_client::{AsyncFileReader, MountedClient};
+use cfs_client::{AsyncFileReader, Client};
 use cfs_core::{Ino, volume::Volume};
 
 use clap::Parser;
@@ -24,6 +24,10 @@ struct Args {
 
     /// The directory to mount at. Must already exist.
     mountpoint: PathBuf,
+
+    /// The bucket in object storage the volume lives in.
+    #[clap(default_value = "junctionlabs")]
+    bucket: String,
 }
 
 fn main() {
@@ -31,9 +35,7 @@ fn main() {
     let volume_bs = std::fs::read(&args.volume).unwrap();
     let volume = Volume::from_bytes(&volume_bs).unwrap();
 
-    let volume = MountedClient::new(volume);
-
-    let cfs = Cfs::new(volume);
+    let cfs = Cfs::new(volume, args.bucket).expect("volume should be mountable");
 
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
@@ -60,26 +62,28 @@ fn main() {
 }
 
 struct Cfs {
-    volume: MountedClient,
+    volume: Client,
     runtime: tokio::runtime::Runtime,
     next_fh: u64,
     fhs: HashMap<u64, Pin<Box<dyn AsyncFileReader>>>,
 }
 
 impl Cfs {
-    fn new(volume: MountedClient) -> Self {
+    fn new(volume: Volume, bucket: String) -> Result<Self, cfs_client::Error> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
             .unwrap();
 
-        Self {
+        let volume = runtime.block_on(Client::mount(volume, bucket))?;
+
+        Ok(Self {
             volume,
             runtime,
             next_fh: 1,
             fhs: Default::default(),
-        }
+        })
     }
 
     fn create_fh(&mut self, reader: Pin<Box<dyn AsyncFileReader>>) -> u64 {
