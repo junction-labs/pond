@@ -1,10 +1,4 @@
-use cfs_core::{
-    FileAttr, Ino,
-    file::VolumeFile,
-    read::{ChunkedVolumeStore, ReadAheadPolicy},
-    volume::Volume,
-};
-use object_store::aws::AmazonS3Builder;
+use crate::{FileAttr, Ino, file::File, read::ChunkCache, volume::Volume};
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
 
@@ -49,7 +43,7 @@ pub enum ErrorKind {
     NotFound,
 
     #[error("volume error: {0}")]
-    Volume(#[from] cfs_core::volume::VolumeError),
+    Volume(#[from] crate::volume::VolumeError),
 
     #[error("open error: {0}")]
     Open(#[from] std::io::Error),
@@ -68,28 +62,28 @@ pub struct Client {
     // as a fallback if current version doesn't have anything.
     volume: Volume,
     // Store that handles fetching files from object storage.
-    object_store: Arc<ChunkedVolumeStore>,
+    cache: Arc<ChunkCache>,
 }
 
 impl Client {
-    pub async fn mount(volume: Volume, args: &crate::Args) -> Result<Self> {
-        let s3 = AmazonS3Builder::from_env()
-            .with_bucket_name(args.bucket.clone())
-            .with_region("us-east-2")
-            .build()?;
-        let object_store = Arc::new(ChunkedVolumeStore::new(
-            args.chunk_size.as_u64(), // 16MiB chunks
-            Arc::new(s3),
-            ReadAheadPolicy {
-                size: args.readahead_size.as_u64(),
-            },
-        ));
+    // pub async fn mount(volume: Volume, args: &crate::Args) -> Result<Self> {
+    //     let s3 = AmazonS3Builder::from_env()
+    //         .with_bucket_name(args.bucket.clone())
+    //         .with_region("us-east-2")
+    //         .build()?;
+    //     let object_store = Arc::new(ChunkedVolumeStore::new(
+    //         args.chunk_size.as_u64(), // 16MiB chunks
+    //         Arc::new(s3),
+    //         ReadAheadPolicy {
+    //             size: args.readahead_size.as_u64(),
+    //         },
+    //     ));
 
-        Ok(Self {
-            volume,
-            object_store,
-        })
-    }
+    //     Ok(Self {
+    //         volume,
+    //         object_store,
+    //     })
+    // }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
         match self.volume.stat(ino) {
@@ -118,7 +112,7 @@ impl Client {
             kind: ErrorKind::NotFound,
         })?;
 
-        let file = VolumeFile::new(self.object_store.clone(), location.clone(), *byte_range).await;
+        let file = File::new(self.cache.clone(), location.clone(), *byte_range).await;
 
         Ok(Box::pin(file))
     }

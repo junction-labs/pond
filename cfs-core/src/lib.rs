@@ -1,4 +1,9 @@
-pub mod file;
+mod client;
+pub use client::{AsyncFileReader, Client, Error};
+
+mod file;
+pub use file::File;
+
 pub mod read;
 pub mod volume;
 

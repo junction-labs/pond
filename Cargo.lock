@@ -192,6 +192,7 @@ dependencies = [
  "object_store",
  "paste",
  "rand",
+ "reqwest",
  "tempfile",
  "thiserror",
  "tokio",

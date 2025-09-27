@@ -9,6 +9,7 @@ dashmap.workspace = true
 flatbuffers.workspace = true
 futures.workspace = true
 object_store.workspace = true
+reqwest.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

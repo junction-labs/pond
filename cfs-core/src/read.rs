@@ -52,7 +52,7 @@ struct CacheKey {
 /// Read requests (given a volume and byte offset) are served from cache, or fetched from object
 /// storage if not already loaded.
 #[derive(Debug)]
-pub struct ChunkedVolumeStore {
+pub struct ChunkCache {
     /// Cache from the chunk described by CacheKey to the future that fetches the data from
     /// object storage. The future returns the underlying bytes for the chunk.
     // TODO: consider foyer's inmemory cache. it does eviction for us too.
@@ -69,7 +69,7 @@ pub struct ChunkedVolumeStore {
     readahead_policy: ReadAheadPolicy,
 }
 
-impl ChunkedVolumeStore {
+impl ChunkCache {
     pub fn new(
         chunk_size: u64,
         object_store: Arc<dyn ObjectStore>,
@@ -102,7 +102,7 @@ impl ChunkedVolumeStore {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let fut = match &location {
                     Location::Staged(_) => unimplemented!(),
-                    Location::Local { path, len: _ } => chunk_from_local_file(
+                    Location::Local { path, .. } => chunk_from_local_file(
                         path.to_path_buf(),
                         self.clone(),
                         location.clone(),
@@ -110,11 +110,7 @@ impl ChunkedVolumeStore {
                     )
                     .boxed()
                     .shared(),
-                    Location::ObjectStorage {
-                        bucket: _,
-                        key,
-                        len: _,
-                    } => chunk_from_object_store(
+                    Location::ObjectStorage { key, .. } => chunk_from_object_store(
                         self.object_store.clone(),
                         self.clone(),
                         location.clone(),
@@ -216,7 +212,7 @@ impl ChunkedVolumeStore {
 /// When used in a Shared<Future<_>>, it is guaranteed to run exactly once.
 async fn chunk_from_object_store(
     object_store: Arc<dyn ObjectStore>,
-    mut chunk_store: Arc<ChunkedVolumeStore>,
+    mut chunk_store: Arc<ChunkCache>,
     location: Location,
     key: String,
     range: ByteRange,
@@ -237,7 +233,7 @@ async fn chunk_from_object_store(
 
 async fn chunk_from_local_file(
     path: PathBuf,
-    mut chunk_store: Arc<ChunkedVolumeStore>,
+    mut chunk_store: Arc<ChunkCache>,
     location: Location,
     range: ByteRange,
 ) -> Result<Bytes, ReadError> {
@@ -288,8 +284,7 @@ mod test {
         let readahead = ReadAheadPolicy { size: 40 };
 
         // volume store fetches/caches 10 byte chunks
-        let mut volume_chunk_store =
-            Arc::new(ChunkedVolumeStore::new(10, object_store, readahead.clone()));
+        let mut volume_chunk_store = Arc::new(ChunkCache::new(10, object_store, readahead.clone()));
 
         let (range, _) = volume_chunk_store.get(location.clone(), 234);
 
@@ -318,11 +313,8 @@ mod test {
             len: 1 << 10,
         };
 
-        let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(
-            10,
-            object_store,
-            Default::default(),
-        ));
+        let mut volume_chunk_store =
+            Arc::new(ChunkCache::new(10, object_store, Default::default()));
         let (_, result) = volume_chunk_store.get(location.clone(), 0);
 
         // get(..) returns a ReadError and the key+offset is no longer cached.
