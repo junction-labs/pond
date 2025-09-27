@@ -290,6 +290,8 @@ impl AsyncSeek for File {
 mod test {
     use std::io::Write;
 
+    use crate::read::ClientBuilder;
+
     use super::*;
     use bytes::Bytes;
     use object_store::{ObjectStore, PutPayload, memory::InMemory, path::Path};
@@ -300,147 +302,150 @@ mod test {
         Bytes::from(rand::random_iter().take(n).collect::<Vec<_>>())
     }
 
-    async fn object_store_with_data(key: String, bytes: Bytes) -> Arc<InMemory> {
+    async fn object_store_with_data(key: String, bytes: Bytes) -> ClientBuilder {
         let object_store = Arc::new(InMemory::new());
         object_store
             .put(&Path::from(key), PutPayload::from_bytes(bytes))
             .await
             .expect("put into inmemory store should be ok");
-        object_store
+
+        Box::new(move |_| object_store.clone())
     }
-
-    macro_rules! test_objectstore_full_volume {
-        ($chunksize:literal) => {
-            paste::paste! {
-                #[tokio::test]
-                async fn [<test_read_full_volume_chunksize_ $chunksize>]() {
-                    let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
-                    let location = Location::ObjectStorage {
-                        bucket: "".to_string(),
-                        key: "volume".to_string(),
-                        len: 1 << 10,
-                    };
-
-                    let volume_chunk_store =
-                        Arc::new(ChunkCache::new($chunksize, object_store, Default::default()));
-
-                    let mut file = File::new(
-                        volume_chunk_store.clone(),
-                        location,
-                        ByteRange {
-                            offset: 0,
-                            len: data.len() as u64,
-                        },
-                    )
-                    .await;
-
-                    let mut file_data = Vec::with_capacity(data.len());
-                    let bytes_read = file
-                        .read_to_end(&mut file_data)
-                        .await
-                        .expect("read should be ok");
-                    assert_eq!(bytes_read, data.len());
-                    assert_eq!(data.as_ref(), file_data);
-                }
-            }
-        };
-    }
-    test_objectstore_full_volume!(1024);
-    test_objectstore_full_volume!(7);
-    test_objectstore_full_volume!(1234);
-
-    macro_rules! test_objectstore_partial_volume {
-        ($chunksize:literal) => {
-            paste::paste! {
-                #[tokio::test]
-                async fn [<test_read_partial_volume_chunksize_ $chunksize>]() {
-                    let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
-                    let location = Location::ObjectStorage {
-                        bucket: "".to_string(),
-                        key: "volume".to_string(),
-                        len: 1 << 10,
-                    };
-
-                    let volume_chunk_store = Arc::new(ChunkCache::new($chunksize, object_store, Default::default()));
-
-                    // read the middle 1/3 of the volume, this is a weird number so partial chunks should be
-                    // read. this maps to reading bytes (21845..43690] which doesn't get chunked up cleanly!
-                    let read_range = ByteRange {
-                        offset: (data.len() / 3) as u64,
-                        len: (data.len() / 3) as u64,
-                    };
-                    let mut file = File::new(volume_chunk_store.clone(), location, read_range).await;
-                    let mut file_data = Vec::with_capacity(data.len());
-                    let bytes_read = file
-                        .read_to_end(&mut file_data)
-                        .await
-                        .expect("read should be ok");
-                    assert_eq!(bytes_read, read_range.len as usize);
-
-                    let slice = data.slice(read_range.as_range_usize());
-                    assert_eq!(slice.as_ref(), file_data);
-                }
-            }
-        };
-    }
-    test_objectstore_partial_volume!(1024);
-    test_objectstore_partial_volume!(7);
-    test_objectstore_partial_volume!(1234);
-
-    macro_rules! test_objectstore_full_volume_with_buf {
-        ($chunksize:literal, $bufsize:literal) => {
-            paste::paste! {
-                #[tokio::test]
-                async fn [<test_read_full_volume_with_buf_chunksize_ $chunksize _bufsize_ $bufsize>]() {
-                    let data = random_bytes(1 << 16); // 64 KiB
-                    let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
-                    let location = Location::ObjectStorage {
-                        bucket: "".to_string(),
-                        key: "volume".to_string(),
-                        len: 1 << 10,
-                    };
-
-                    // volume store fetches/caches 8 KiB chunks
-                    let volume_chunk_store = Arc::new(ChunkCache::new($chunksize, object_store, Default::default()));
-
-                    let mut file = File::new(
-                        volume_chunk_store.clone(),
-                        location,
-                        ByteRange {
-                            offset: 0,
-                            len: data.len() as u64,
-                        },
-                    )
-                    .await;
-
-                    let mut file_data: Vec<u8> = Vec::with_capacity(data.len());
-                    loop {
-                        let mut buf = vec![0u8; $bufsize];
-                        let n = file.read(&mut buf).await.unwrap();
-                        file_data.extend(buf[..n].iter());
-                        if n != $bufsize {
-                            break;
-                        }
-                    }
-                    assert_eq!(data.as_ref(), file_data);
-                }
-            }
-        };
-    }
-    test_objectstore_full_volume_with_buf!(1024, 23);
-    test_objectstore_full_volume_with_buf!(1024, 123);
-    test_objectstore_full_volume_with_buf!(500, 1333);
-    test_objectstore_full_volume_with_buf!(777, 777);
-    test_objectstore_full_volume_with_buf!(1001, 77);
 
     #[tokio::test]
-    async fn test_local_full_volume() {
-        let volume_chunk_store = Arc::new(ChunkCache::new(
-            1 << 4,
-            Arc::new(InMemory::new()),
+    async fn objectstore_full_volume() {
+        assert_objectstore_full_volume(1024).await;
+        assert_objectstore_full_volume(7).await;
+        assert_objectstore_full_volume(1234).await;
+    }
+
+    async fn assert_objectstore_full_volume(chunksize: u64) {
+        let data = random_bytes(1 << 16); // 64 KiB
+        let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
+
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            chunksize,
             Default::default(),
+            client_builder,
+        ));
+
+        let mut file = File::new(
+            volume_chunk_store.clone(),
+            location,
+            ByteRange {
+                offset: 0,
+                len: data.len() as u64,
+            },
+        )
+        .await;
+
+        let mut file_data = Vec::with_capacity(data.len());
+        let bytes_read = file
+            .read_to_end(&mut file_data)
+            .await
+            .expect("read should be ok");
+        assert_eq!(bytes_read, data.len(), "chunksize={chunksize}");
+        assert_eq!(data.as_ref(), file_data, "chunksize={chunksize}");
+    }
+
+    #[tokio::test]
+    async fn objectstore_partial_volume() {
+        assert_objectstore_partial_volume(1024).await;
+        assert_objectstore_partial_volume(7).await;
+        assert_objectstore_partial_volume(1234).await;
+    }
+
+    async fn assert_objectstore_partial_volume(chunksize: u64) {
+        let data = random_bytes(1 << 16); // 64 KiB
+        let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
+
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            chunksize,
+            Default::default(),
+            client_builder,
+        ));
+
+        // read the middle 1/3 of the volume, this is a weird number so partial chunks should be
+        // read. this maps to reading bytes (21845..43690] which doesn't get chunked up cleanly!
+        let read_range = ByteRange {
+            offset: (data.len() / 3) as u64,
+            len: (data.len() / 3) as u64,
+        };
+        let mut file = File::new(volume_chunk_store.clone(), location, read_range).await;
+        let mut file_data = Vec::with_capacity(data.len());
+        let bytes_read = file
+            .read_to_end(&mut file_data)
+            .await
+            .expect("read should be ok");
+        assert_eq!(bytes_read, read_range.len as usize);
+
+        let slice = data.slice(read_range.as_range_usize());
+        assert_eq!(slice.as_ref(), file_data);
+    }
+
+    #[tokio::test]
+    async fn objectstore_full_volume_with_buf() {
+        assert_objectstore_full_volume_with_buf(1024, 23).await;
+        assert_objectstore_full_volume_with_buf(1024, 123).await;
+        assert_objectstore_full_volume_with_buf(500, 1333).await;
+        assert_objectstore_full_volume_with_buf(777, 777).await;
+        assert_objectstore_full_volume_with_buf(1001, 77).await;
+    }
+
+    async fn assert_objectstore_full_volume_with_buf(chunksize: u64, bufsize: usize) {
+        let data = random_bytes(1 << 16); // 64 KiB
+        let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
+        let location = Location::ObjectStorage {
+            bucket: "".to_string(),
+            key: "volume".to_string(),
+            len: 1 << 10,
+        };
+
+        // volume store fetches/caches 8 KiB chunks
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            chunksize,
+            Default::default(),
+            client_builder,
+        ));
+
+        let mut file = File::new(
+            volume_chunk_store.clone(),
+            location,
+            ByteRange {
+                offset: 0,
+                len: data.len() as u64,
+            },
+        )
+        .await;
+
+        let mut file_data: Vec<u8> = Vec::with_capacity(data.len());
+        loop {
+            let mut buf = vec![0u8; bufsize];
+            let n = file.read(&mut buf).await.unwrap();
+            file_data.extend(buf[..n].iter());
+            if n != bufsize {
+                break;
+            }
+        }
+        assert_eq!(data.as_ref(), file_data);
+    }
+
+    #[tokio::test]
+    async fn local_full_volume() {
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            1 << 4,
+            Default::default(),
+            Box::new(|_| Arc::new(InMemory::new())),
         ));
 
         let mut tmpfile = NamedTempFile::new().unwrap();
@@ -473,9 +478,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_seek_partial_volume() {
+    async fn seek_partial_volume() {
         let data = random_bytes(1 << 14); // 16 KiB
-        let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+        let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
@@ -483,8 +488,11 @@ mod test {
         };
 
         // volume store fetches/caches 1 KiB chunks
-        let volume_chunk_store =
-            Arc::new(ChunkCache::new(1 << 10, object_store, Default::default()));
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            1 << 10,
+            Default::default(),
+            client_builder,
+        ));
 
         // 10 KiB file in the middle of the volume (file offset at 1KiB into the volume)
         let file_start = 1 << 10; // 1 KiB offset
@@ -520,16 +528,20 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_bad_seeks() {
+    async fn bad_seeks() {
         let data = random_bytes(1024); // 1 KiB
-        let object_store = object_store_with_data("volume".to_string(), data.clone()).await;
+        let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
             len: 1 << 10,
         };
 
-        let volume_chunk_store = Arc::new(ChunkCache::new(256, object_store, Default::default()));
+        let volume_chunk_store = Arc::new(ChunkCache::new_with(
+            256,
+            Default::default(),
+            client_builder,
+        ));
 
         // create a file with a volume range of [100, 600)
         let file_range = ByteRange {

@@ -1,4 +1,9 @@
-use crate::{FileAttr, Ino, file::File, read::ChunkCache, volume::Volume};
+use crate::{
+    FileAttr, Ino,
+    file::File,
+    read::{ChunkCache, ReadAheadPolicy},
+    volume::Volume,
+};
 use std::{pin::Pin, sync::Arc};
 use tokio::io::{AsyncRead, AsyncSeek};
 
@@ -66,24 +71,14 @@ pub struct Client {
 }
 
 impl Client {
-    // pub async fn mount(volume: Volume, args: &crate::Args) -> Result<Self> {
-    //     let s3 = AmazonS3Builder::from_env()
-    //         .with_bucket_name(args.bucket.clone())
-    //         .with_region("us-east-2")
-    //         .build()?;
-    //     let object_store = Arc::new(ChunkedVolumeStore::new(
-    //         args.chunk_size.as_u64(), // 16MiB chunks
-    //         Arc::new(s3),
-    //         ReadAheadPolicy {
-    //             size: args.readahead_size.as_u64(),
-    //         },
-    //     ));
+    pub fn new(volume: Volume, chunk_size: u64, readahead: u64) -> Self {
+        let cache = Arc::new(ChunkCache::new(
+            chunk_size,
+            ReadAheadPolicy { size: readahead },
+        ));
 
-    //     Ok(Self {
-    //         volume,
-    //         object_store,
-    //     })
-    // }
+        Self { volume, cache }
+    }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
         match self.volume.stat(ino) {

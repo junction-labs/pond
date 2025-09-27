@@ -1,7 +1,7 @@
 mod trace;
 
 use bytesize::ByteSize;
-use cfs_core::{AsyncFileReader, Client, Error, File};
+use cfs_core::{AsyncFileReader, Client, Error};
 use cfs_core::{Ino, volume::Volume};
 use clap::{Parser, value_parser};
 use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
@@ -84,7 +84,11 @@ impl Cfs {
             .build()
             .unwrap();
 
-        let volume = runtime.block_on(Client::mount(volume, args))?;
+        let volume = Client::new(
+            volume,
+            args.chunk_size.as_u64(),
+            args.readahead_size.as_u64(),
+        );
 
         Ok(Self {
             volume,

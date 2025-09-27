@@ -5,7 +5,7 @@ use futures::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
-use object_store::{ObjectStore, path::Path};
+use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
     fs::File,
@@ -46,12 +46,14 @@ struct CacheKey {
     range: ByteRange,
 }
 
+/// A function for generating a new client based on a bucket name.
+pub type ClientBuilder = Box<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Sync + 'static>;
+
 /// A chunked object store cache.
 ///
 /// Abstraction over Volumes in object storage. Volumes are partitioned up into fixed-size chunks.
 /// Read requests (given a volume and byte offset) are served from cache, or fetched from object
 /// storage if not already loaded.
-#[derive(Debug)]
 pub struct ChunkCache {
     /// Cache from the chunk described by CacheKey to the future that fetches the data from
     /// object storage. The future returns the underlying bytes for the chunk.
@@ -61,8 +63,11 @@ pub struct ChunkCache {
     /// Size of each chunk in bytes
     chunk_size: u64,
 
+    /// Generate a client
+    client_builder: ClientBuilder,
+
     /// Object store to query chunks from volumes
-    object_store: Arc<dyn ObjectStore>,
+    clients: DashMap<String, Arc<dyn ObjectStore>>,
 
     /// Global readahead policy. For every get, if readahead is enabled, fetch the bytes within the
     /// readahead window in parallel.
@@ -70,15 +75,37 @@ pub struct ChunkCache {
 }
 
 impl ChunkCache {
-    pub fn new(
+    pub fn new(chunk_size: u64, readahead_policy: ReadAheadPolicy) -> Self {
+        let default_builder: ClientBuilder = Box::new(|bucket| {
+            Arc::new(
+                AmazonS3Builder::from_env()
+                    .with_bucket_name(bucket)
+                    .with_region("us-east-2")
+                    .build()
+                    .unwrap(),
+            )
+        });
+
+        Self {
+            cache: DashMap::new(),
+            chunk_size,
+            client_builder: default_builder,
+            clients: DashMap::new(),
+            readahead_policy,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with(
         chunk_size: u64,
-        object_store: Arc<dyn ObjectStore>,
         readahead_policy: ReadAheadPolicy,
+        client_builder: ClientBuilder,
     ) -> Self {
         Self {
             cache: DashMap::new(),
             chunk_size,
-            object_store,
+            client_builder,
+            clients: DashMap::new(),
             readahead_policy,
         }
     }
@@ -110,8 +137,8 @@ impl ChunkCache {
                     )
                     .boxed()
                     .shared(),
-                    Location::ObjectStorage { key, .. } => chunk_from_object_store(
-                        self.object_store.clone(),
+                    Location::ObjectStorage { bucket, key, .. } => chunk_from_object_store(
+                        self.get_client(bucket.clone()),
                         self.clone(),
                         location.clone(),
                         key.clone(),
@@ -136,6 +163,15 @@ impl ChunkCache {
     pub(crate) fn remove(self: &mut Arc<Self>, location: Location, offset: u64) {
         let key = self.cache_key(location, offset);
         self.cache.remove(&key);
+    }
+
+    fn get_client(&self, bucket: String) -> Arc<dyn ObjectStore> {
+        // FIXME: don't panic on bad build, try not to clone the string every time
+        let entry = self
+            .clients
+            .entry(bucket.clone())
+            .or_insert_with(|| (self.client_builder)(bucket));
+        entry.value().clone()
     }
 
     /// Perform read-aheads based on the given ReadAheadPolicy. Ensures that the chunks that cover
@@ -165,12 +201,8 @@ impl ChunkCache {
                     )
                     .boxed()
                     .shared(),
-                    Location::ObjectStorage {
-                        bucket: _,
-                        key,
-                        len: _,
-                    } => chunk_from_object_store(
-                        self.object_store.clone(),
+                    Location::ObjectStorage { bucket, key, .. } => chunk_from_object_store(
+                        self.get_client(bucket.clone()),
                         self.clone(),
                         location.clone(),
                         key.to_string(),
@@ -284,7 +316,9 @@ mod test {
         let readahead = ReadAheadPolicy { size: 40 };
 
         // volume store fetches/caches 10 byte chunks
-        let mut volume_chunk_store = Arc::new(ChunkCache::new(10, object_store, readahead.clone()));
+        let client_builder: ClientBuilder = Box::new(move |_| object_store.clone());
+        let mut volume_chunk_store =
+            Arc::new(ChunkCache::new_with(10, readahead.clone(), client_builder));
 
         let (range, _) = volume_chunk_store.get(location.clone(), 234);
 
@@ -306,7 +340,7 @@ mod test {
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
         // empty, so ChunkedVolumeStore::get(..) will get an error
-        let object_store = Arc::new(InMemory::new());
+        let client_builder: ClientBuilder = Box::new(|_| Arc::new(InMemory::new()));
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "fake".to_string(),
@@ -314,7 +348,7 @@ mod test {
         };
 
         let mut volume_chunk_store =
-            Arc::new(ChunkCache::new(10, object_store, Default::default()));
+            Arc::new(ChunkCache::new_with(10, Default::default(), client_builder));
         let (_, result) = volume_chunk_store.get(location.clone(), 0);
 
         // get(..) returns a ReadError and the key+offset is no longer cached.
