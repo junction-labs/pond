@@ -203,6 +203,7 @@ name = "cfs-fuse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "bytesize",
  "cfs-core",
  "clap",
@@ -210,6 +211,7 @@ dependencies = [
  "libc",
  "object_store",
  "reqwest",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

@@ -1,13 +1,17 @@
 mod fuse;
 mod trace;
 
+use bytes::BytesMut;
 use bytesize::ByteSize;
 use cfs_core::Location;
 use cfs_core::{Ino, volume::Volume};
 use clap::{Parser, Subcommand, value_parser};
+use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::{ObjectStore, PutPayload};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::fuse::Cfs;
 
@@ -24,9 +28,11 @@ enum Cmd {
 
     /// *Experimental* - Pack a local directory into a CFS volume.
     Pack {
+        /// An existing directory to pack into a volume.
         dir: String,
-        volume: String,
-        data: String,
+
+        /// A directory path or S3 prefix to put the volume in.
+        to: String,
     },
 
     /// Run a cfs FUSE mount.
@@ -67,7 +73,7 @@ fn main() {
 
     let res = match args.cmd {
         Cmd::Dump { volume } => dump(volume),
-        Cmd::Pack { dir, volume, data } => pack(dir, volume, data),
+        Cmd::Pack { dir, to } => pack(dir, to),
         Cmd::Mount(mount_args) => mount(mount_args),
     };
 
@@ -120,30 +126,62 @@ fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
             }
             cfs_core::FileType::Symlink => todo!(),
         }
-        println!("{kind:4} {location:16} {offset:12} {len:8} {path:40}");
+        println!("{kind:4} {location:40} {offset:12} {len:8} {path:40}");
     }
 
     Ok(())
 }
 
-fn pack(
-    dir: impl AsRef<Path>,
-    volume: impl AsRef<Path>,
-    data: impl AsRef<Path>,
-) -> anyhow::Result<()> {
+fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
+    enum PackLocation {
+        Local {
+            volume: PathBuf,
+            data: PathBuf,
+        },
+        ObjectStorage {
+            bucket: String,
+            volume: String,
+            data: String,
+        },
+    }
     use cfs_core::volume::Volume;
 
-    let data = data.as_ref().to_path_buf();
-    let root: &Path = dir.as_ref();
-    let mut data_f = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&data)?;
-    let mut volume_f = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(volume)?;
+    let pack_location = match to.strip_prefix("s3://") {
+        Some(bucket_and_key) => {
+            // build some object storage keys/buckets. just upload no matter what.
+            let (bucket, key) = bucket_and_key
+                .split_once("/")
+                .ok_or(anyhow::anyhow!("invalid s3 prefix"))?;
+            let vol_key = format!("{key}/vol.cfs.bin", key = key.trim_end_matches("/"));
+            let data_key = format!("{key}/data.cfs.bin", key = key.trim_end_matches("/"));
+            PackLocation::ObjectStorage {
+                bucket: bucket.to_string(),
+                volume: vol_key,
+                data: data_key,
+            }
+        }
+        None => {
+            // check that the destination paths don't exist yet.
+            if !std::fs::metadata(&to)?.is_dir() {
+                anyhow::bail!("{to} is not a directory");
+            }
+            let volume = Path::new(&to).join("vol.cfs.bin");
+            let data = Path::new(&to).join("data.cfs.bin");
 
+            if volume.exists() {
+                anyhow::bail!("{volume}: already exists", volume = volume.display());
+            }
+            if data.exists() {
+                anyhow::bail!("{data}: already exists", data = data.display())
+            }
+            PackLocation::Local { volume, data }
+        }
+    };
+
+    let mut volume_file = tempfile::NamedTempFile::new()?;
+    let mut data_file = tempfile::NamedTempFile::new()?;
+
+    let root: &Path = dir.as_ref();
     let mut volume = Volume::empty();
     let mut cursor = 0u64;
 
@@ -186,8 +224,7 @@ fn pack(
             };
 
             let mut file = std::fs::File::open(entry.path()).unwrap();
-            let n = std::io::copy(&mut file, &mut data_f).unwrap();
-            // eprintln!("adding {path} to blob", path = entry.path().display());
+            let n = std::io::copy(&mut file, &mut data_file).unwrap();
             volume.create(
                 dir_ino,
                 name.to_string_lossy().to_string(),
@@ -203,17 +240,100 @@ fn pack(
         }
     }
 
-    volume.relocate(
-        &staging,
-        Location::Local {
-            path: data,
-            len: cursor as usize,
-        },
-    )?;
+    match &pack_location {
+        PackLocation::Local {
+            volume: volume_path,
+            data: data_path,
+        } => {
+            volume.relocate(
+                &staging,
+                Location::Local {
+                    path: data_path.to_path_buf(),
+                    len: cursor as usize,
+                },
+            )?;
 
-    volume_f.write_all(&volume.to_bytes()?)?;
+            // make the tempfiles permanent and relocate the blob
+            let _ = data_file.persist(&data_path)?;
+            let mut volume_file = volume_file.persist(&volume_path)?;
+            volume_file.write_all(&volume.to_bytes()?)?;
+        }
+        PackLocation::ObjectStorage {
+            bucket,
+            volume: volume_key,
+            data: data_key,
+        } => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let s3 = AmazonS3Builder::from_env()
+                .with_bucket_name(bucket)
+                .build()?;
+
+            volume.relocate(
+                &staging,
+                Location::ObjectStorage {
+                    bucket: bucket.clone(),
+                    key: data_key.clone(),
+                    len: cursor as usize,
+                },
+            )?;
+
+            volume_file.write_all(&volume.to_bytes()?)?;
+
+            runtime.block_on(upload_file(&s3, volume_key, volume_file.path()))?;
+            runtime.block_on(upload_file(&s3, data_key, data_file.path()))?;
+        }
+    };
+
+    async fn upload_file(s3: &AmazonS3, key: &str, path: &Path) -> anyhow::Result<()> {
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut put = s3
+            .put_multipart(&object_store::path::Path::from(key))
+            .await?;
+
+        let mut buf = BytesMut::with_capacity(1024 * 1024 * 100);
+        loop {
+            let n = read_up_to(&mut file, &mut buf, 1024 * 1024 * 100).await?;
+            if n == 0 {
+                break;
+            }
+
+            let bytes = buf.split_to(n);
+            put.put_part(PutPayload::from_bytes(bytes.freeze())).await?;
+            buf.reserve(1024 * 1024 * 100);
+        }
+
+        put.complete().await?;
+        Ok(())
+    }
 
     Ok(())
+}
+
+async fn read_up_to<R: AsyncRead + Unpin>(
+    r: &mut R,
+    buf: &mut BytesMut,
+    limit: usize,
+) -> std::io::Result<usize> {
+    buf.reserve(limit);
+    let mut read = 0;
+
+    loop {
+        let n = r.read_buf(buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        read += n;
+        if read >= limit {
+            break;
+        }
+    }
+
+    Ok(read)
 }
 
 fn mount(args: MountArgs) -> anyhow::Result<()> {
