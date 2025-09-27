@@ -39,7 +39,7 @@ pub struct ReadAheadPolicy {
 /// Describes a chunk within Volume. Does not map directly to a file, just an arbitrary chunk of
 /// bytes within the volume.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct CacheKey {
+struct Chunk {
     location: Location,
     // TODO: maybe this only needs to be a single offset byte? unless we want dynamic chunk sizes
     // later on ...
@@ -55,10 +55,10 @@ pub type ClientBuilder = Box<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Syn
 /// Read requests (given a volume and byte offset) are served from cache, or fetched from object
 /// storage if not already loaded.
 pub struct ChunkCache {
-    /// Cache from the chunk described by CacheKey to the future that fetches the data from
+    /// Cache from a chunk to the future that fetches the data from
     /// object storage. The future returns the underlying bytes for the chunk.
     // TODO: consider foyer's inmemory cache. it does eviction for us too.
-    cache: DashMap<CacheKey, BytesFuture>,
+    cache: DashMap<Chunk, BytesFuture>,
 
     /// Size of each chunk in bytes
     chunk_size: u64,
@@ -121,7 +121,7 @@ impl ChunkCache {
         location: Location,
         offset: u64,
     ) -> (ByteRange, BytesFuture) {
-        let key = self.cache_key(location.clone(), offset);
+        let key = self.chunk(location.clone(), offset);
 
         let bytes_future = match self.cache.entry(key.clone()) {
             // if the chunk isn't cached, kick off a fetch from object storage and store a future
@@ -161,7 +161,7 @@ impl ChunkCache {
     }
 
     pub(crate) fn remove(self: &mut Arc<Self>, location: Location, offset: u64) {
-        let key = self.cache_key(location, offset);
+        let key = self.chunk(location, offset);
         self.cache.remove(&key);
     }
 
@@ -189,7 +189,7 @@ impl ChunkCache {
         let start_chunk = (offset / self.chunk_size) * self.chunk_size;
         let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
         for chunk_start in (start_chunk..=end_chunk).step_by(self.chunk_size as usize) {
-            let key = self.cache_key(location.clone(), chunk_start);
+            let key = self.chunk(location.clone(), chunk_start);
             if let dashmap::mapref::entry::Entry::Vacant(entry) = self.cache.entry(key) {
                 let fut = match &entry.key().location {
                     Location::Staged(_) => unimplemented!(),
@@ -218,12 +218,12 @@ impl ChunkCache {
         }
     }
 
-    /// For a given volume and offset, construct a CacheKey to the chunk that holds the byte
+    /// For a given volume and offset, construct a Chunk that holds the byte
     /// pointed to by the offset.
-    fn cache_key(&self, location: Location, offset: u64) -> CacheKey {
+    fn chunk(&self, location: Location, offset: u64) -> Chunk {
         // the start of the chunk that contains offset
         let aligned = offset / self.chunk_size * self.chunk_size;
-        CacheKey {
+        Chunk {
             location: location.clone(),
             range: ByteRange {
                 offset: aligned,
@@ -234,7 +234,7 @@ impl ChunkCache {
 
     #[cfg(test)]
     pub(crate) fn cached(&self, location: Location, offset: u64) -> bool {
-        let key = self.cache_key(location, offset);
+        let key = self.chunk(location, offset);
         self.cache.contains_key(&key)
     }
 }
