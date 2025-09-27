@@ -72,14 +72,17 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn mount(volume: Volume, bucket: String) -> Result<Self> {
+    pub async fn mount(volume: Volume, args: &crate::Args) -> Result<Self> {
         let s3 = AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
+            .with_bucket_name(args.bucket.clone())
             .with_region("us-east-2")
             .build()?;
         let object_store = Arc::new(ChunkedVolumeStore::new(
-            1 << 24, // 16MiB chunks
+            args.chunk_size.as_u64(), // 16MiB chunks
             Arc::new(s3),
+            ReadAheadPolicy {
+                size: args.readahead_size.as_u64(),
+            },
         ));
 
         Ok(Self {
@@ -115,15 +118,7 @@ impl Client {
             kind: ErrorKind::NotFound,
         })?;
 
-        let file = VolumeFile::new(
-            self.object_store.clone(),
-            location.clone(),
-            *byte_range,
-            Some(ReadAheadPolicy {
-                size: 8 * (1 << 24), // 4 * 16MiB chunk readahead
-            }),
-        )
-        .await;
+        let file = VolumeFile::new(self.object_store.clone(), location.clone(), *byte_range).await;
 
         Ok(Box::pin(file))
     }

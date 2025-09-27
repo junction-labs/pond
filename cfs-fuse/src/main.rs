@@ -1,14 +1,15 @@
 mod client;
 mod trace;
 
+use bytesize::ByteSize;
 use cfs_core::{Ino, volume::Volume};
-use clap::Parser;
+use clap::{Parser, value_parser};
 use client::{AsyncFileReader, Client};
 use std::{collections::HashMap, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[derive(Parser)]
-struct Args {
+pub(crate) struct Args {
     #[clap(short, long, default_value_t = false)]
     debug: bool,
 
@@ -25,8 +26,17 @@ struct Args {
     mountpoint: PathBuf,
 
     /// The bucket in object storage the volume lives in.
-    #[clap(default_value = "junctionlabs")]
+    #[clap(long, default_value = "junctionlabs")]
     bucket: String,
+
+    /// The size of the chunk we fetch from object storage in a single request. It's also the size
+    /// of the buffers we store within a single cache entry.
+    #[clap(long, default_value = "8MiB", value_parser = value_parser!(ByteSize))]
+    chunk_size: ByteSize,
+
+    /// Size of readahead. If you're reading a file at byte 0, we will pre-fetch the bytes up to `readahead_size` in parallel.
+    #[clap(long, default_value = "32MiB", value_parser = value_parser!(ByteSize))]
+    readahead_size: ByteSize,
 }
 
 fn main() {
@@ -34,7 +44,7 @@ fn main() {
     let volume_bs = std::fs::read(&args.volume).unwrap();
     let volume = Volume::from_bytes(&volume_bs).unwrap();
 
-    let cfs = Cfs::new(volume, args.bucket).expect("volume should be mountable");
+    let cfs = Cfs::new(&args, volume).expect("volume should be mountable");
 
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
@@ -68,14 +78,14 @@ struct Cfs {
 }
 
 impl Cfs {
-    fn new(volume: Volume, bucket: String) -> Result<Self, client::Error> {
+    fn new(args: &Args, volume: Volume) -> Result<Self, client::Error> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
             .unwrap();
 
-        let volume = runtime.block_on(Client::mount(volume, bucket))?;
+        let volume = runtime.block_on(Client::mount(volume, args))?;
 
         Ok(Self {
             volume,

@@ -24,12 +24,12 @@ pub(crate) enum ReadError {
     // but we do need more than just a Genreic error here lol
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReadAheadPolicy {
     /// Size of read-ahead in bytes. if you read a byte at index i, we will pre-fetch the bytes
     /// within interval [i, i + size) in the background.
     pub size: u64,
-    // Whether we should pre-fetch past the read-range boundary given to the VolumeFile. If
+    // TODO: Whether we should pre-fetch past the read-range boundary given to the VolumeFile. If
     // enabled, we will pre-fetch the bytes of the next subsequent file. compaction policy of the
     // files determines which file will get pre-fetched, but it will always be the data of the
     // file that is immediately after the file we just read.
@@ -63,29 +63,36 @@ pub struct ChunkedVolumeStore {
 
     /// Object store to query chunks from volumes
     object_store: Arc<dyn ObjectStore>,
+
+    /// Global readahead policy. For every get, if readahead is enabled, fetch the bytes within the
+    /// readahead window in parallel.
+    readahead_policy: ReadAheadPolicy,
 }
 
 impl ChunkedVolumeStore {
-    pub fn new(chunk_size: u64, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(
+        chunk_size: u64,
+        object_store: Arc<dyn ObjectStore>,
+        readahead_policy: ReadAheadPolicy,
+    ) -> Self {
         Self {
             cache: DashMap::new(),
             chunk_size,
             object_store,
+            readahead_policy,
         }
     }
 
     /// Return a ByteRange and a BytesFuture that will resolve to a chunk that contains the byte
     /// specified by the given volume and offset byte. The ByteRange represents the absolute
     /// offsets relative to the start of the volume that the BytesFuture reads. If the chunk is
-    /// not already cached, fetch it from object storage. If readahead is provided, we will
-    /// pre-fetch chunks according to the readahead policy.
+    /// not already cached, fetch it from object storage.
     ///
     /// ChunkedVolumeStore::get(...) is thread-safe as the underlying cache is DashMap.
     pub(crate) fn get(
         self: &mut Arc<Self>,
         location: Location,
         offset: u64,
-        readahead: &Option<ReadAheadPolicy>,
     ) -> (ByteRange, BytesFuture) {
         let key = self.cache_key(location.clone(), offset);
 
@@ -125,9 +132,7 @@ impl ChunkedVolumeStore {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
         };
 
-        if let Some(readahead) = readahead {
-            self.readahead(location, offset, readahead);
-        }
+        self.readahead(location, offset);
 
         (key.range, bytes_future)
     }
@@ -142,14 +147,13 @@ impl ChunkedVolumeStore {
     /// storage.
     ///
     /// ChunkedVolumeStore::readahead(...) is thread-safe as the underlying cache is DashMap.
-    fn readahead(
-        self: &mut Arc<Self>,
-        location: Location,
-        offset: u64,
-        readahead: &ReadAheadPolicy,
-    ) {
+    fn readahead(self: &mut Arc<Self>, location: Location, offset: u64) {
+        if self.readahead_policy.size == 0 {
+            return;
+        }
+
         // kick off a read from object store for chunks within the byte range (offset, offset + readahead]
-        let last_readahead_byte = offset + readahead.size - 1;
+        let last_readahead_byte = offset + self.readahead_policy.size - 1;
         let start_chunk = (offset / self.chunk_size) * self.chunk_size;
         let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
         for chunk_start in (start_chunk..=end_chunk).step_by(self.chunk_size as usize) {
@@ -280,13 +284,14 @@ mod test {
             len: 1 << 10,
         };
 
-        // volume store fetches/caches 10 byte chunks
-        let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(10, object_store));
-
         // readahead size of 40 bytes (4 chunks)
         let readahead = ReadAheadPolicy { size: 40 };
 
-        let (range, _) = volume_chunk_store.get(location.clone(), 234, &Some(readahead.clone()));
+        // volume store fetches/caches 10 byte chunks
+        let mut volume_chunk_store =
+            Arc::new(ChunkedVolumeStore::new(10, object_store, readahead.clone()));
+
+        let (range, _) = volume_chunk_store.get(location.clone(), 234);
 
         // every byte in the readahead-window is cached
         for offset in range.offset..(range.offset + readahead.size) {
@@ -313,8 +318,12 @@ mod test {
             len: 1 << 10,
         };
 
-        let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(10, object_store));
-        let (_, result) = volume_chunk_store.get(location.clone(), 0, &None);
+        let mut volume_chunk_store = Arc::new(ChunkedVolumeStore::new(
+            10,
+            object_store,
+            Default::default(),
+        ));
+        let (_, result) = volume_chunk_store.get(location.clone(), 0);
 
         // get(..) returns a ReadError and the key+offset is no longer cached.
         let result = result.await;

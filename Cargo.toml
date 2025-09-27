@@ -18,6 +18,7 @@ homepage = "https://junctionlabs.io"
 anyhow = "1.0"
 axum = {version = "0.8", features = ["macros"]}
 bytes = "1.10"
+bytesize = "2.1.0"
 clap = { version = "4.5.47", features = ["derive"] }
 dashmap = "6.1.0"
 flatbuffers = "25.2"

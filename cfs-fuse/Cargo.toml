@@ -8,8 +8,9 @@ homepage.workspace = true
 [dependencies]
 cfs-core.workspace = true
 
-clap = {workspace = true, features = ["derive"]}
-fuser = { workspace = true, default_features = false, features = []}
+bytesize.workspace = true
+clap = { workspace = true, features = ["derive"] }
+fuser = { workspace = true, default_features = false, features = [] }
 libc.workspace = true
 object_store = { workspace = true, features = ["aws"] }
 reqwest.workspace = true
