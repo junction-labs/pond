@@ -309,7 +309,7 @@ mod test {
             .await
             .expect("put into inmemory store should be ok");
 
-        Box::new(move |_| object_store.clone())
+        Arc::new(move |_| object_store.clone())
     }
 
     #[tokio::test]
@@ -433,10 +433,12 @@ mod test {
             let mut buf = vec![0u8; bufsize];
             let n = file.read(&mut buf).await.unwrap();
             file_data.extend(buf[..n].iter());
-            if n != bufsize {
+            if n == 0 {
                 break;
             }
         }
+
+        println!("{} vs {}", data.len(), file_data.len());
         assert_eq!(data.as_ref(), file_data);
     }
 
@@ -445,7 +447,7 @@ mod test {
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
             1 << 4,
             Default::default(),
-            Box::new(|_| Arc::new(InMemory::new())),
+            Arc::new(|_| Arc::new(InMemory::new())),
         ));
 
         let mut tmpfile = NamedTempFile::new().unwrap();

@@ -71,8 +71,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(volume: Volume, chunk_size: u64, readahead: u64) -> Self {
+    pub fn new(volume: Volume, max_cache_size: u64, chunk_size: u64, readahead: u64) -> Self {
         let cache = Arc::new(ChunkCache::new(
+            max_cache_size,
             chunk_size,
             ReadAheadPolicy { size: readahead },
         ));

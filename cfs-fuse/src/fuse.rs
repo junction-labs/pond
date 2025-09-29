@@ -11,14 +11,19 @@ pub(crate) struct Cfs {
 }
 
 impl Cfs {
-    pub(crate) fn new(volume: Volume, chunk_size: u64, readahead_size: u64) -> Self {
+    pub(crate) fn new(
+        volume: Volume,
+        max_cache_size: u64,
+        chunk_size: u64,
+        readahead_size: u64,
+    ) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
             .unwrap();
 
-        let volume = Client::new(volume, chunk_size, readahead_size);
+        let volume = Client::new(volume, max_cache_size, chunk_size, readahead_size);
 
         Self {
             volume,
@@ -149,10 +154,11 @@ impl fuser::Filesystem for Cfs {
         // which makes it weird that it's an i64 here. cast it away for now.
         let offset = offset as u64;
         if offset > 0
-            && let Err(_e) = self.runtime.block_on(reader.seek(SeekFrom::Start(offset))) {
-                reply.error(libc::EIO);
-                return;
-            }
+            && let Err(_e) = self.runtime.block_on(reader.seek(SeekFrom::Start(offset)))
+        {
+            reply.error(libc::EIO);
+            return;
+        }
 
         // TODO: re-use a scratch buffer instead of allocating here
         let mut buf = vec![0u8; size as usize];

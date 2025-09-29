@@ -265,6 +265,7 @@ dependencies = [
  "dashmap",
  "flatbuffers",
  "foyer",
+ "foyer-memory",
  "futures",
  "object_store",
  "paste",

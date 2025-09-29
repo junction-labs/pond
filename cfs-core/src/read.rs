@@ -3,7 +3,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{
     FutureExt,
-    future::{BoxFuture, Shared},
+    future::{BoxFuture, Shared, ready},
 };
 use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
 use std::{path::PathBuf, sync::Arc};
@@ -22,6 +22,24 @@ pub(crate) enum ReadError {
     // TODO: take a look at object_store::Error and see how we can map it ourselves. unfortunately
     // object_store::Error doesn't impl Clone so we cannot use #[from] <Error> ... sad
     // but we do need more than just a Genreic error here lol
+}
+
+impl From<foyer_memory::Error> for ReadError {
+    fn from(err: foyer_memory::Error) -> Self {
+        ReadError::Generic(err.to_string())
+    }
+}
+
+impl From<object_store::Error> for ReadError {
+    fn from(err: object_store::Error) -> Self {
+        ReadError::Generic(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for ReadError {
+    fn from(err: std::io::Error) -> Self {
+        ReadError::Generic(err.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,7 +65,7 @@ struct Chunk {
 }
 
 /// A function for generating a new client based on a bucket name.
-pub type ClientBuilder = Box<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Sync + 'static>;
+pub type ClientBuilder = Arc<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Sync + 'static>;
 
 /// A chunked object store cache.
 ///
@@ -55,10 +73,8 @@ pub type ClientBuilder = Box<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Syn
 /// Read requests (given a volume and byte offset) are served from cache, or fetched from object
 /// storage if not already loaded.
 pub struct ChunkCache {
-    /// Cache from a chunk to the future that fetches the data from
-    /// object storage. The future returns the underlying bytes for the chunk.
-    // TODO: consider foyer's inmemory cache. it does eviction for us too.
-    cache: DashMap<Chunk, BytesFuture>,
+    /// Cache mapping chunks to their materialized bytes.
+    cache: foyer::Cache<Chunk, Bytes>,
 
     /// Size of each chunk in bytes
     chunk_size: u64,
@@ -75,8 +91,13 @@ pub struct ChunkCache {
 }
 
 impl ChunkCache {
-    pub fn new(chunk_size: u64, readahead_policy: ReadAheadPolicy) -> Self {
-        let default_builder: ClientBuilder = Box::new(|bucket| {
+    pub fn new(max_cache_size: u64, chunk_size: u64, readahead_policy: ReadAheadPolicy) -> Self {
+        let max_cache_size = (max_cache_size / chunk_size) as usize;
+        let cache = foyer::Cache::<Chunk, Bytes>::builder(max_cache_size)
+            .with_eviction_config(foyer::S3FifoConfig::default())
+            .build();
+
+        let default_builder: ClientBuilder = Arc::new(|bucket: String| {
             Arc::new(
                 AmazonS3Builder::from_env()
                     .with_bucket_name(bucket)
@@ -87,7 +108,7 @@ impl ChunkCache {
         });
 
         Self {
-            cache: DashMap::new(),
+            cache,
             chunk_size,
             client_builder: default_builder,
             clients: DashMap::new(),
@@ -101,8 +122,11 @@ impl ChunkCache {
         readahead_policy: ReadAheadPolicy,
         client_builder: ClientBuilder,
     ) -> Self {
+        let cache = foyer::Cache::<Chunk, Bytes>::builder(1000000000)
+            .with_eviction_config(foyer::S3FifoConfig::default())
+            .build();
         Self {
-            cache: DashMap::new(),
+            cache,
             chunk_size,
             client_builder,
             clients: DashMap::new(),
@@ -115,7 +139,7 @@ impl ChunkCache {
     /// offsets relative to the start of the volume that the BytesFuture reads. If the chunk is
     /// not already cached, fetch it from object storage.
     ///
-    /// ChunkedVolumeStore::get(...) is thread-safe as the underlying cache is DashMap.
+    /// ChunkedVolumeStore::get(...) is thread-safe as the underlying cache is backed by foyer.
     pub(crate) fn get(
         self: &mut Arc<Self>,
         location: Location,
@@ -123,62 +147,17 @@ impl ChunkCache {
     ) -> (ByteRange, BytesFuture) {
         let key = self.chunk(location.clone(), offset);
 
-        let bytes_future = match self.cache.entry(key.clone()) {
-            // if the chunk isn't cached, kick off a fetch from object storage and store a future
-            // that will resolve when the fetch is done
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let fut = match &location {
-                    Location::Staged(_) => unimplemented!(),
-                    Location::Local { path, .. } => chunk_from_local_file(
-                        path.to_path_buf(),
-                        self.clone(),
-                        location.clone(),
-                        entry.key().range,
-                    )
-                    .boxed()
-                    .shared(),
-                    Location::ObjectStorage { bucket, key, .. } => chunk_from_object_store(
-                        self.get_client(bucket.clone()),
-                        self.clone(),
-                        location.clone(),
-                        key.clone(),
-                        entry.key().range,
-                    )
-                    .boxed()
-                    .shared(),
-                };
-                // run this in the background now instead of waiting for the first awaiter
-                tokio::spawn(fut.clone());
-                entry.insert(fut.clone());
-                fut
-            }
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-        };
-
+        let bytes_future = self.read_chunk(key.clone());
         self.readahead(location, offset);
 
         (key.range, bytes_future)
-    }
-
-    pub(crate) fn remove(self: &mut Arc<Self>, location: Location, offset: u64) {
-        let key = self.chunk(location, offset);
-        self.cache.remove(&key);
-    }
-
-    fn get_client(&self, bucket: String) -> Arc<dyn ObjectStore> {
-        // FIXME: don't panic on bad build, try not to clone the string every time
-        let entry = self
-            .clients
-            .entry(bucket.clone())
-            .or_insert_with(|| (self.client_builder)(bucket));
-        entry.value().clone()
     }
 
     /// Perform read-aheads based on the given ReadAheadPolicy. Ensures that the chunks that cover
     /// the byte range starting at offset until offset+readahead are loaded into cache from object
     /// storage.
     ///
-    /// ChunkedVolumeStore::readahead(...) is thread-safe as the underlying cache is DashMap.
+    /// ChunkedVolumeStore::readahead(...) is thread-safe as the underlying cache is backed by foyer.
     fn readahead(self: &mut Arc<Self>, location: Location, offset: u64) {
         if self.readahead_policy.size == 0 {
             return;
@@ -190,32 +169,51 @@ impl ChunkCache {
         let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
         for chunk_start in (start_chunk..=end_chunk).step_by(self.chunk_size as usize) {
             let key = self.chunk(location.clone(), chunk_start);
-            if let dashmap::mapref::entry::Entry::Vacant(entry) = self.cache.entry(key) {
-                let fut = match &entry.key().location {
-                    Location::Staged(_) => unimplemented!(),
-                    Location::Local { path, len: _ } => chunk_from_local_file(
-                        path.to_path_buf(),
-                        self.clone(),
-                        location.clone(),
-                        entry.key().range,
-                    )
-                    .boxed()
-                    .shared(),
-                    Location::ObjectStorage { bucket, key, .. } => chunk_from_object_store(
-                        self.get_client(bucket.clone()),
-                        self.clone(),
-                        location.clone(),
-                        key.to_string(),
-                        entry.key().range,
-                    )
-                    .boxed()
-                    .shared(),
-                };
-                // run this in the background now instead of waiting for the first awaiter
-                tokio::spawn(fut.clone());
-                entry.insert(fut.clone());
-            }
+            #[allow(unused_must_use)]
+            self.read_chunk(key);
         }
+    }
+
+    /// If the chunk is not already in the cache, fetch the bytes from the chunk location
+    /// and store it into the cache. Return a shared future that resolves to the bytes within the
+    /// chunk.
+    ///
+    /// The shared future is run immediately, rather than waiting for the first `await`er.
+    fn read_chunk(self: &Arc<Self>, chunk: Chunk) -> BytesFuture {
+        if let Some(entry) = self.cache.get(&chunk) {
+            let bytes = entry.value().clone();
+            return ready(Ok(bytes)).boxed().shared();
+        }
+
+        let cache = self.cache.clone();
+        let location = chunk.location.clone();
+        let range = chunk.range;
+
+        let fut = cache
+            .fetch(chunk, move || {
+                let location = location.clone();
+                let mut clients = self.clients.clone();
+                let client_builder = self.client_builder.clone();
+
+                async move {
+                    match &location {
+                        Location::Staged(_) => unimplemented!(),
+                        Location::Local { path, .. } => read_local_chunk(path.clone(), range).await,
+                        Location::ObjectStorage { bucket, key, .. } => {
+                            let client =
+                                get_client(&mut clients, client_builder, bucket.to_string());
+                            read_object_store_chunk(client, key.clone(), range).await
+                        }
+                    }
+                }
+            })
+            .map(|res| res.map(|entry| entry.value().clone()))
+            .boxed()
+            .shared();
+
+        tokio::spawn(fut.clone());
+
+        fut
     }
 
     /// For a given volume and offset, construct a Chunk that holds the byte
@@ -235,53 +233,40 @@ impl ChunkCache {
     #[cfg(test)]
     pub(crate) fn cached(&self, location: Location, offset: u64) -> bool {
         let key = self.chunk(location, offset);
-        self.cache.contains_key(&key)
+        self.cache.contains(&key)
     }
+}
+
+fn get_client(
+    clients: &mut DashMap<String, Arc<dyn ObjectStore>>,
+    client_builder: ClientBuilder,
+    bucket: String,
+) -> Arc<dyn ObjectStore> {
+    // FIXME: don't panic on bad build, try not to clone the string every time
+    let entry = clients
+        .entry(bucket.clone())
+        .or_insert_with(|| (client_builder)(bucket));
+    entry.value().clone()
 }
 
 /// Read a chunk (as specified by the key and byte range) from object storage.
 ///
 /// When used in a Shared<Future<_>>, it is guaranteed to run exactly once.
-async fn chunk_from_object_store(
+async fn read_object_store_chunk(
     object_store: Arc<dyn ObjectStore>,
-    mut chunk_store: Arc<ChunkCache>,
-    location: Location,
     key: String,
     range: ByteRange,
 ) -> Result<Bytes, ReadError> {
-    let path = Path::from(key.clone());
-    match object_store.get_range(&path, range.as_range_u64()).await {
-        Ok(bytes) => Ok(bytes),
-        Err(e) => {
-            // we failed to fetch it from object storage, so remove the BytesFuture from the cache.
-            // any concurrent readers that were batched into the same request will get a
-            // ReadError::Transient and will have to call ChunkedVolumeStore::get(..) again.
-            chunk_store.remove(location, range.offset);
-
-            Err(ReadError::Generic(e.to_string()))
-        }
-    }
+    let path = Path::from(key);
+    Ok(object_store.get_range(&path, range.as_range_u64()).await?)
 }
 
-async fn chunk_from_local_file(
-    path: PathBuf,
-    mut chunk_store: Arc<ChunkCache>,
-    location: Location,
-    range: ByteRange,
-) -> Result<Bytes, ReadError> {
-    let mut handle_error = |e: std::io::Error| {
-        // failed to read the chunk from local file, remove it from our cache.
-        chunk_store.remove(location.clone(), range.offset);
-        ReadError::Generic(e.to_string())
-    };
-
-    let mut f = File::open(path).await.map_err(&mut handle_error)?;
-    f.seek(std::io::SeekFrom::Start(range.offset))
-        .await
-        .map_err(&mut handle_error)?;
+async fn read_local_chunk(path: PathBuf, range: ByteRange) -> Result<Bytes, ReadError> {
+    let mut file = File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(range.offset)).await?;
 
     let mut buf = vec![0u8; range.len as usize];
-    let n = f.read(&mut buf).await.map_err(&mut handle_error)?;
+    let n = file.read(&mut buf).await?;
     buf.truncate(n);
 
     Ok(Bytes::from(buf))
@@ -316,11 +301,12 @@ mod test {
         let readahead = ReadAheadPolicy { size: 40 };
 
         // volume store fetches/caches 10 byte chunks
-        let client_builder: ClientBuilder = Box::new(move |_| object_store.clone());
+        let client_builder: ClientBuilder = Arc::new(move |_| object_store.clone());
         let mut volume_chunk_store =
             Arc::new(ChunkCache::new_with(10, readahead.clone(), client_builder));
 
-        let (range, _) = volume_chunk_store.get(location.clone(), 234);
+        let (range, fut) = volume_chunk_store.get(location.clone(), 234);
+        fut.await.unwrap();
 
         // every byte in the readahead-window is cached
         for offset in range.offset..(range.offset + readahead.size) {
@@ -340,7 +326,7 @@ mod test {
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
         // empty, so ChunkedVolumeStore::get(..) will get an error
-        let client_builder: ClientBuilder = Box::new(|_| Arc::new(InMemory::new()));
+        let client_builder: ClientBuilder = Arc::new(|_| Arc::new(InMemory::new()));
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "fake".to_string(),

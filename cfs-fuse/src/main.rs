@@ -56,6 +56,10 @@ struct MountArgs {
     /// The directory to mount at. Must already exist.
     mountpoint: PathBuf,
 
+    /// Maximum size of the chunk cache.
+    #[clap(long, default_value = "2GiB", value_parser = value_parser!(ByteSize))]
+    max_cache_size: ByteSize,
+
     /// The size of the chunk we fetch from object storage in a single request. It's also the size
     /// of the buffers we store within a single cache entry.
     #[clap(long, default_value = "8MiB", value_parser = value_parser!(ByteSize))]
@@ -342,6 +346,7 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
 
     let cfs = Cfs::new(
         volume,
+        args.max_cache_size.as_u64(),
         args.chunk_size.as_u64(),
         args.readahead_size.as_u64(),
     );

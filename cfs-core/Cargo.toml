@@ -8,6 +8,7 @@ bytes.workspace = true
 dashmap.workspace = true
 flatbuffers.workspace = true
 foyer.workspace = true
+foyer-memory.workspace = true
 futures.workspace = true
 object_store.workspace = true
 reqwest.workspace = true

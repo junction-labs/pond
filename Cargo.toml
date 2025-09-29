@@ -23,6 +23,7 @@ clap = { version = "4.5.47", features = ["derive"] }
 dashmap = "6.1.0"
 flatbuffers = "25.2"
 foyer = "0.20.0"
+foyer-memory = "0.20.0"
 futures = "0.3.31"
 fuser = { version = "0.16", default-features = false }
 glob = "0.3.3"
