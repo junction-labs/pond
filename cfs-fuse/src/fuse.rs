@@ -148,12 +148,11 @@ impl fuser::Filesystem for Cfs {
         // TODO: FUSE_READ specifies offset as uint64_t in current versions,
         // which makes it weird that it's an i64 here. cast it away for now.
         let offset = offset as u64;
-        if offset > 0 {
-            if let Err(_e) = self.runtime.block_on(reader.seek(SeekFrom::Start(offset))) {
+        if offset > 0
+            && let Err(_e) = self.runtime.block_on(reader.seek(SeekFrom::Start(offset))) {
                 reply.error(libc::EIO);
                 return;
             }
-        }
 
         // TODO: re-use a scratch buffer instead of allocating here
         let mut buf = vec![0u8; size as usize];

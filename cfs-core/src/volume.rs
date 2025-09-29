@@ -413,7 +413,7 @@ impl Volume {
 
     /// Obtain information about a file based only on its `ino`.
     pub fn stat(&self, ino: Ino) -> Option<&FileAttr> {
-        self.data.get(&ino.into()).map(|dent| &dent.attr)
+        self.data.get(&ino).map(|dent| &dent.attr)
     }
 
     /// Iterate over the entires in a directory. Returns an iterator of

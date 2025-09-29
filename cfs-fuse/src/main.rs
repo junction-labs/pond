@@ -254,8 +254,8 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
             )?;
 
             // make the tempfiles permanent and relocate the blob
-            let _ = data_file.persist(&data_path)?;
-            let mut volume_file = volume_file.persist(&volume_path)?;
+            let _ = data_file.persist(data_path)?;
+            let mut volume_file = volume_file.persist(volume_path)?;
             volume_file.write_all(&volume.to_bytes()?)?;
         }
         PackLocation::ObjectStorage {
