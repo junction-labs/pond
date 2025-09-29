@@ -16,6 +16,8 @@ clap = { workspace = true, features = ["derive"] }
 fuser = { workspace = true, default_features = false, features = [] }
 libc.workspace = true
 object_store = { workspace = true, features = ["aws"] }
+nix = { workspace = true, features = ["fs"]}
+reqwest.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

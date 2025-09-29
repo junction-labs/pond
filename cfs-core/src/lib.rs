@@ -1,5 +1,5 @@
 mod client;
-pub use client::{AsyncFileReader, Client, Error};
+pub use client::{AsyncFileReader, Client, Error, Fd};
 
 mod file;
 pub use file::File;

@@ -45,7 +45,7 @@ pub struct File {
 impl File {
     const READ_ERROR_THRESHOLD: u8 = 3;
 
-    pub async fn new(
+    pub fn new(
         mut volume_chunk_store: Arc<ChunkCache>,
         location: Location,
         volume_read_range: ByteRange,
@@ -340,8 +340,7 @@ mod test {
                 offset: 0,
                 len: data.len() as u64,
             },
-        )
-        .await;
+        );
 
         let mut file_data = Vec::with_capacity(data.len());
         let bytes_read = file
@@ -379,7 +378,7 @@ mod test {
             offset: (data.len() / 3) as u64,
             len: (data.len() / 3) as u64,
         };
-        let mut file = File::new(volume_chunk_store.clone(), location, read_range).await;
+        let mut file = File::new(volume_chunk_store.clone(), location, read_range);
         let mut file_data = Vec::with_capacity(data.len());
         let bytes_read = file
             .read_to_end(&mut file_data)
@@ -422,8 +421,7 @@ mod test {
                 offset: 0,
                 len: data.len() as u64,
             },
-        )
-        .await;
+        );
 
         let mut file_data: Vec<u8> = Vec::with_capacity(data.len());
         loop {
@@ -462,8 +460,7 @@ mod test {
                 offset: 0,
                 len: 1 << 10,
             },
-        )
-        .await;
+        );
 
         let mut file_data = Vec::with_capacity(data.len());
         let bytes_read = file
@@ -497,7 +494,7 @@ mod test {
             offset: file_start,
             len: 10 * (1 << 10), // 10 KiB
         };
-        let mut file = File::new(volume_chunk_store.clone(), location, file_range).await;
+        let mut file = File::new(volume_chunk_store.clone(), location, file_range);
 
         // seek to the middle of the file (512 bytes into the 1 KiB file)
         let seek_offset = file.seek(SeekFrom::Start(512)).await.unwrap();
@@ -544,7 +541,7 @@ mod test {
             offset: 100,
             len: 500,
         };
-        let mut file = File::new(volume_chunk_store.clone(), location, file_range).await;
+        let mut file = File::new(volume_chunk_store.clone(), location, file_range);
         // seek should be at pos 0
         assert_eq!(file.stream_position().await.unwrap(), 0);
 

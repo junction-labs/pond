@@ -2,15 +2,13 @@ use crate::{
     ByteRange, FileAttr, Ino, Location,
     file::File,
     read::{ChunkCache, ReadAheadPolicy},
-    volume::Volume,
+    volume::{Volume, VolumeError},
 };
-use std::{pin::Pin, sync::Arc, time::SystemTime};
-use tokio::io::{AsyncRead, AsyncSeek};
-
-// TODO: We're starting with a Reader/Writer split for modifying files in a volume
-// to make it clear that you're either getting an input or output stream, not doing
-// random writes. If that changes we should switch to something more like a File
-// struct at write_at/pread(2) methods.
+use std::{
+    collections::BTreeMap, io::SeekFrom, path::PathBuf, pin::Pin, sync::Arc, time::SystemTime,
+};
+use tempfile::TempDir;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -57,17 +55,58 @@ pub enum ErrorKind {
     ObjectStore(#[from] object_store::Error),
 }
 
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Fd(u64);
+
+impl From<u64> for Fd {
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+impl From<Fd> for u64 {
+    fn from(value: Fd) -> Self {
+        value.0
+    }
+}
+
+impl Fd {
+    fn add(&self, rhs: u64) -> Fd {
+        Fd(self.0.checked_add(rhs).expect("BUG: fd overflow"))
+    }
+}
+
+#[allow(unused)]
+enum FileDescriptor {
+    ReadOnly(Pin<Box<dyn AsyncFileReader>>),
+    Staged {
+        file: tokio::fs::File,
+        path: std::path::PathBuf,
+    },
+    Static(std::io::Cursor<Arc<[u8]>>),
+    Commit,
+    ClearCache,
+}
+
 pub trait AsyncFileReader: AsyncRead + AsyncSeek {}
 impl<T: AsyncRead + AsyncSeek> AsyncFileReader for T {}
 
 pub struct Client {
-    // TODO: this could be multiple volume versions?
-    // so if we have the most recent version, and it isn't compacted yet, then we kind of need a
-    // chained-volume lookup here. this might be as simple as a ptr to another Volume, which we use
-    // as a fallback if current version doesn't have anything.
     volume: Volume,
-    // Store that handles fetching files from object storage.
+    volume_version: Arc<[u8]>,
+
     cache: Arc<ChunkCache>,
+    tempdir: TempDir,
+    fds: BTreeMap<Fd, FileDescriptor>,
+}
+
+// TODO: the reads and writes here are mostly read_at and write_at, which would
+// be way better than the existing
+
+impl Client {
+    fn lookup_fd(&mut self, fd: Fd) -> Option<&mut FileDescriptor> {
+        self.fds.get_mut(&fd)
+    }
 }
 
 impl Client {
@@ -78,7 +117,17 @@ impl Client {
             ReadAheadPolicy { size: readahead },
         ));
 
-        Self { volume, cache }
+        // FIXME
+        let tempdir = TempDir::with_prefix("cfs-").unwrap();
+        let volume_version = std::sync::Arc::from(format!("{:#x}", 0xBEEF).into_bytes().as_slice());
+
+        Self {
+            tempdir,
+            volume,
+            volume_version,
+            cache,
+            fds: Default::default(),
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -137,36 +186,150 @@ impl Client {
         parent: Ino,
         name: String,
         exclusive: bool,
-        location: Location,
-        byte_range: ByteRange,
-    ) -> Result<&FileAttr> {
-        self.volume
-            .create(parent, name, exclusive, location, byte_range)
-            .map_err(Error::from)
-    }
+    ) -> Result<(&FileAttr, Fd)> {
+        let (path, f) = tempfile(self.tempdir.path());
+        let attr = self.volume.create(
+            parent,
+            name,
+            exclusive,
+            Location::Staged { path: path.clone() },
+            ByteRange::empty(),
+        )?;
 
-    pub async fn open(&self, ino: Ino) -> Result<Pin<Box<dyn AsyncFileReader>>> {
-        match ino {
-            Ino::VERSION => {
-                let version = self.volume.version().to_be_bytes();
-                let reader = Box::pin(std::io::Cursor::new(version));
-                return Ok(reader);
-            }
-            Ino::COMMIT => todo!(),
-            ino => {
-                let (location, byte_range) = self.volume.location(ino).ok_or(Error {
-                    kind: ErrorKind::NotFound,
-                })?;
-
-                let file = File::new(self.cache.clone(), location.clone(), *byte_range).await;
-
-                Ok(Box::pin(file))
-            }
-        }
+        let fd = new_fd(&mut self.fds, FileDescriptor::Staged { file: f, path });
+        Ok((attr, fd))
     }
 
     pub fn delete(&mut self, parent: Ino, name: &str) -> Result<()> {
         self.volume.delete(parent, name)?;
         Ok(())
+    }
+}
+
+impl Client {
+    pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
+        match ino {
+            Ino::COMMIT => {
+                let fd = new_fd(&mut self.fds, FileDescriptor::Commit);
+                Ok(fd)
+            }
+            Ino::VERSION => Err(Error::from(VolumeError::PermissionDenied)),
+            ino => match self.volume.location(ino) {
+                Some((Location::Staged { path }, _)) => {
+                    let file = tokio::fs::File::open(path).await?;
+                    let fd = new_fd(
+                        &mut self.fds,
+                        FileDescriptor::Staged {
+                            file,
+                            path: path.clone(),
+                        },
+                    );
+                    Ok(fd)
+                }
+                Some(_) => Err(Error::from(VolumeError::PermissionDenied)),
+                None => Err(Error::from(VolumeError::DoesNotExist)),
+            },
+        }
+    }
+
+    pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
+        match ino {
+            Ino::VERSION => {
+                let fd = new_fd(
+                    &mut self.fds,
+                    FileDescriptor::Static(std::io::Cursor::new(self.volume_version.clone())),
+                );
+                Ok(fd)
+            }
+            Ino::COMMIT => Err(Error::from(VolumeError::PermissionDenied)),
+            ino => match self.volume.location(ino) {
+                Some((l, range)) => {
+                    let file = File::new(self.cache.clone(), l.clone(), *range);
+                    let fd = new_fd(&mut self.fds, FileDescriptor::ReadOnly(Box::pin(file)));
+                    Ok(fd)
+                }
+                None => Err(Error::from(VolumeError::DoesNotExist)),
+            },
+        }
+    }
+
+    pub async fn read_at(&mut self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        match self.lookup_fd(fd) {
+            // reads of write-only special fds do nothing
+            Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
+            // static bytes just use their cursor
+            Some(FileDescriptor::Static(cursor)) => {
+                std::io::Seek::seek(cursor, SeekFrom::Start(offset))?;
+                let n = std::io::Read::read(cursor, buf)?;
+                Ok(n)
+            }
+            Some(FileDescriptor::ReadOnly(reader)) => {
+                reader.seek(SeekFrom::Start(offset)).await?;
+                let n = reader.read(buf).await?;
+                Ok(n)
+            }
+            Some(FileDescriptor::Staged { file, .. }) => {
+                // TODO: find a way to do File::read_at here instead of
+                // a seek and a read as separate async ops
+                file.seek(SeekFrom::Start(offset)).await?;
+                let n = file.read(buf).await?;
+                Ok(n)
+            }
+            None => Err(Error::from(VolumeError::DoesNotExist)),
+        }
+    }
+
+    pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
+        match self.lookup_fd(fd) {
+            Some(FileDescriptor::ClearCache) => todo!(),
+            Some(FileDescriptor::Commit) => {
+                self.commit().await?;
+                Ok(data.len())
+            }
+            // write directly into a staged file
+            Some(FileDescriptor::Staged { file, .. }) => {
+                file.seek(SeekFrom::Start(offset)).await?;
+                let n = file.write(data).await?;
+                Ok(n)
+            }
+            // no other fds are writable
+            Some(_) => Err(Error::from(VolumeError::PermissionDenied)),
+            None => Err(Error::from(VolumeError::DoesNotExist)),
+        }
+    }
+}
+
+// FIXME: this needs to allocate and check for remaining fds instead of just
+// trying to increment every time and crashing. it's u64 so we probably won't
+// hit it for a while but that's jank
+fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, d: FileDescriptor) -> Fd {
+    let next_fd = fd_set.keys().cloned().max().unwrap_or_default().add(1);
+    fd_set.insert(next_fd, d);
+    next_fd
+}
+
+// FIXME: handle errors
+fn tempfile(tempdir: &std::path::Path) -> (PathBuf, tokio::fs::File) {
+    let f = tempfile::Builder::new()
+        .disable_cleanup(true)
+        .tempfile_in(tempdir)
+        .unwrap();
+
+    let (f, path) = f.into_parts();
+    (path.to_path_buf(), tokio::fs::File::from_std(f))
+}
+
+impl Client {
+    async fn commit(&mut self) -> Result<()> {
+        // - pick a new `Location` for the data, should be relative to the volume
+        // - stage a multipart upload, collecting all of the new locations as
+        //   we go. should be able to parallelize this step, optimize by chunking
+        //   files together, but don't have to do that up front. save the location
+        //   list while putting together the upload.
+        // - once the data is written, modify the volume:
+        //   - update the version
+        //   - relocate individual files with volume.modify
+        //   - write and upload the new volume metadata
+        todo!()
     }
 }

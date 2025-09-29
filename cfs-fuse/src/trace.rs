@@ -46,12 +46,12 @@ where
     }
 
     fn forget(&mut self, req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
-        tracing::info!("forget(ino: {ino:#x?}, nlookup: {nlookup:#?}");
+        tracing::info!("forget(ino: {ino:#x?}, nlookup: {nlookup:#?})");
         self.inner.forget(req, ino, nlookup);
     }
 
     fn batch_forget(&mut self, req: &fuser::Request<'_>, nodes: &[fuser::fuse_forget_one]) {
-        tracing::info!("batch_forget(nodes: {nodes:#x?}");
+        tracing::info!("batch_forget(nodes: {nodes:#x?})");
         self.inner.batch_forget(req, nodes);
     }
 

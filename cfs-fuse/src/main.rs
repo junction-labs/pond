@@ -122,7 +122,7 @@ fn main() {
 fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
     fn location_path(l: &Location) -> String {
         match l {
-            Location::Staged(i) => format!("staged({i})"),
+            Location::Staged { path } => format!("staged({path})", path = path.display()),
             Location::Local { path, .. } => format!("{path}", path = path.display()),
             Location::ObjectStorage { bucket, key, .. } => format!("s3://{bucket}/{key}"),
         }
@@ -222,7 +222,9 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
     let mut cursor = 0u64;
 
     // create a staging blob
-    let staging = Location::Staged(0);
+    let staging = Location::Staged {
+        path: data_file.path().to_path_buf(),
+    };
 
     let walker = walkdir::WalkDir::new(root).min_depth(1);
     for entry in walker {
@@ -285,7 +287,6 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
                 &staging,
                 Location::Local {
                     path: data_path.to_path_buf(),
-                    len: cursor as usize,
                 },
             )?;
 
@@ -314,7 +315,6 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
                 Location::ObjectStorage {
                     bucket: bucket.clone(),
                     key: data_key.clone(),
-                    len: cursor as usize,
                 },
             )?;
 
