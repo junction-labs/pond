@@ -17,12 +17,10 @@ struct ByteRange {
 table S3Location {
     bucket: string (required);
     key: string (required);
-    length: uint64;
 }
 
 table LocalLocation {
     path: string (required);
-    length: uint64;
 }
 
 union Location {

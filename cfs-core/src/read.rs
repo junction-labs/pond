@@ -196,8 +196,9 @@ impl ChunkCache {
 
                 async move {
                     match &location {
-                        Location::Staged(_) => unimplemented!(),
-                        Location::Local { path, .. } => read_local_chunk(path.clone(), range).await,
+                        Location::Staged { path } | Location::Local { path, .. } => {
+                            read_local_chunk(path.clone(), range).await
+                        }
                         Location::ObjectStorage { bucket, key, .. } => {
                             let client = get_client(clients, client_builder, bucket.to_string());
                             read_object_store_chunk(client, key.clone(), range).await
@@ -292,7 +293,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         // readahead size of 40 bytes (4 chunks)
@@ -328,7 +328,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "fake".to_string(),
-            len: 1 << 10,
         };
 
         let mut volume_chunk_store =

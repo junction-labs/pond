@@ -1,10 +1,10 @@
 use crate::{
-    FileAttr, Ino,
+    ByteRange, FileAttr, Ino, Location,
     file::File,
     read::{ChunkCache, ReadAheadPolicy},
     volume::Volume,
 };
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 // TODO: We're starting with a Reader/Writer split for modifying files in a volume
@@ -81,8 +81,12 @@ impl Client {
         Self { volume, cache }
     }
 
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self.volume.to_bytes()?)
+    }
+
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
-        match self.volume.stat(ino) {
+        match self.volume.getattr(ino) {
             Some(attr) => Ok(attr),
             None => Err(Error {
                 kind: ErrorKind::NotFound,
@@ -90,26 +94,79 @@ impl Client {
         }
     }
 
+    pub fn setattr(
+        &mut self,
+        ino: Ino,
+        mtime: Option<SystemTime>,
+        ctime: Option<SystemTime>,
+    ) -> Result<&FileAttr> {
+        Ok(self.volume.setattr(ino, mtime, ctime)?)
+    }
+
+    pub fn modify(
+        &mut self,
+        ino: Ino,
+        location: Option<Location>,
+        range: Option<ByteRange>,
+    ) -> Result<()> {
+        self.volume.modify(ino, location, range)?;
+        Ok(())
+    }
+
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
-        self.volume.lookup(parent, name).map_err(|e| e.into())
+        let attr = self.volume.lookup(parent, name)?;
+        Ok(attr)
+    }
+
+    pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr> {
+        Ok(self.volume.mkdir(parent, name)?)
+    }
+
+    pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<()> {
+        self.volume.rmdir(parent, name)?;
+        Ok(())
     }
 
     pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = (&str, &FileAttr)>> {
-        self.volume.readdir(ino).map_err(Error::from)
+        let iter = self.volume.readdir(ino)?;
+        Ok(iter)
+    }
+
+    pub fn create(
+        &mut self,
+        parent: Ino,
+        name: String,
+        exclusive: bool,
+        location: Location,
+        byte_range: ByteRange,
+    ) -> Result<&FileAttr> {
+        self.volume
+            .create(parent, name, exclusive, location, byte_range)
+            .map_err(Error::from)
     }
 
     pub async fn open(&self, ino: Ino) -> Result<Pin<Box<dyn AsyncFileReader>>> {
-        if let Ino::VERSION = ino {
-            let reader = Box::pin(std::io::Cursor::new(self.volume.version_data()));
-            return Ok(reader);
+        match ino {
+            Ino::VERSION => {
+                let version = self.volume.version().to_be_bytes();
+                let reader = Box::pin(std::io::Cursor::new(version));
+                return Ok(reader);
+            }
+            Ino::COMMIT => todo!(),
+            ino => {
+                let (location, byte_range) = self.volume.location(ino).ok_or(Error {
+                    kind: ErrorKind::NotFound,
+                })?;
+
+                let file = File::new(self.cache.clone(), location.clone(), *byte_range).await;
+
+                Ok(Box::pin(file))
+            }
         }
+    }
 
-        let (location, byte_range) = self.volume.location(ino).ok_or(Error {
-            kind: ErrorKind::NotFound,
-        })?;
-
-        let file = File::new(self.cache.clone(), location.clone(), *byte_range).await;
-
-        Ok(Box::pin(file))
+    pub fn delete(&mut self, parent: Ino, name: &str) -> Result<()> {
+        self.volume.delete(parent, name)?;
+        Ok(())
     }
 }

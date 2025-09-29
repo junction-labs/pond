@@ -58,6 +58,7 @@ impl Ino {
     const MIN_REGULAR: u64 = 32;
 
     pub const VERSION: Self = Ino::Reserved(2);
+    pub const COMMIT: Self = Ino::Reserved(3);
 
     pub fn as_u64(&self) -> u64 {
         match self {
@@ -131,18 +132,12 @@ impl FileAttr {
     }
 }
 
+// TODO: add checksums/etags here?
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
-    Staged(usize),
-    Local {
-        path: PathBuf,
-        len: usize,
-    },
-    ObjectStorage {
-        bucket: String,
-        key: String,
-        len: usize,
-    },
+    Staged { path: PathBuf },
+    Local { path: PathBuf },
+    ObjectStorage { bucket: String, key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -152,6 +147,10 @@ pub struct ByteRange {
 }
 
 impl ByteRange {
+    pub fn empty() -> Self {
+        Self { offset: 0, len: 0 }
+    }
+
     pub fn contains(&self, idx: u64) -> bool {
         self.offset <= idx && idx < self.end()
     }

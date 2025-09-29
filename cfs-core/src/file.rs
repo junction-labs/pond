@@ -325,7 +325,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -366,7 +365,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -408,7 +406,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         // volume store fetches/caches 8 KiB chunks
@@ -456,7 +453,6 @@ mod test {
 
         let location = Location::Local {
             path: tmpfile.path().to_path_buf(),
-            len: 1 << 10,
         };
 
         let mut file = File::new(
@@ -486,7 +482,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         // volume store fetches/caches 1 KiB chunks
@@ -536,7 +531,6 @@ mod test {
         let location = Location::ObjectStorage {
             bucket: "".to_string(),
             key: "volume".to_string(),
-            len: 1 << 10,
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(

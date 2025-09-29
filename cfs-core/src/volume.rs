@@ -2,7 +2,6 @@ use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
     path::PathBuf,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -37,6 +36,10 @@ pub enum VolumeError {
     DoesNotExist,
     #[error("already exists")]
     AlreadyExists,
+    #[error("directory is not empty")]
+    NotEmpty,
+    #[error("permission denied")]
+    PermissionDenied,
     #[error("{message}")]
     Invalid { message: Cow<'static, str> },
 }
@@ -71,7 +74,6 @@ impl VolumeError {
 #[derive(Debug)]
 pub struct Volume {
     version: u64,
-    version_bytes: Arc<[u8]>,
 
     // the next availble ino. must start at Ino::Root.add(1) for an empty
     // volume.
@@ -101,6 +103,7 @@ struct Entry {
 }
 
 impl Entry {
+    #[inline]
     fn is_dir(&self) -> bool {
         matches!(self.data, EntryData::Directory)
     }
@@ -168,20 +171,11 @@ impl Volume {
 
         Self {
             version: 0xBEEF,
-            version_bytes: Arc::from(format!("{:#x}", 0xBEEF).into_bytes().as_slice()),
             next_ino: Ino::min_regular(),
             locations: vec![],
             data,
             dirs,
         }
-    }
-
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    pub fn version_data(&self) -> Arc<[u8]> {
-        self.version_bytes.clone()
     }
 
     const fn reserved_entries() -> [Entry; 2] {
@@ -213,45 +207,17 @@ impl Volume {
         ]
     }
 
+    /// Returns the current version of the volume.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Check whether this volume is being staged. Staged volumes contain
     /// unstable data references and can't be serialized.
     pub fn is_staged(&self) -> bool {
         self.locations
             .iter()
-            .any(|l| matches!(l, Location::Staged(_)))
-    }
-
-    /// Change the phyical location of a data blob.
-    ///
-    /// This is most often used when rewriting a volume to change data locations.
-    ///
-    /// ```no_run
-    /// # use cfs_core::{ByteRange, Ino, Location, volume::{Volume, VolumeError}};
-    /// # use std::path::PathBuf;
-    /// # fn doc() -> Result<(), VolumeError> {
-    /// let mut volume = Volume::empty();
-    ///
-    /// volume.create(
-    ///     Ino::Root,
-    ///     "test.txt".to_string(),
-    ///     true,
-    ///     Location::Staged(0),
-    ///     ByteRange { offset: 0, len: 64 },
-    /// )?;
-    ///
-    /// volume.relocate(&Location::Staged(0), Location::Local {
-    ///   path: PathBuf::from("./test.txt"),
-    ///   len: 64,
-    /// })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
-        let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
-            return Err(VolumeError::invalid("unknown location"));
-        };
-        *from = to;
-        Ok(())
+            .any(|l| matches!(l, Location::Staged { .. }))
     }
 
     /// Create a new directory.
@@ -331,6 +297,36 @@ impl Volume {
         Ok(&self.data.get(&dir).unwrap().attr)
     }
 
+    /// Remove a directory. Returns an error if the
+    pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<(), VolumeError> {
+        let _ = self.dir_entry(parent)?;
+
+        // TODO: we shouldn't have to copy the string here, but
+        // invariance/subtyping of mut references somehow mean that the key
+        // being EntryKey<'static> implies that this needs to be owned.
+        let k = EntryKey::from((parent, name.to_string()));
+
+        let ino = *self.dirs.get(&k).ok_or(VolumeError::DoesNotExist)?;
+        let data_entry = match self.data.entry(ino) {
+            btree_map::Entry::Vacant(_) => unreachable!("BUG: inconsistent dir entry"),
+            btree_map::Entry::Occupied(entry) => entry,
+        };
+
+        match data_entry.get().data {
+            EntryData::Dynamic | EntryData::File { .. } => Err(VolumeError::NotADirectory),
+            EntryData::Directory => {
+                let not_empty = self.dirs.range(entry_range(ino)).any(|_| true);
+                if not_empty {
+                    return Err(VolumeError::NotEmpty);
+                }
+
+                data_entry.remove();
+                self.dirs.remove(&k);
+                Ok(())
+            }
+        }
+    }
+
     /// Create a file.
     ///
     /// If `exclusive` is set and the file already exists, creation will fail
@@ -388,6 +384,35 @@ impl Volume {
         Ok(&entry.attr)
     }
 
+    /// Remove a file from a volume.
+    pub fn delete(&mut self, parent: Ino, name: &str) -> Result<(), VolumeError> {
+        let _ = self.dir_entry(parent)?;
+
+        // TODO: we shouldn't have to copy the string here, but
+        // invariance/subtyping of mut references somehow mean that the key
+        // being EntryKey<'static> implies that this needs to be owned.
+        let k = EntryKey::from((parent, name.to_string()));
+
+        let dir_entry = match self.dirs.entry(k) {
+            btree_map::Entry::Vacant(_) => return Err(VolumeError::DoesNotExist),
+            btree_map::Entry::Occupied(entry) => entry,
+        };
+        let data_entry = match self.data.entry(*dir_entry.get()) {
+            btree_map::Entry::Vacant(_) => unreachable!("BUG: inconsistent dir entry"),
+            btree_map::Entry::Occupied(entry) => entry,
+        };
+
+        match data_entry.get().data {
+            EntryData::File { .. } => {
+                dir_entry.remove();
+                data_entry.remove();
+                Ok(())
+            }
+            EntryData::Directory => Err(VolumeError::IsADirectory),
+            EntryData::Dynamic => Err(VolumeError::PermissionDenied),
+        }
+    }
+
     fn next_ino(&mut self) -> Ino {
         let ino = self.next_ino;
         self.next_ino = self.next_ino.add(1);
@@ -401,19 +426,91 @@ impl Volume {
         Ok(self.lookup_unchecked(parent, name))
     }
 
+    /// Do a lookup without checking if `parent` is a directory.
+    ///
+    /// This is not unsafe, but is unchecked in that it won't return
+    /// an error if the parent doesn't exist - it will just return None.
+    // TODO: should this return Entry? we could remove a call or two in
+    // a few higher level fns
     #[inline]
     fn lookup_unchecked(&self, parent: Ino, name: &str) -> Option<&FileAttr> {
         let k = EntryKey::from((parent, name));
 
-        self.dirs
-            .get(&k)
-            .and_then(|ino| self.data.get(ino))
-            .map(|dent| &dent.attr)
+        let ino = self.dirs.get(&k)?;
+        self.data.get(ino).map(|dent| &dent.attr)
+    }
+
+    #[inline]
+    fn lookup_unchecked_mut(&mut self, parent: Ino, name: &str) -> Option<&mut Entry> {
+        let k = EntryKey::from((parent, name));
+
+        let ino = self.dirs.get(&k)?;
+        self.data.get_mut(ino)
     }
 
     /// Obtain information about a file based only on its `ino`.
-    pub fn stat(&self, ino: Ino) -> Option<&FileAttr> {
+    pub fn getattr(&self, ino: Ino) -> Option<&FileAttr> {
         self.data.get(&ino).map(|dent| &dent.attr)
+    }
+
+    pub fn setattr(
+        &mut self,
+        ino: Ino,
+        mtime: Option<SystemTime>,
+        ctime: Option<SystemTime>,
+    ) -> Result<&FileAttr, VolumeError> {
+        let entry = self.data.get_mut(&ino).ok_or(VolumeError::DoesNotExist)?;
+        if let Some(mtime) = mtime {
+            entry.attr.mtime = mtime;
+        }
+        if let Some(ctime) = ctime {
+            entry.attr.ctime = ctime;
+        }
+        Ok(&entry.attr)
+    }
+
+    /// Change the phyical location of a data blob.
+    ///
+    /// This changes the physical location for all files in the volume that
+    /// refer to this blob. To relocate an individual file, see `modify`.
+    pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
+        let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
+            return Err(VolumeError::invalid("unknown location"));
+        };
+        *from = to;
+        Ok(())
+    }
+
+    /// Update a file's metadata to reflect that a file's data has been modified.
+    ///
+    /// This method changes the location of a file, it's range of bytes within that
+    /// location, or both.
+    pub fn modify(
+        &mut self,
+        ino: Ino,
+        location: Option<Location>,
+        range: Option<ByteRange>,
+    ) -> Result<(), VolumeError> {
+        let Some(entry) = self.data.get_mut(&ino) else {
+            return Err(VolumeError::DoesNotExist);
+        };
+        let EntryData::File {
+            location_idx,
+            byte_range,
+        } = &mut entry.data
+        else {
+            return Err(VolumeError::IsADirectory);
+        };
+
+        if let Some(location) = location {
+            let new_location = insert_unique(&mut self.locations, location);
+            *location_idx = new_location;
+        }
+        if let Some(range) = range {
+            *byte_range = range;
+        }
+
+        Ok(())
     }
 
     /// Iterate over the entires in a directory. Returns an iterator of
@@ -422,7 +519,11 @@ impl Volume {
     /// Iterator order is not guaranteed to be stable.
     pub fn readdir<'a>(&'a self, ino: Ino) -> Result<ReadDir<'a>, VolumeError> {
         let _ = self.dir_entry(ino)?;
-        Ok(self.dir_iter(ino))
+
+        Ok(ReadDir {
+            range: self.dirs.range(entry_range(ino)),
+            data: &self.data,
+        })
     }
 
     /// Walk a subtree starting from a directory. Walks are done in depth-first
@@ -434,7 +535,10 @@ impl Volume {
     /// directory names.
     pub fn walk<'a>(&'a self, ino: Ino) -> Result<WalkIter<'a>, VolumeError> {
         let root_dir = self.dir_entry(ino)?;
-        let root_iter = self.dir_iter(ino);
+        let root_iter = ReadDir {
+            range: self.dirs.range(entry_range(ino)),
+            data: &self.data,
+        };
         Ok(WalkIter {
             volume: self,
             readdirs: vec![root_iter],
@@ -449,15 +553,6 @@ impl Volume {
             return Err(VolumeError::NotADirectory);
         }
         Ok(entry)
-    }
-
-    fn dir_iter(&'_ self, ino: Ino) -> ReadDir<'_> {
-        let start: EntryKey = (ino, "").into();
-        let end: EntryKey = (ino.add(1), "").into();
-        ReadDir {
-            range: self.dirs.range(start..end),
-            data: &self.data,
-        }
     }
 
     /// Get a file's physical location for opening and reading.
@@ -533,9 +628,7 @@ impl Volume {
             return Err(VolumeError::invalid("no entries"));
         }
 
-        // let mut data = BTreeMap::new();
-        // let mut entries = BTreeMap::new();
-        let mut max_ino = Ino::Root;
+        let mut max_ino = Ino::min_regular();
         let mut volume = Self::empty();
 
         // set the locations
@@ -551,6 +644,7 @@ impl Volume {
             volume.dirs.insert(dir_key, entry.attr.ino);
             volume.data.insert(entry.attr.ino, entry);
         }
+        volume.next_ino = max_ino.add(1);
 
         Ok(volume)
     }
@@ -567,6 +661,12 @@ fn insert_unique<T: std::cmp::PartialEq>(xs: &mut Vec<T>, x: T) -> usize {
     }
 }
 
+fn entry_range(ino: Ino) -> std::ops::Range<EntryKey<'static>> {
+    let start: EntryKey = (ino, "").into();
+    let end: EntryKey = (ino.add(1), "").into();
+    start..end
+}
+
 /// The iterator returned from [readdir][Volume::readdir].
 pub struct ReadDir<'a> {
     data: &'a BTreeMap<Ino, Entry>,
@@ -578,7 +678,10 @@ impl<'a> Iterator for ReadDir<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(EntryKey(k), ino)| {
-            let dent = self.data.get(ino).unwrap();
+            let dent = self
+                .data
+                .get(ino)
+                .unwrap_or_else(|| panic!("BUG: invalid dirent: ino={ino:?}"));
             (k.name.as_ref(), &dent.attr)
         })
     }
@@ -757,19 +860,14 @@ fn to_fb_location<'a>(
     location: &Location,
 ) -> Result<WIPOffset<fb::LocationWrapper<'a>>, VolumeError> {
     let union = match location {
-        Location::Local { path, len } => {
+        Location::Local { path } => {
             // FIXME: what do we do about non-utf8 paths?
             let path = fbb.create_string(path.to_str().unwrap());
-            let location = fb::LocalLocation::create(
-                fbb,
-                &fb::LocalLocationArgs {
-                    path: Some(path),
-                    length: *len as u64,
-                },
-            );
+            let location =
+                fb::LocalLocation::create(fbb, &fb::LocalLocationArgs { path: Some(path) });
             location.as_union_value()
         }
-        Location::ObjectStorage { bucket, key, len } => {
+        Location::ObjectStorage { bucket, key } => {
             let bucket = fbb.create_shared_string(bucket);
             let key = fbb.create_string(key);
             let location = fb::S3Location::create(
@@ -777,7 +875,6 @@ fn to_fb_location<'a>(
                 &fb::S3LocationArgs {
                     bucket: Some(bucket),
                     key: Some(key),
-                    length: *len as u64,
                 },
             );
             location.as_union_value()
@@ -809,21 +906,13 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
         fb::Location::local => {
             let fb_location = fb_location.location_as_local().unwrap();
             let path = PathBuf::from(fb_location.path());
-            let len = fb_location
-                .length()
-                .try_into()
-                .map_err(|_| VolumeError::invalid("length overflow"))?;
-            Ok(Location::Local { path, len })
+            Ok(Location::Local { path })
         }
         fb::Location::s3 => {
             let fb_location = fb_location.location_as_s_3().unwrap();
             let bucket = fb_location.bucket().to_string();
             let key = fb_location.key().to_string();
-            let len = fb_location
-                .length()
-                .try_into()
-                .map_err(|_| VolumeError::invalid("length overflow"))?;
-            Ok(Location::ObjectStorage { bucket, key, len })
+            Ok(Location::ObjectStorage { bucket, key })
         }
         lt => Err(VolumeError::invalid(format!(
             "unknown location type: code={code} name={name}",
@@ -838,7 +927,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn create() {
+    fn open() {
         let mut volume = Volume::empty();
         let f1 = volume
             .create(
@@ -847,7 +936,6 @@ mod test {
                 true,
                 Location::Local {
                     path: PathBuf::from("zzzz"),
-                    len: 123,
                 },
                 ByteRange {
                     offset: 0,
@@ -867,7 +955,6 @@ mod test {
                 true,
                 Location::Local {
                     path: PathBuf::from("aaaa"),
-                    len: 123,
                 },
                 ByteRange {
                     offset: 0,
@@ -883,6 +970,89 @@ mod test {
         // location should match what we just created with
         let (l2, _) = volume.location(f2.ino).unwrap();
         assert_eq!(local_path(l2), Some("aaaa"));
+    }
+
+    #[test]
+    fn delete() {
+        let mut volume = Volume::empty();
+        let mk_file = |volume: &mut Volume, parent| {
+            volume
+                .create(
+                    parent,
+                    "zzzz".to_string(),
+                    true,
+                    Location::Local {
+                        path: PathBuf::from("zzzz"),
+                    },
+                    ByteRange {
+                        offset: 0,
+                        len: 123,
+                    },
+                )
+                .unwrap()
+                .clone()
+        };
+
+        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
+        let f1 = mk_file(&mut volume, Ino::Root);
+        let f2 = mk_file(&mut volume, a.ino);
+
+        // location should match what we just created with
+        let (l1, _) = volume.location(f1.ino).unwrap();
+        assert_eq!(local_path(l1), Some("zzzz"));
+        let (l1, _) = volume.location(f2.ino).unwrap();
+        assert_eq!(local_path(l1), Some("zzzz"));
+
+        // delete the first file
+        volume.delete(Ino::Root, "zzzz").unwrap();
+        assert_eq!(volume.location(f1.ino), None);
+        let (l1, _) = volume.location(f2.ino).unwrap();
+        assert_eq!(local_path(l1), Some("zzzz"));
+
+        // delete both files
+        volume.delete(a.ino, "zzzz").unwrap();
+        assert_eq!(volume.location(f1.ino), None);
+        assert_eq!(volume.location(f2.ino), None);
+
+        // should just contain the directory, not the initial file
+        let names: Vec<_> = volume
+            .readdir(Ino::Root)
+            .unwrap()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(vec![".version", "a"], names);
+        // should be empty
+        let names: Vec<_> = volume
+            .readdir(a.ino)
+            .unwrap()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn delete_directory() {
+        let mut volume = Volume::empty();
+        let _ = volume.mkdir(Ino::Root, "a".to_string()).unwrap();
+        assert_eq!(
+            volume.delete(Ino::Root, "a"),
+            Err(VolumeError::IsADirectory)
+        );
+    }
+
+    #[test]
+    fn delete_special_file() {
+        let mut volume = Volume::empty();
+
+        for entry in Volume::reserved_entries() {
+            if entry.is_dir() {
+                continue;
+            }
+            assert_eq!(
+                volume.delete(Ino::Root, &entry.name),
+                Err(VolumeError::PermissionDenied)
+            );
+        }
     }
 
     fn local_path(l: &Location) -> Option<&str> {
@@ -1071,7 +1241,6 @@ mod test {
         Location::ObjectStorage {
             bucket: "test-bucket".to_string(),
             key: "test-key.txt".to_string(),
-            len: 123,
         }
     }
 }
