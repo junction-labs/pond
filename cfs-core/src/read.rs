@@ -185,13 +185,12 @@ impl ChunkCache {
             return ready(Ok(bytes)).boxed().shared();
         }
 
-        let cache = self.cache.clone();
         let location = chunk.location.clone();
         let range = chunk.range;
 
-        let fut = cache
+        let fut = self
+            .cache
             .fetch(chunk, move || {
-                let location = location.clone();
                 let clients = self.clients.clone();
                 let client_builder = self.client_builder.clone();
 
