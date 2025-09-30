@@ -83,7 +83,7 @@ pub struct ChunkCache {
     client_builder: ClientBuilder,
 
     /// Object store to query chunks from volumes
-    clients: DashMap<String, Arc<dyn ObjectStore>>,
+    clients: Arc<DashMap<String, Arc<dyn ObjectStore>>>,
 
     /// Global readahead policy. For every get, if readahead is enabled, fetch the bytes within the
     /// readahead window in parallel.
@@ -111,7 +111,7 @@ impl ChunkCache {
             cache,
             chunk_size,
             client_builder: default_builder,
-            clients: DashMap::new(),
+            clients: Arc::new(DashMap::new()),
             readahead_policy,
         }
     }
@@ -129,7 +129,7 @@ impl ChunkCache {
             cache,
             chunk_size,
             client_builder,
-            clients: DashMap::new(),
+            clients: Arc::new(DashMap::new()),
             readahead_policy,
         }
     }
@@ -192,7 +192,7 @@ impl ChunkCache {
         let fut = cache
             .fetch(chunk, move || {
                 let location = location.clone();
-                let mut clients = self.clients.clone();
+                let clients = self.clients.clone();
                 let client_builder = self.client_builder.clone();
 
                 async move {
@@ -200,8 +200,7 @@ impl ChunkCache {
                         Location::Staged(_) => unimplemented!(),
                         Location::Local { path, .. } => read_local_chunk(path.clone(), range).await,
                         Location::ObjectStorage { bucket, key, .. } => {
-                            let client =
-                                get_client(&mut clients, client_builder, bucket.to_string());
+                            let client = get_client(clients, client_builder, bucket.to_string());
                             read_object_store_chunk(client, key.clone(), range).await
                         }
                     }
@@ -238,7 +237,7 @@ impl ChunkCache {
 }
 
 fn get_client(
-    clients: &mut DashMap<String, Arc<dyn ObjectStore>>,
+    clients: Arc<DashMap<String, Arc<dyn ObjectStore>>>,
     client_builder: ClientBuilder,
     bucket: String,
 ) -> Arc<dyn ObjectStore> {
