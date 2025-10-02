@@ -367,7 +367,6 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
     }
 
     if args.debug {
-        tracing_subscriber::fmt::init();
         fuser::mount2(trace::Trace::new(cfs), args.mountpoint, &opts)?;
     } else {
         fuser::mount2(cfs, args.mountpoint, &opts)?;
