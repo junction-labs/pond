@@ -11,14 +11,14 @@ cfs-core.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
+comfy-table.workspace = true
 clap = { workspace = true, features = ["derive"] }
 fuser = { workspace = true, default_features = false, features = [] }
 libc.workspace = true
 object_store = { workspace = true, features = ["aws"] }
-reqwest.workspace = true
 tempfile.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 walkdir.workspace = true

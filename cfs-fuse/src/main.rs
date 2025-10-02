@@ -1,6 +1,7 @@
 mod fuse;
 mod trace;
 
+use anyhow::Context;
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use cfs_core::Location;
@@ -14,6 +15,10 @@ use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::fuse::Cfs;
+
+static VOL_FILENAME: &str = "vol.cfs.bin";
+static DATA_FILENAME: &str = "data.cfs.bin";
+static VERSION_SUBDIR: &str = "version";
 
 #[derive(Parser)]
 struct Args {
@@ -35,6 +40,12 @@ enum Cmd {
         to: String,
     },
 
+    /// List all versions in the volume.
+    List {
+        #[command(flatten)]
+        volume: VolumeArgs,
+    },
+
     /// Run a cfs FUSE mount.
     Mount(MountArgs),
 }
@@ -50,12 +61,32 @@ struct MountArgs {
     #[clap(long, default_value_t = true)]
     auto_unmount: bool,
 
-    /// The CFS volume to mount.
-    volume: PathBuf,
+    #[command(flatten)]
+    volume: VolumeArgs,
 
     /// The directory to mount at. Must already exist.
     mountpoint: PathBuf,
 
+    /// Specific version of the volume to mount. Default: latest version.
+    #[clap(long)]
+    version: Option<String>,
+
+    #[command(flatten)]
+    read_behavior: ReadBehaviorArgs,
+}
+
+#[derive(clap::Args, Debug)]
+struct VolumeArgs {
+    /// The path to the volume. Can be a local path or an S3 path.
+    path: String,
+
+    /// S3 region (only applicable when the volume path is an S3 path).
+    #[arg(long, default_value = "us-east-2")]
+    region: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReadBehaviorArgs {
     /// Maximum size of the chunk cache.
     #[clap(long, default_value = "2GiB", value_parser = value_parser!(ByteSize))]
     max_cache_size: ByteSize,
@@ -78,6 +109,7 @@ fn main() {
     let res = match args.cmd {
         Cmd::Dump { volume } => dump(volume),
         Cmd::Pack { dir, to } => pack(dir, to),
+        Cmd::List { volume } => list(volume),
         Cmd::Mount(mount_args) => mount(mount_args),
     };
 
@@ -156,8 +188,8 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
             let (bucket, key) = bucket_and_key
                 .split_once("/")
                 .ok_or(anyhow::anyhow!("invalid s3 prefix"))?;
-            let vol_key = format!("{key}/vol.cfs.bin", key = key.trim_end_matches("/"));
-            let data_key = format!("{key}/data.cfs.bin", key = key.trim_end_matches("/"));
+            let vol_key = format!("{key}/{VOL_FILENAME}", key = key.trim_end_matches("/"));
+            let data_key = format!("{key}/{DATA_FILENAME}", key = key.trim_end_matches("/"));
             PackLocation::ObjectStorage {
                 bucket: bucket.to_string(),
                 volume: vol_key,
@@ -169,8 +201,8 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
             if !std::fs::metadata(&to)?.is_dir() {
                 anyhow::bail!("{to} is not a directory");
             }
-            let volume = Path::new(&to).join("vol.cfs.bin");
-            let data = Path::new(&to).join("data.cfs.bin");
+            let volume = Path::new(&to).join(VOL_FILENAME);
+            let data = Path::new(&to).join(DATA_FILENAME);
 
             if volume.exists() {
                 anyhow::bail!("{volume}: already exists", volume = volume.display());
@@ -274,6 +306,7 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
 
             let s3 = AmazonS3Builder::from_env()
                 .with_bucket_name(bucket)
+                .with_region("us-east-2")
                 .build()?;
 
             volume.relocate(
@@ -340,15 +373,81 @@ async fn read_up_to<R: AsyncRead + Unpin>(
     Ok(read)
 }
 
+fn list(VolumeArgs { path, region }: VolumeArgs) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    let url: url::Url = path.parse()?;
+    let (object_store, path) = object_store::parse_url_opts(&url, [("region", region)])?;
+    let path = version_dir(path);
+
+    runtime.block_on(async {
+        let result = object_store.list_with_delimiter(Some(&path)).await?;
+
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec!["version", "last_modified"]);
+        for path in result.common_prefixes {
+            let Ok(metadata) = object_store.head(&path.child(VOL_FILENAME)).await else {
+                continue;
+            };
+            table.add_row(vec![
+                path.filename().unwrap_or("(empty)"),
+                &metadata.last_modified.to_string(),
+            ]);
+        }
+
+        if table.is_empty() {
+            println!("(empty volume)");
+        } else {
+            println!("{table}");
+        }
+
+        Ok(())
+    })
+}
+
 fn mount(args: MountArgs) -> anyhow::Result<()> {
-    let volume_bs = std::fs::read(&args.volume).unwrap();
-    let volume = Volume::from_bytes(&volume_bs).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap();
+
+    let volume = runtime.block_on(async {
+        let url: url::Url = args.volume.path.parse()?;
+        let (object_store, path) = object_store::parse_url_opts(&url, [("region", args.volume.region)])?;
+        let path = version_dir(path);
+
+        let path = if let Some(version) = args.version {
+            // try to load the volume at this version for validation
+            let path = path.child(version.clone()).child(VOL_FILENAME);
+            object_store
+                .head(&path)
+                .await
+                .context(format!("unable to load volume at version={version}"))?;
+            path
+        } else {
+            // list all versions, and use the lexographically maximum version
+            let result = object_store.list_with_delimiter(Some(&path)).await?;
+            let path = result
+                .common_prefixes
+                .into_iter()
+                .max()
+                .ok_or(anyhow::anyhow!("could not find a volume version to mount. consider explicitly specifying --version"))?;
+            path.child(VOL_FILENAME)
+        };
+
+        let bytes = object_store.get(&path).await?.bytes().await?;
+        Volume::from_bytes(&bytes).context("failed to parse Volume")
+    })?;
 
     let cfs = Cfs::new(
+        runtime,
         volume,
-        args.max_cache_size.as_u64(),
-        args.chunk_size.as_u64(),
-        args.readahead_size.as_u64(),
+        args.read_behavior.max_cache_size.as_u64(),
+        args.read_behavior.chunk_size.as_u64(),
+        args.read_behavior.readahead_size.as_u64(),
     );
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
@@ -373,4 +472,8 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn version_dir(path: object_store::path::Path) -> object_store::path::Path {
+    path.child(VERSION_SUBDIR)
 }

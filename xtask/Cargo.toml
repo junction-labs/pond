@@ -7,5 +7,4 @@ edition = "2024"
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 glob.workspace = true
-walkdir.workspace = true
 xshell.workspace = true

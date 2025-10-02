@@ -12,17 +12,12 @@ pub(crate) struct Cfs {
 
 impl Cfs {
     pub(crate) fn new(
+        runtime: tokio::runtime::Runtime,
         volume: Volume,
         max_cache_size: u64,
         chunk_size: u64,
         readahead_size: u64,
     ) -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap();
-
         let volume = Client::new(volume, max_cache_size, chunk_size, readahead_size);
 
         Self {
