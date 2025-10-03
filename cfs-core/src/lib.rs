@@ -1,13 +1,11 @@
+mod file;
 mod metadata;
+mod read;
 mod volume;
 
+pub use file::File;
 pub use metadata::{VolumeError, VolumeMetadata};
 pub use volume::{AsyncFileReader, Error, Fd, Volume};
-
-mod file;
-pub use file::File;
-
-pub mod read;
 
 use std::{path::PathBuf, time::SystemTime};
 
