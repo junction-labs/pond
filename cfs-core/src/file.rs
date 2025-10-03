@@ -291,6 +291,7 @@ mod test {
     use std::io::Write;
 
     use crate::read::ClientBuilder;
+    use crate::InternedString;
 
     use super::*;
     use bytes::Bytes;
@@ -323,8 +324,8 @@ mod test {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
+            bucket: InternedString::from(""),
+            key: InternedString::from("volume"),
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -362,8 +363,8 @@ mod test {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
+            bucket: InternedString::from(""),
+            key: InternedString::from("volume"),
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -403,8 +404,8 @@ mod test {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
+            bucket: InternedString::from(""),
+            key: InternedString::from("volume"),
         };
 
         // volume store fetches/caches 8 KiB chunks
@@ -477,8 +478,8 @@ mod test {
         let data = random_bytes(1 << 14); // 16 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
+            bucket: InternedString::from(""),
+            key: InternedString::from("volume"),
         };
 
         // volume store fetches/caches 1 KiB chunks
@@ -526,8 +527,8 @@ mod test {
         let data = random_bytes(1024); // 1 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
         let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
+            bucket: InternedString::from(""),
+            key: InternedString::from("volume"),
         };
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(

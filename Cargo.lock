@@ -267,7 +267,9 @@ dependencies = [
  "foyer",
  "foyer-memory",
  "futures",
+ "lasso",
  "object_store",
+ "once_cell",
  "rand 0.9.2",
  "reqwest",
  "tempfile",
@@ -969,6 +971,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -1339,6 +1345,16 @@ checksum = "ec48937a97411dcb524a265206ccd4c90bb711fca92b2792c407f268825b9305"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "lasso"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e14eda50a3494b3bf7b9ce51c52434a761e383d7238ce1dd5dcec2fbc13e9fb"
+dependencies = [
+ "dashmap",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
