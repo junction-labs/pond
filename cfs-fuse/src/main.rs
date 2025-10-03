@@ -5,7 +5,7 @@ use anyhow::Context;
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use cfs_core::Location;
-use cfs_core::{Ino, volume::Volume};
+use cfs_core::{Ino, VolumeMetadata};
 use clap::{Parser, Subcommand, value_parser};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::{ObjectStore, PutPayload};
@@ -129,7 +129,7 @@ fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
     }
 
     let bs = std::fs::read(volume.as_ref()).unwrap();
-    let volume = Volume::from_bytes(&bs).unwrap();
+    let volume = VolumeMetadata::from_bytes(&bs).unwrap();
 
     for (name, path, attrs) in volume.walk(Ino::Root).unwrap() {
         if path.is_empty() && !attrs.ino.is_regular() {
@@ -180,7 +180,6 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
             data: String,
         },
     }
-    use cfs_core::volume::Volume;
 
     let pack_location = match to.strip_prefix("s3://") {
         Some(bucket_and_key) => {
@@ -218,7 +217,7 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
     let mut data_file = tempfile::NamedTempFile::new()?;
 
     let root: &Path = dir.as_ref();
-    let mut volume = Volume::empty();
+    let mut volume = VolumeMetadata::empty();
     let mut cursor = 0u64;
 
     // create a staging blob
@@ -439,7 +438,7 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
         };
 
         let bytes = object_store.get(&path).await?.bytes().await?;
-        Volume::from_bytes(&bytes).context("failed to parse Volume")
+        VolumeMetadata::from_bytes(&bytes).context("failed to parse Volume")
     })?;
 
     let cfs = Cfs::new(

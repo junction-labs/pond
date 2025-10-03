@@ -1,11 +1,13 @@
-mod client;
-pub use client::{AsyncFileReader, Client, Error, Fd};
+mod metadata;
+mod volume;
+
+pub use metadata::{VolumeError, VolumeMetadata};
+pub use volume::{AsyncFileReader, Error, Fd, Volume};
 
 mod file;
 pub use file::File;
 
 pub mod read;
-pub mod volume;
 
 use std::{path::PathBuf, time::SystemTime};
 

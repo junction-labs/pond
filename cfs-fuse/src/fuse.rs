@@ -1,5 +1,5 @@
-use cfs_core::{ByteRange, Client};
-use cfs_core::{Ino, volume::Volume};
+use cfs_core::{ByteRange, Volume};
+use cfs_core::{Ino, VolumeMetadata};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -7,19 +7,19 @@ use std::time::SystemTime;
 // TODO: write a try! macro that gets rid of most of the let-else spam in here.
 
 pub(crate) struct Cfs {
-    volume: Client,
+    volume: Volume,
     runtime: tokio::runtime::Runtime,
 }
 
 impl Cfs {
     pub(crate) fn new(
         runtime: tokio::runtime::Runtime,
-        volume: Volume,
+        metadata: VolumeMetadata,
         max_cache_size: u64,
         chunk_size: u64,
         readahead_size: u64,
     ) -> Self {
-        let volume = Client::new(volume, max_cache_size, chunk_size, readahead_size);
+        let volume = Volume::new(metadata, max_cache_size, chunk_size, readahead_size);
         Self { volume, runtime }
     }
 }
