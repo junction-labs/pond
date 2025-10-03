@@ -13,4 +13,6 @@ bytes.workspace = true
 bytesize.workspace = true
 clap.workspace = true
 object_store.workspace = true
+pprof = { version = "0.15.0", features = ["flamegraph"] }
 tokio.workspace = true
+url.workspace = true

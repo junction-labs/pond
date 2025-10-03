@@ -1,26 +1,42 @@
-use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use cfs_core::{
-    ByteRange, File, Location,
+    File, Ino, VolumeMetadata,
     read::{ChunkCache, ReadAheadPolicy},
 };
 use clap::{Parser, value_parser};
-use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
+use object_store::ObjectStore;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// S3 bucket that holds the object
-    #[arg(long)]
-    bucket: String,
+    #[command(flatten)]
+    volume: VolumeArgs,
 
-    /// Object key within the bucket
-    #[arg(long)]
-    key: String,
+    #[command(flatten)]
+    read_behavior: ReadBehaviorArgs,
 
+    #[clap(long, default_value_t = false)]
+    stdout: bool,
+
+    #[clap(long, default_value_t = false)]
+    cpu_profile: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct VolumeArgs {
+    /// The path to the volume. Can be a local path or an S3 path.
+    path: String,
+
+    /// S3 region (only applicable when the volume path is an S3 path).
+    #[arg(long, default_value = "us-east-2")]
+    region: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReadBehaviorArgs {
     /// Maximum size of the chunk cache.
-    #[clap(long, default_value = "2GiB", value_parser = value_parser!(ByteSize))]
+    #[clap(long, default_value = "10GiB", value_parser = value_parser!(ByteSize))]
     max_cache_size: ByteSize,
 
     /// The size of the chunk we fetch from object storage in a single request. It's also the size
@@ -31,73 +47,74 @@ struct Args {
     /// Size of readahead. If you're reading a file at byte 0, we will pre-fetch the bytes up to `readahead_size` in parallel.
     #[clap(long, default_value = "32MiB", value_parser = value_parser!(ByteSize))]
     readahead_size: ByteSize,
-
-    /// Size of the local buffer to pull data into.
-    #[arg(long, default_value = "1mb", value_parser = value_parser!(ByteSize))]
-    local_buffer_size: usize,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    let volume = {
+        let url: url::Url = args.volume.path.parse()?;
+        let (object_store, path) =
+            object_store::parse_url_opts(&url, [("region", args.volume.region)])?;
+        let path = path.child("version");
+        let path = {
+            // list all versions, and use the lexographically maximum version
+            let result = object_store.list_with_delimiter(Some(&path)).await?;
+            let path = result
+                .common_prefixes
+                .into_iter()
+                .max()
+                .ok_or(anyhow::anyhow!("could not find a volume version to mount. consider explicitly specifying --version"))?;
+            path.child("vol.cfs.bin")
+        };
+
+        let bytes = object_store.get(&path).await?.bytes().await?;
+        VolumeMetadata::from_bytes(&bytes)?
+    };
+
     let chunk_store = Arc::new(ChunkCache::new(
-        args.max_cache_size.as_u64(),
-        args.chunk_size.as_u64(),
+        args.read_behavior.max_cache_size.as_u64(),
+        args.read_behavior.chunk_size.as_u64(),
         ReadAheadPolicy {
-            size: args.readahead_size.as_u64(),
+            size: args.read_behavior.readahead_size.as_u64(),
         },
     ));
 
-    let object_store = build_object_store(&args).context("failed to build S3 object store")?;
-    let path = Path::from(args.key.as_str());
-    let meta = object_store
-        .head(&path)
-        .await
-        .with_context(|| format!("failed to fetch object metadata for {}", path))?;
-    let filesize = meta.size;
-    let location = Location::ObjectStorage {
-        bucket: args.bucket.clone(),
-        key: args.key.clone(),
-    };
-    let byte_range = ByteRange {
-        offset: 0,
-        len: filesize,
+    let guard = if args.cpu_profile {
+        Some(
+            pprof::ProfilerGuardBuilder::default()
+                .frequency(10000)
+                .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                .build()?,
+        )
+    } else {
+        None
     };
 
-    read(&args, chunk_store, location, byte_range).await?;
-
-    Ok(())
-}
-
-fn build_object_store(args: &Args) -> Result<Arc<dyn ObjectStore>> {
-    let builder = AmazonS3Builder::from_env()
-        .with_bucket_name(&args.bucket)
-        .with_region("us-east-2");
-
-    let store = builder.build().context("failed to finalize S3 builder")?;
-    let store: Arc<dyn ObjectStore> = Arc::new(store);
-    Ok(store)
-}
-
-async fn read(
-    args: &Args,
-    chunk_store: Arc<ChunkCache>,
-    location: Location,
-    byte_range: ByteRange,
-) -> Result<()> {
-    let mut file = File::new(chunk_store, location, byte_range);
-    let mut buffer = vec![0u8; args.local_buffer_size];
     let mut stdout = tokio::io::stdout();
-
-    loop {
-        let bytes_read = file.read(&mut buffer).await?;
-        if bytes_read == 0 {
-            break;
+    let mut buf = Vec::new();
+    for (_, _, attr) in volume.walk(Ino::Root)? {
+        if attr.is_file() && attr.size > 0 {
+            let (location, byte_range) = volume.location(attr.ino).unwrap();
+            let mut file = File::new(chunk_store.clone(), location.clone(), *byte_range);
+            let n = file.read_to_end(&mut buf).await?;
+            assert_eq!(n, byte_range.len as usize);
+            if args.stdout {
+                stdout.write_all(&buf[..n]).await?;
+            }
         }
-        stdout.write_all(&buffer[..bytes_read]).await?;
     }
-    stdout.flush().await?;
+    if args.stdout {
+        stdout.flush().await?;
+    }
+
+    if let Some(guard) = guard
+        && let Ok(report) = guard.report().build()
+    {
+        let file = std::fs::File::create("flamegraph.svg")?;
+        report.flamegraph(file)?;
+    };
 
     Ok(())
 }
