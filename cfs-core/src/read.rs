@@ -136,6 +136,12 @@ impl ChunkCache {
         }
     }
 
+    /// Clear cache. Does not immediately drop all bytes::Bytes, as any in-flight readers will
+    /// still have a valid pointer to it.
+    pub fn clear(self: &mut Arc<Self>) {
+        self.cache.clear()
+    }
+
     /// Return a ByteRange and a BytesFuture that will resolve to a chunk that contains the byte
     /// specified by the given volume and offset byte. The ByteRange represents the absolute
     /// offsets relative to the start of the volume that the BytesFuture reads. If the chunk is

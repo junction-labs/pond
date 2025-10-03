@@ -218,6 +218,10 @@ impl Volume {
                 let fd = new_fd(&mut self.fds, FileDescriptor::Commit);
                 Ok(fd)
             }
+            Ino::CLEAR_CACHE => {
+                let fd = new_fd(&mut self.fds, FileDescriptor::ClearCache);
+                Ok(fd)
+            }
             Ino::VERSION => Err(Error::from(VolumeError::PermissionDenied)),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -246,7 +250,7 @@ impl Volume {
                 );
                 Ok(fd)
             }
-            Ino::COMMIT => Err(Error::from(VolumeError::PermissionDenied)),
+            Ino::COMMIT | Ino::CLEAR_CACHE => Err(Error::from(VolumeError::PermissionDenied)),
             ino => match self.meta.location(ino) {
                 Some((l, range)) => {
                     let file = File::new(self.cache.clone(), l.clone(), *range);
@@ -286,7 +290,10 @@ impl Volume {
 
     pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         match self.lookup_fd(fd) {
-            Some(FileDescriptor::ClearCache) => todo!(),
+            Some(FileDescriptor::ClearCache) => {
+                self.cache.clear();
+                Ok(data.len())
+            }
             Some(FileDescriptor::Commit) => {
                 self.commit().await?;
                 Ok(data.len())

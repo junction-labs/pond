@@ -87,7 +87,7 @@ struct VolumeArgs {
 #[derive(clap::Args, Debug)]
 struct ReadBehaviorArgs {
     /// Maximum size of the chunk cache.
-    #[clap(long, default_value = "2GiB", value_parser = value_parser!(ByteSize))]
+    #[clap(long, default_value = "10GiB", value_parser = value_parser!(ByteSize))]
     max_cache_size: ByteSize,
 
     /// The size of the chunk we fetch from object storage in a single request. It's also the size

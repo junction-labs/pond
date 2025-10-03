@@ -178,7 +178,7 @@ impl VolumeMetadata {
         }
     }
 
-    const fn reserved_entries() -> [Entry; 2] {
+    const fn reserved_entries() -> [Entry; 3] {
         [
             Entry {
                 name: Cow::Borrowed("/"),
@@ -196,7 +196,19 @@ impl VolumeMetadata {
                 name: Cow::Borrowed(".version"),
                 parent: Ino::Root,
                 attr: FileAttr {
-                    ino: Ino::Reserved(2),
+                    ino: Ino::VERSION,
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Regular,
+                },
+                data: EntryData::Dynamic,
+            },
+            Entry {
+                name: Cow::Borrowed(".clearcache"),
+                parent: Ino::Root,
+                attr: FileAttr {
+                    ino: Ino::CLEAR_CACHE,
                     size: 0,
                     mtime: UNIX_EPOCH,
                     ctime: UNIX_EPOCH,
