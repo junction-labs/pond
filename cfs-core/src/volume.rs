@@ -315,7 +315,7 @@ impl Volume {
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
 fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, d: FileDescriptor) -> Fd {
-    let next_fd = fd_set.keys().cloned().max().unwrap_or_default().add(1);
+    let next_fd = fd_set.keys().last().cloned().unwrap_or_default().add(1);
     fd_set.insert(next_fd, d);
     next_fd
 }
