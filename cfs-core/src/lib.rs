@@ -1,13 +1,17 @@
 mod file;
+mod location;
 mod metadata;
 mod read;
 mod volume;
 
+pub mod object_store;
+
 pub use file::File;
+pub use location::Location;
 pub use metadata::{VolumeError, VolumeMetadata};
 pub use volume::{AsyncFileReader, Error, Fd, Volume};
 
-use std::{path::PathBuf, time::SystemTime};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -134,12 +138,6 @@ impl FileAttr {
 }
 
 // TODO: add checksums/etags here?
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Location {
-    Staged { path: PathBuf },
-    Local { path: PathBuf },
-    ObjectStorage { bucket: String, key: String },
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteRange {

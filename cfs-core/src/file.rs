@@ -322,10 +322,7 @@ mod test {
     async fn assert_objectstore_full_volume(chunksize: u64) {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("", "volume");
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
             chunksize,
@@ -361,10 +358,7 @@ mod test {
     async fn assert_objectstore_partial_volume(chunksize: u64) {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("", "volume");
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
             chunksize,
@@ -402,10 +396,7 @@ mod test {
     async fn assert_objectstore_full_volume_with_buf(chunksize: u64, bufsize: usize) {
         let data = random_bytes(1 << 16); // 64 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("", "volume");
 
         // volume store fetches/caches 8 KiB chunks
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -449,10 +440,7 @@ mod test {
         let data = random_bytes(1 << 10); // 64 KiB
         tmpfile.write_all(&data).unwrap();
 
-        let location = Location::Local {
-            path: tmpfile.path().to_path_buf(),
-        };
-
+        let location = Location::local(tmpfile.path().to_str().unwrap());
         let mut file = File::new(
             volume_chunk_store.clone(),
             location,
@@ -476,10 +464,7 @@ mod test {
     async fn seek_partial_volume() {
         let data = random_bytes(1 << 14); // 16 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("", "volume");
 
         // volume store fetches/caches 1 KiB chunks
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
@@ -525,10 +510,7 @@ mod test {
     async fn bad_seeks() {
         let data = random_bytes(1024); // 1 KiB
         let client_builder = object_store_with_data("volume".to_string(), data.clone()).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("b", "volume");
 
         let volume_chunk_store = Arc::new(ChunkCache::new_with(
             256,

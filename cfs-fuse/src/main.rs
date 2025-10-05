@@ -7,18 +7,15 @@ use bytesize::ByteSize;
 use cfs_core::Location;
 use cfs_core::{Ino, VolumeMetadata};
 use clap::{Parser, Subcommand, value_parser};
-use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::{ObjectStore, PutPayload};
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::fuse::Cfs;
-
-static VOL_FILENAME: &str = "vol.cfs.bin";
-static DATA_FILENAME: &str = "data.cfs.bin";
-static VERSION_SUBDIR: &str = "version";
 
 #[derive(Parser)]
 struct Args {
@@ -29,7 +26,15 @@ struct Args {
 #[derive(Subcommand)]
 enum Cmd {
     /// *Experimental* - Dump the metadata for a CFS volume.
-    Dump { volume: String },
+    Dump {
+        /// An existing volume path.
+        volume: String,
+
+        /// The version of the volume. Defaults to the latest version of the
+        /// volume.
+        #[clap(long)]
+        version: Option<NonZeroU64>,
+    },
 
     /// *Experimental* - Pack a local directory into a CFS volume.
     Pack {
@@ -38,13 +43,15 @@ enum Cmd {
 
         /// A directory path or S3 prefix to put the volume in.
         to: String,
+
+        /// The version of the volume. Defaults to version 1, assuming this is a
+        /// new volume.
+        #[clap(long)]
+        version: Option<NonZeroU64>,
     },
 
     /// List all versions in the volume.
-    List {
-        #[command(flatten)]
-        volume: VolumeArgs,
-    },
+    List { volume: String },
 
     /// Run a cfs FUSE mount.
     Mount(MountArgs),
@@ -61,28 +68,18 @@ struct MountArgs {
     #[clap(long, default_value_t = true)]
     auto_unmount: bool,
 
-    #[command(flatten)]
-    volume: VolumeArgs,
+    volume: String,
 
     /// The directory to mount at. Must already exist.
     mountpoint: PathBuf,
 
-    /// Specific version of the volume to mount. Default: latest version.
+    /// Specific version of the volume to mount. Defaults to the latest version
+    /// of the volume.
     #[clap(long)]
-    version: Option<String>,
+    version: Option<NonZeroU64>,
 
     #[command(flatten)]
     read_behavior: ReadBehaviorArgs,
-}
-
-#[derive(clap::Args, Debug)]
-struct VolumeArgs {
-    /// The path to the volume. Can be a local path or an S3 path.
-    path: String,
-
-    /// S3 region (only applicable when the volume path is an S3 path).
-    #[arg(long, default_value = "us-east-2")]
-    region: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -104,12 +101,17 @@ struct ReadBehaviorArgs {
 fn main() {
     tracing_subscriber::fmt::init();
 
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
     let args = Args::parse();
 
     let res = match args.cmd {
-        Cmd::Dump { volume } => dump(volume),
-        Cmd::Pack { dir, to } => pack(dir, to),
-        Cmd::List { volume } => list(volume),
+        Cmd::Dump { volume, version } => dump(runtime, volume, version),
+        Cmd::Pack { dir, to, version } => pack(runtime, dir, to, version),
+        Cmd::List { volume } => list(runtime, volume),
         Cmd::Mount(mount_args) => mount(mount_args),
     };
 
@@ -119,16 +121,41 @@ fn main() {
     }
 }
 
-fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
+fn dump(
+    runtime: tokio::runtime::Runtime,
+    volume: String,
+    version: Option<NonZeroU64>,
+) -> anyhow::Result<()> {
     fn location_path(l: &Location) -> String {
         match l {
-            Location::Staged { path } => format!("staged({path})", path = path.display()),
-            Location::Local { path, .. } => format!("{path}", path = path.display()),
-            Location::ObjectStorage { bucket, key, .. } => format!("s3://{bucket}/{key}"),
+            Location::Staged { .. } => format!("**{l}"),
+            _ => format!("{l}"),
         }
     }
 
-    let bs = std::fs::read(volume.as_ref()).unwrap();
+    let volume = Location::from_str(&volume)?;
+    let object_store = cfs_core::object_store::from_location(&volume)?;
+
+    let version = match version {
+        Some(v) => v.get(),
+        None => {
+            let versions = runtime.block_on(cfs_core::object_store::list_versions(
+                &object_store,
+                &volume,
+            ))?;
+            versions
+                .iter()
+                .cloned()
+                .max()
+                .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
+        }
+    };
+    let volume = volume.metadata(version);
+
+    let bs = runtime.block_on(async {
+        let res = object_store.get(&volume.path()).await?;
+        res.bytes().await
+    })?;
     let volume = VolumeMetadata::from_bytes(&bs).unwrap();
 
     for (name, path, attrs) in volume.walk(Ino::Root).unwrap() {
@@ -168,50 +195,30 @@ fn dump(volume: impl AsRef<Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
-    enum PackLocation {
-        Local {
-            volume: PathBuf,
-            data: PathBuf,
-        },
-        ObjectStorage {
-            bucket: String,
-            volume: String,
-            data: String,
-        },
-    }
+fn pack(
+    runtime: tokio::runtime::Runtime,
+    dir: impl AsRef<Path>,
+    to: String,
+    version: Option<NonZeroU64>,
+) -> anyhow::Result<()> {
+    // defaults to version 1
+    let version = version.map(|v| v.get()).unwrap_or(1);
 
-    let pack_location = match to.strip_prefix("s3://") {
-        Some(bucket_and_key) => {
-            // build some object storage keys/buckets. just upload no matter what.
-            let (bucket, key) = bucket_and_key
-                .split_once("/")
-                .ok_or(anyhow::anyhow!("invalid s3 prefix"))?;
-            let vol_key = format!("{key}/{VOL_FILENAME}", key = key.trim_end_matches("/"));
-            let data_key = format!("{key}/{DATA_FILENAME}", key = key.trim_end_matches("/"));
-            PackLocation::ObjectStorage {
-                bucket: bucket.to_string(),
-                volume: vol_key,
-                data: data_key,
-            }
-        }
-        None => {
-            // check that the destination paths don't exist yet.
-            if !std::fs::metadata(&to)?.is_dir() {
-                anyhow::bail!("{to} is not a directory");
-            }
-            let volume = Path::new(&to).join(VOL_FILENAME);
-            let data = Path::new(&to).join(DATA_FILENAME);
+    let pack_location = Location::from_str(&to)?;
+    let (volume_location, data_location) =
+        (pack_location.metadata(version), pack_location.new_data());
 
-            if volume.exists() {
-                anyhow::bail!("{volume}: already exists", volume = volume.display());
-            }
-            if data.exists() {
-                anyhow::bail!("{data}: already exists", data = data.display())
-            }
-            PackLocation::Local { volume, data }
+    let object_store = cfs_core::object_store::from_location(&pack_location)?;
+
+    runtime.block_on(async {
+        if cfs_core::object_store::exists(&object_store, &volume_location).await? {
+            anyhow::bail!("{volume_location}: already exists");
         }
-    };
+        if cfs_core::object_store::exists(&object_store, &data_location).await? {
+            anyhow::bail!("{data_location}: already exists");
+        }
+        Ok(())
+    })?;
 
     let mut volume_file = tempfile::NamedTempFile::new()?;
     let mut data_file = tempfile::NamedTempFile::new()?;
@@ -221,9 +228,7 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
     let mut cursor = 0u64;
 
     // create a staging blob
-    let staging = Location::Staged {
-        path: data_file.path().to_path_buf(),
-    };
+    let staging = Location::staged(data_file.path().to_string_lossy().to_string());
 
     let walker = walkdir::WalkDir::new(root).min_depth(1);
     for entry in walker {
@@ -277,75 +282,53 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
         }
     }
 
+    volume.relocate(&staging, data_location.clone())?;
+    volume_file.write_all(&volume.to_bytes()?)?;
+
     match &pack_location {
-        PackLocation::Local {
-            volume: volume_path,
-            data: data_path,
-        } => {
-            volume.relocate(
-                &staging,
-                Location::Local {
-                    path: data_path.to_path_buf(),
-                },
-            )?;
-
-            // make the tempfiles permanent and relocate the blob
-            let _ = data_file.persist(data_path)?;
-            let mut volume_file = volume_file.persist(volume_path)?;
-            volume_file.write_all(&volume.to_bytes()?)?;
+        Location::Local { .. } => {
+            data_file.persist(data_location.local_path().unwrap())?;
+            volume_file.persist(volume_location.local_path().unwrap())?;
         }
-        PackLocation::ObjectStorage {
-            bucket,
-            volume: volume_key,
-            data: data_key,
-        } => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            let s3 = AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .with_region("us-east-2")
-                .build()?;
-
-            volume.relocate(
-                &staging,
-                Location::ObjectStorage {
-                    bucket: bucket.clone(),
-                    key: data_key.clone(),
-                },
-            )?;
-
-            volume_file.write_all(&volume.to_bytes()?)?;
-
-            runtime.block_on(upload_file(&s3, volume_key, volume_file.path()))?;
-            runtime.block_on(upload_file(&s3, data_key, data_file.path()))?;
+        Location::ObjectStorage { .. } => {
+            runtime.block_on(upload_file(
+                &object_store,
+                &data_location.path(),
+                data_file.path(),
+            ))?;
+            runtime.block_on(upload_file(
+                &object_store,
+                &volume_location.path(),
+                volume_file.path(),
+            ))?;
         }
-    };
-
-    async fn upload_file(s3: &AmazonS3, key: &str, path: &Path) -> anyhow::Result<()> {
-        let mut file = tokio::fs::File::open(path).await?;
-        let mut put = s3
-            .put_multipart(&object_store::path::Path::from(key))
-            .await?;
-
-        let mut buf = BytesMut::with_capacity(1024 * 1024 * 100);
-        loop {
-            let n = read_up_to(&mut file, &mut buf, 1024 * 1024 * 100).await?;
-            if n == 0 {
-                break;
-            }
-
-            let bytes = buf.split_to(n);
-            put.put_part(PutPayload::from_bytes(bytes.freeze())).await?;
-            buf.reserve(1024 * 1024 * 100);
-        }
-
-        put.complete().await?;
-        Ok(())
+        _ => unreachable!("pack location should never be staged"),
     }
 
+    Ok(())
+}
+
+async fn upload_file(
+    s3: &dyn ObjectStore,
+    key: &object_store::path::Path,
+    local_path: &Path,
+) -> anyhow::Result<()> {
+    let mut file = tokio::fs::File::open(local_path).await?;
+    let mut put = s3.put_multipart(key).await?;
+
+    let mut buf = BytesMut::with_capacity(1024 * 1024 * 100);
+    loop {
+        let n = read_up_to(&mut file, &mut buf, 1024 * 1024 * 100).await?;
+        if n == 0 {
+            break;
+        }
+
+        let bytes = buf.split_to(n);
+        put.put_part(PutPayload::from_bytes(bytes.freeze())).await?;
+        buf.reserve(1024 * 1024 * 100);
+    }
+
+    put.complete().await?;
     Ok(())
 }
 
@@ -372,38 +355,18 @@ async fn read_up_to<R: AsyncRead + Unpin>(
     Ok(read)
 }
 
-fn list(VolumeArgs { path, region }: VolumeArgs) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+fn list(runtime: tokio::runtime::Runtime, location: String) -> anyhow::Result<()> {
+    let location = Location::from_str(&location)?;
+    let object_store = cfs_core::object_store::from_location(&location)?;
 
-    let url: url::Url = path.parse()?;
-    let (object_store, path) = object_store::parse_url_opts(&url, [("region", region)])?;
-    let path = version_dir(path);
-
-    runtime.block_on(async {
-        let result = object_store.list_with_delimiter(Some(&path)).await?;
-
-        let mut table = comfy_table::Table::new();
-        table.set_header(vec!["version", "last_modified"]);
-        for path in result.common_prefixes {
-            let Ok(metadata) = object_store.head(&path.child(VOL_FILENAME)).await else {
-                continue;
-            };
-            table.add_row(vec![
-                path.filename().unwrap_or("(empty)"),
-                &metadata.last_modified.to_string(),
-            ]);
-        }
-
-        if table.is_empty() {
-            println!("(empty volume)");
-        } else {
-            println!("{table}");
-        }
-
-        Ok(())
-    })
+    let versions = runtime.block_on(cfs_core::object_store::list_versions(
+        &object_store,
+        &location,
+    ))?;
+    for version in versions {
+        println!("{version}");
+    }
+    Ok(())
 }
 
 fn mount(args: MountArgs) -> anyhow::Result<()> {
@@ -413,33 +376,30 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
         .build()
         .unwrap();
 
-    let volume = runtime.block_on(async {
-        let url: url::Url = args.volume.path.parse()?;
-        let (object_store, path) = object_store::parse_url_opts(&url, [("region", args.volume.region)])?;
-        let path = version_dir(path);
+    let location = Location::from_str(&args.volume)?;
+    let object_store = cfs_core::object_store::from_location(&location)?;
 
-        let path = if let Some(version) = args.version {
-            // try to load the volume at this version for validation
-            let path = path.child(version.clone()).child(VOL_FILENAME);
-            object_store
-                .head(&path)
-                .await
-                .context(format!("unable to load volume at version={version}"))?;
-            path
-        } else {
-            // list all versions, and use the lexographically maximum version
-            let result = object_store.list_with_delimiter(Some(&path)).await?;
-            let path = result
-                .common_prefixes
-                .into_iter()
+    let version: u64 = match args.version {
+        Some(v) => v.get(),
+        None => {
+            let versions = runtime.block_on(cfs_core::object_store::list_versions(
+                &object_store,
+                &location,
+            ))?;
+            versions
+                .iter()
+                .cloned()
                 .max()
-                .ok_or(anyhow::anyhow!("could not find a volume version to mount. consider explicitly specifying --version"))?;
-            path.child(VOL_FILENAME)
-        };
+                .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
+        }
+    };
+    let location = location.metadata(version);
 
-        let bytes = object_store.get(&path).await?.bytes().await?;
-        VolumeMetadata::from_bytes(&bytes).context("failed to parse Volume")
+    let bytes = runtime.block_on(async {
+        let res = object_store.get(&location.path()).await?;
+        res.bytes().await
     })?;
+    let volume = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
 
     let cfs = Cfs::new(
         runtime,
@@ -471,8 +431,4 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn version_dir(path: object_store::path::Path) -> object_store::path::Path {
-    path.child(VERSION_SUBDIR)
 }

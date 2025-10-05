@@ -1,7 +1,6 @@
 use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
-    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -874,14 +873,14 @@ fn to_fb_location<'a>(
     let union = match location {
         Location::Local { path } => {
             // FIXME: what do we do about non-utf8 paths?
-            let path = fbb.create_string(path.to_str().unwrap());
+            let path = fbb.create_string(path.to_str().expect("BUG: path is not utf8"));
             let location =
                 fb::LocalLocation::create(fbb, &fb::LocalLocationArgs { path: Some(path) });
             location.as_union_value()
         }
         Location::ObjectStorage { bucket, key } => {
             let bucket = fbb.create_shared_string(bucket);
-            let key = fbb.create_string(key);
+            let key = fbb.create_string(key.as_ref());
             let location = fb::S3Location::create(
                 fbb,
                 &fb::S3LocationArgs {
@@ -917,13 +916,12 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
     match fb_location.location_type() {
         fb::Location::local => {
             let fb_location = fb_location.location_as_local().unwrap();
-            let path = PathBuf::from(fb_location.path());
-            Ok(Location::Local { path })
+            Ok(Location::local(fb_location.path()))
         }
         fb::Location::s3 => {
             let fb_location = fb_location.location_as_s_3().unwrap();
             let bucket = fb_location.bucket().to_string();
-            let key = fb_location.key().to_string();
+            let key = object_store::path::Path::from(fb_location.key().to_string());
             Ok(Location::ObjectStorage { bucket, key })
         }
         lt => Err(VolumeError::invalid(format!(
@@ -946,9 +944,7 @@ mod test {
                 Ino::Root,
                 "zzzz".to_string(),
                 true,
-                Location::Local {
-                    path: PathBuf::from("zzzz"),
-                },
+                Location::local("zzzz"),
                 ByteRange {
                     offset: 0,
                     len: 123,
@@ -965,9 +961,7 @@ mod test {
                 Ino::Root,
                 "aaaa".to_string(),
                 true,
-                Location::Local {
-                    path: PathBuf::from("aaaa"),
-                },
+                Location::local("aaaa"),
                 ByteRange {
                     offset: 0,
                     len: 123,
@@ -993,9 +987,7 @@ mod test {
                     parent,
                     "zzzz".to_string(),
                     true,
-                    Location::Local {
-                        path: PathBuf::from("zzzz"),
-                    },
+                    Location::local("zzzz"),
                     ByteRange {
                         offset: 0,
                         len: 123,
@@ -1069,7 +1061,7 @@ mod test {
 
     fn local_path(l: &Location) -> Option<&str> {
         match l {
-            Location::Local { path, .. } => path.as_os_str().to_str(),
+            Location::Local { path, .. } => Some(path.to_str().unwrap()),
             _ => None,
         }
     }
@@ -1086,7 +1078,7 @@ mod test {
                 c.ino,
                 "test.txt".to_string(),
                 true,
-                test_location(),
+                Location::object_storage("test-bucket", "test-key.txt"),
                 ByteRange { offset: 0, len: 64 },
             )
             .unwrap();
@@ -1185,7 +1177,7 @@ mod test {
                 b.ino,
                 "c.txt".to_string(),
                 true,
-                test_location(),
+                Location::object_storage("test-bucket", "test-key.txt"),
                 (0, 10).into(),
             )
             .unwrap();
@@ -1202,7 +1194,7 @@ mod test {
                 c.ino,
                 "f.txt".to_string(),
                 true,
-                test_location(),
+                Location::object_storage("test-bucket", "test-key.txt"),
                 (0, 10).into(),
             )
             .unwrap();
@@ -1224,7 +1216,7 @@ mod test {
                 c.ino,
                 "test.txt".to_string(),
                 true,
-                test_location(),
+                Location::object_storage("test-bucket", "test-key.txt"),
                 ByteRange { offset: 0, len: 64 },
             )
             .unwrap();
@@ -1245,14 +1237,10 @@ mod test {
 
         assert_eq!(
             volume.location(test_txt.ino).unwrap(),
-            (&test_location(), &ByteRange { offset: 0, len: 64 },)
+            (
+                &Location::object_storage("test-bucket", "test-key.txt"),
+                &ByteRange { offset: 0, len: 64 },
+            )
         );
-    }
-
-    fn test_location() -> Location {
-        Location::ObjectStorage {
-            bucket: "test-bucket".to_string(),
-            key: "test-key.txt".to_string(),
-        }
     }
 }

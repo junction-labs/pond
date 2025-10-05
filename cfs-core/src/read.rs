@@ -5,8 +5,8 @@ use futures::{
     FutureExt,
     future::{BoxFuture, Shared, ready},
 };
-use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
-use std::{path::PathBuf, sync::Arc};
+use object_store::{ObjectStore, aws::AmazonS3Builder};
+use std::sync::Arc;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -175,8 +175,8 @@ impl ChunkCache {
         let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
         for chunk_start in (start_chunk..=end_chunk).step_by(self.chunk_size as usize) {
             let key = self.chunk(location.clone(), chunk_start);
-            #[allow(unused_must_use)]
-            self.read_chunk(key);
+            // start the read_chunk but ignore the future
+            std::mem::drop(self.read_chunk(key));
         }
     }
 
@@ -203,11 +203,11 @@ impl ChunkCache {
                 async move {
                     match &location {
                         Location::Staged { path } | Location::Local { path, .. } => {
-                            read_local_chunk(path.clone(), range).await
+                            read_local_chunk(path, range).await
                         }
                         Location::ObjectStorage { bucket, key, .. } => {
                             let client = get_client(clients, client_builder, bucket.to_string());
-                            read_object_store_chunk(client, key.clone(), range).await
+                            Ok(client.get_range(key, range.as_range_u64()).await?)
                         }
                     }
                 }
@@ -254,19 +254,10 @@ fn get_client(
     entry.value().clone()
 }
 
-/// Read a chunk (as specified by the key and byte range) from object storage.
-///
-/// When used in a Shared<Future<_>>, it is guaranteed to run exactly once.
-async fn read_object_store_chunk(
-    object_store: Arc<dyn ObjectStore>,
-    key: String,
+async fn read_local_chunk(
+    path: impl AsRef<std::path::Path>,
     range: ByteRange,
 ) -> Result<Bytes, ReadError> {
-    let path = Path::from(key);
-    Ok(object_store.get_range(&path, range.as_range_u64()).await?)
-}
-
-async fn read_local_chunk(path: PathBuf, range: ByteRange) -> Result<Bytes, ReadError> {
     let mut file = File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(range.offset)).await?;
 
@@ -296,10 +287,7 @@ mod test {
     async fn test_readahead() {
         let object_store =
             object_store_with_data("volume".to_string(), Bytes::from(vec![0u8; 1 << 10])).await;
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "volume".to_string(),
-        };
+        let location = Location::object_storage("", "volume");
 
         // readahead size of 40 bytes (4 chunks)
         let readahead = ReadAheadPolicy { size: 40 };
@@ -331,10 +319,7 @@ mod test {
     async fn test_bad_get_removes_entry() {
         // empty, so ChunkedVolumeStore::get(..) will get an error
         let client_builder: ClientBuilder = Arc::new(|_| Arc::new(InMemory::new()));
-        let location = Location::ObjectStorage {
-            bucket: "".to_string(),
-            key: "fake".to_string(),
-        };
+        let location = Location::object_storage("", "fake");
 
         let mut volume_chunk_store =
             Arc::new(ChunkCache::new_with(10, Default::default(), client_builder));

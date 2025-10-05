@@ -198,6 +198,7 @@ impl Volume {
         exclusive: bool,
     ) -> Result<(&FileAttr, Fd)> {
         let (path, f) = tempfile(self.tempdir.path());
+
         let attr = self.meta.create(
             parent,
             name,
