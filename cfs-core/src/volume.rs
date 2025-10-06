@@ -163,8 +163,13 @@ impl Volume {
         location: Option<Location>,
         range: Option<ByteRange>,
     ) -> Result<()> {
-        self.meta.modify(ino, location, range)?;
-        Ok(())
+        match ino {
+            Ino::CLEAR_CACHE => Ok(()),
+            ino => {
+                self.meta.modify(ino, location, range)?;
+                Ok(())
+            }
+        }
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
