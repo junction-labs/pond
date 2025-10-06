@@ -1024,7 +1024,7 @@ mod test {
             .unwrap()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(vec![".version", "a"], names);
+        assert_eq!(vec![".clearcache", ".version", "a"], names);
         // should be empty
         let names: Vec<_> = volume
             .readdir(a.ino)
