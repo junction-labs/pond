@@ -24,7 +24,7 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 #[rustfmt::skip]
 mod fb;
 
-use crate::{ByteRange, FileAttr, FileType, Ino, InternedString, Location};
+use crate::{ByteRange, FileAttr, FileType, Ino, Location};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum VolumeError {
@@ -880,8 +880,8 @@ fn to_fb_location<'a>(
             location.as_union_value()
         }
         Location::ObjectStorage { bucket, key } => {
-            let bucket = fbb.create_shared_string(bucket.as_str());
-            let key = fbb.create_string(key.as_str());
+            let bucket = fbb.create_shared_string(bucket);
+            let key = fbb.create_string(key);
             let location = fb::S3Location::create(
                 fbb,
                 &fb::S3LocationArgs {
@@ -922,8 +922,8 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
         }
         fb::Location::s3 => {
             let fb_location = fb_location.location_as_s_3().unwrap();
-            let bucket = InternedString::from(fb_location.bucket());
-            let key = InternedString::from(fb_location.key());
+            let bucket = fb_location.bucket().to_string();
+            let key = fb_location.key().to_string();
             Ok(Location::ObjectStorage { bucket, key })
         }
         lt => Err(VolumeError::invalid(format!(
@@ -1251,8 +1251,8 @@ mod test {
 
     fn test_location() -> Location {
         Location::ObjectStorage {
-            bucket: InternedString::from("test-bucket"),
-            key: InternedString::from("test-key.txt"),
+            bucket: "test-bucket".to_string(),
+            key: "test-key.txt".to_string(),
         }
     }
 }

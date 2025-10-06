@@ -1,4 +1,4 @@
-use crate::{ByteRange, InternedString, Location};
+use crate::{ByteRange, Location};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{
@@ -65,8 +65,7 @@ struct Chunk {
 }
 
 /// A function for generating a new client based on a bucket name.
-pub type ClientBuilder =
-    Arc<dyn Fn(InternedString) -> Arc<dyn ObjectStore> + Send + Sync + 'static>;
+pub type ClientBuilder = Arc<dyn Fn(String) -> Arc<dyn ObjectStore> + Send + Sync + 'static>;
 
 /// A chunked object store cache.
 ///
@@ -84,7 +83,7 @@ pub struct ChunkCache {
     client_builder: ClientBuilder,
 
     /// Object store to query chunks from volumes
-    clients: Arc<DashMap<InternedString, Arc<dyn ObjectStore>>>,
+    clients: Arc<DashMap<String, Arc<dyn ObjectStore>>>,
 
     /// Global readahead policy. For every get, if readahead is enabled, fetch the bytes within the
     /// readahead window in parallel.
@@ -98,11 +97,10 @@ impl ChunkCache {
             .with_eviction_config(foyer::S3FifoConfig::default())
             .build();
 
-        let default_builder: ClientBuilder = Arc::new(|bucket: InternedString| {
-            let bucket_name = bucket.to_string();
+        let default_builder: ClientBuilder = Arc::new(|bucket: String| {
             Arc::new(
                 AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket_name)
+                    .with_bucket_name(bucket)
                     .with_region("us-east-2")
                     .build()
                     .unwrap(),
@@ -208,8 +206,8 @@ impl ChunkCache {
                             read_local_chunk(path.clone(), range).await
                         }
                         Location::ObjectStorage { bucket, key, .. } => {
-                            let client = get_client(clients, client_builder, *bucket);
-                            read_object_store_chunk(client, *key, range).await
+                            let client = get_client(clients, client_builder, bucket.to_string());
+                            read_object_store_chunk(client, key.clone(), range).await
                         }
                     }
                 }
@@ -245,13 +243,13 @@ impl ChunkCache {
 }
 
 fn get_client(
-    clients: Arc<DashMap<InternedString, Arc<dyn ObjectStore>>>,
+    clients: Arc<DashMap<String, Arc<dyn ObjectStore>>>,
     client_builder: ClientBuilder,
-    bucket: InternedString,
+    bucket: String,
 ) -> Arc<dyn ObjectStore> {
-    // FIXME: don't panic on bad build.
+    // FIXME: don't panic on bad build, try not to clone the string every time
     let entry = clients
-        .entry(bucket)
+        .entry(bucket.clone())
         .or_insert_with(|| (client_builder)(bucket));
     entry.value().clone()
 }
@@ -261,10 +259,10 @@ fn get_client(
 /// When used in a Shared<Future<_>>, it is guaranteed to run exactly once.
 async fn read_object_store_chunk(
     object_store: Arc<dyn ObjectStore>,
-    key: InternedString,
+    key: String,
     range: ByteRange,
 ) -> Result<Bytes, ReadError> {
-    let path = Path::from(key.as_str());
+    let path = Path::from(key);
     Ok(object_store.get_range(&path, range.as_range_u64()).await?)
 }
 
@@ -299,8 +297,8 @@ mod test {
         let object_store =
             object_store_with_data("volume".to_string(), Bytes::from(vec![0u8; 1 << 10])).await;
         let location = Location::ObjectStorage {
-            bucket: InternedString::from(""),
-            key: InternedString::from("volume"),
+            bucket: "".to_string(),
+            key: "volume".to_string(),
         };
 
         // readahead size of 40 bytes (4 chunks)
@@ -334,8 +332,8 @@ mod test {
         // empty, so ChunkedVolumeStore::get(..) will get an error
         let client_builder: ClientBuilder = Arc::new(|_| Arc::new(InMemory::new()));
         let location = Location::ObjectStorage {
-            bucket: InternedString::from(""),
-            key: InternedString::from("fake"),
+            bucket: "".to_string(),
+            key: "fake".to_string(),
         };
 
         let mut volume_chunk_store =

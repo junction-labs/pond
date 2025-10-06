@@ -4,7 +4,8 @@ mod trace;
 use anyhow::Context;
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use cfs_core::{Ino, InternedString, Location, VolumeMetadata};
+use cfs_core::Location;
+use cfs_core::{Ino, VolumeMetadata};
 use clap::{Parser, Subcommand, value_parser};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::{ObjectStore, PutPayload};
@@ -311,8 +312,8 @@ fn pack(dir: impl AsRef<Path>, to: String) -> anyhow::Result<()> {
             volume.relocate(
                 &staging,
                 Location::ObjectStorage {
-                    bucket: InternedString::from(bucket.clone()),
-                    key: InternedString::from(data_key.clone()),
+                    bucket: bucket.clone(),
+                    key: data_key.clone(),
                 },
             )?;
 

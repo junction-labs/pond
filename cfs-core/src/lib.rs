@@ -9,10 +9,7 @@ pub use file::File;
 
 pub mod read;
 
-use std::{fmt, path::PathBuf, time::SystemTime};
-
-use lasso::{Spur, ThreadedRodeo};
-use once_cell::sync::Lazy;
+use std::{path::PathBuf, time::SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -138,69 +135,12 @@ impl FileAttr {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InternedString(Spur);
-
-impl InternedString {
-    pub fn new<S: AsRef<str>>(value: S) -> Self {
-        Self(INTERNER.get_or_intern(value.as_ref()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        INTERNER.resolve(&self.0)
-    }
-}
-
-impl AsRef<str> for InternedString {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl From<&str> for InternedString {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<String> for InternedString {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<InternedString> for String {
-    fn from(value: InternedString) -> Self {
-        value.as_str().to_string()
-    }
-}
-
-impl fmt::Debug for InternedString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-impl fmt::Display for InternedString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-static INTERNER: Lazy<ThreadedRodeo<Spur>> = Lazy::new(ThreadedRodeo::new);
-
+// TODO: add checksums/etags here?
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
-    Staged {
-        path: PathBuf,
-    },
-    Local {
-        path: PathBuf,
-    },
-    ObjectStorage {
-        bucket: InternedString,
-        key: InternedString,
-    },
+    Staged { path: PathBuf },
+    Local { path: PathBuf },
+    ObjectStorage { bucket: String, key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
