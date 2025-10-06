@@ -305,6 +305,23 @@ impl fuser::Filesystem for Cfs {
         reply.attr(&Duration::new(0, 0), &fuse_attr(attr));
     }
 
+    fn release(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        if let Err(_err) = self.runtime.block_on(self.volume.release(fh.into())) {
+            reply.error(libc::EINVAL);
+        } else {
+            reply.ok();
+        }
+    }
+
     fn unlink(
         &mut self,
         _req: &fuser::Request<'_>,

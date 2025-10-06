@@ -314,6 +314,13 @@ impl Volume {
             None => Err(Error::from(VolumeError::DoesNotExist)),
         }
     }
+
+    pub async fn release(&mut self, fd: Fd) -> Result<()> {
+        match self.fds.remove(&fd) {
+            Some(_) => Ok(()),
+            None => Err(Error::from(VolumeError::DoesNotExist)),
+        }
+    }
 }
 
 // FIXME: this needs to allocate and check for remaining fds instead of just
