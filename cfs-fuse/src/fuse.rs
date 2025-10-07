@@ -1,5 +1,5 @@
+use cfs_core::Ino;
 use cfs_core::{ByteRange, Volume};
-use cfs_core::{Ino, VolumeMetadata};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -12,14 +12,7 @@ pub(crate) struct Cfs {
 }
 
 impl Cfs {
-    pub(crate) fn new(
-        runtime: tokio::runtime::Runtime,
-        metadata: VolumeMetadata,
-        max_cache_size: u64,
-        chunk_size: u64,
-        readahead_size: u64,
-    ) -> Self {
-        let volume = Volume::new(metadata, max_cache_size, chunk_size, readahead_size);
+    pub(crate) fn new(runtime: tokio::runtime::Runtime, volume: Volume) -> Self {
         Self { volume, runtime }
     }
 }

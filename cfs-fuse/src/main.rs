@@ -4,8 +4,8 @@ mod trace;
 use anyhow::Context;
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use cfs_core::Location;
 use cfs_core::{Ino, VolumeMetadata};
+use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
 use object_store::{ObjectStore, PutPayload};
 use std::io::Write;
@@ -399,15 +399,17 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
         let res = object_store.get(&location.path()).await?;
         res.bytes().await
     })?;
-    let volume = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
 
-    let cfs = Cfs::new(
-        runtime,
-        volume,
+    let metadata = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
+    let volume = Volume::new(
+        metadata,
         args.read_behavior.max_cache_size.as_u64(),
         args.read_behavior.chunk_size.as_u64(),
         args.read_behavior.readahead_size.as_u64(),
+        object_store,
     );
+
+    let cfs = Cfs::new(runtime, volume);
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
         fuser::MountOption::Subtype("cool".to_string()),

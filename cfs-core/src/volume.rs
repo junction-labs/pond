@@ -1,14 +1,13 @@
 use crate::{
     ByteRange, FileAttr, Ino, Location,
-    file::File,
+    cache::{CacheError, ChunkCache, ReadAheadPolicy},
     metadata::{VolumeError, VolumeMetadata},
-    read::{ChunkCache, ReadAheadPolicy},
 };
-use std::{
-    collections::BTreeMap, io::SeekFrom, path::PathBuf, pin::Pin, sync::Arc, time::SystemTime,
-};
+use bytes::Bytes;
+use object_store::ObjectStore;
+use std::{collections::BTreeMap, io::SeekFrom, path::PathBuf, sync::Arc, time::SystemTime};
 use tempfile::TempDir;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -53,6 +52,18 @@ pub enum ErrorKind {
 
     #[error("object storage error: {0}")]
     ObjectStore(#[from] object_store::Error),
+
+    #[error(transparent)]
+    Unknown(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl From<CacheError> for ErrorKind {
+    fn from(value: CacheError) -> Self {
+        match value {
+            CacheError::Cache(error) => Self::Unknown(Box::new(error)),
+            CacheError::ObjectStore(error) => Self::ObjectStore(error),
+        }
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,7 +89,10 @@ impl Fd {
 
 #[allow(unused)]
 enum FileDescriptor {
-    ReadOnly(Pin<Box<dyn AsyncFileReader>>),
+    ReadOnly {
+        location: Location,
+        range: ByteRange,
+    },
     Staged {
         file: tokio::fs::File,
         path: std::path::PathBuf,
@@ -87,9 +101,6 @@ enum FileDescriptor {
     Commit,
     ClearCache,
 }
-
-pub trait AsyncFileReader: AsyncRead + AsyncSeek {}
-impl<T: AsyncRead + AsyncSeek> AsyncFileReader for T {}
 
 pub struct Volume {
     meta: VolumeMetadata,
@@ -115,10 +126,12 @@ impl Volume {
         max_cache_size: u64,
         chunk_size: u64,
         readahead: u64,
+        object_store: Box<dyn ObjectStore>,
     ) -> Self {
         let cache = Arc::new(ChunkCache::new(
             max_cache_size,
             chunk_size,
+            object_store,
             ReadAheadPolicy { size: readahead },
         ));
 
@@ -258,18 +271,20 @@ impl Volume {
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(Error::from(VolumeError::PermissionDenied)),
             ino => match self.meta.location(ino) {
-                Some((l, range)) => {
-                    let file = File::new(self.cache.clone(), l.clone(), *range);
-                    let fd = new_fd(&mut self.fds, FileDescriptor::ReadOnly(Box::pin(file)));
-                    Ok(fd)
-                }
+                Some((location, range)) => Ok(new_fd(
+                    &mut self.fds,
+                    FileDescriptor::ReadOnly {
+                        location: location.clone(),
+                        range: *range,
+                    },
+                )),
                 None => Err(Error::from(VolumeError::DoesNotExist)),
             },
         }
     }
 
     pub async fn read_at(&mut self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        match self.lookup_fd(fd) {
+        match self.fds.get_mut(&fd) {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             // static bytes just use their cursor
@@ -278,10 +293,19 @@ impl Volume {
                 let n = std::io::Read::read(cursor, buf)?;
                 Ok(n)
             }
-            Some(FileDescriptor::ReadOnly(reader)) => {
-                reader.seek(SeekFrom::Start(offset)).await?;
-                let n = reader.read(buf).await?;
-                Ok(n)
+            Some(FileDescriptor::ReadOnly { location, range }) => {
+                // FIXME: readahead needs to know the extent of the location -
+                // the range here only includes the extent of THIS file in the
+                // total blob. without knowing the full range we can TRY to prefetch
+                // into the next chunk but we'll only get one at most - that banks
+                // on the object store's API being kind enough to return partial ranges.
+                let read_len = std::cmp::min(range.len, buf.len() as u64);
+                let blob_offset = range.offset + offset;
+                let bytes: Vec<Bytes> = self
+                    .cache
+                    .get_at(&location.path(), blob_offset, read_len)
+                    .await?;
+                Ok(copy_into(buf, &bytes))
             }
             Some(FileDescriptor::Staged { file, .. }) => {
                 // TODO: find a way to do File::read_at here instead of
@@ -324,6 +348,17 @@ impl Volume {
     }
 }
 
+fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
+    let mut copied = 0;
+    for bs in bytes {
+        let n = std::cmp::min(buf.len(), bs.len());
+        buf[..n].copy_from_slice(&bs[..n]);
+        copied += n;
+        buf = &mut buf[n..];
+    }
+    copied
+}
+
 // FIXME: this needs to allocate and check for remaining fds instead of just
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
@@ -356,5 +391,45 @@ impl Volume {
         //   - relocate individual files with volume.modify
         //   - write and upload the new volume metadata
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_copy_into() {
+        // buf.len() = sum(bytes.len())
+        {
+            let mut buf = [0u8; 10];
+            let bytes = &[
+                Bytes::from_static(b"123"),
+                Bytes::from_static(b"456"),
+                Bytes::from_static(b"7"),
+                Bytes::from_static(b"890"),
+            ];
+            assert_eq!(10, copy_into(&mut buf, bytes));
+            assert_eq!(&buf[0..10], b"1234567890");
+        }
+        // buf.len() > sum(bytes.len())
+        {
+            let mut buf = [0u8; 10];
+            let bytes = &[Bytes::from_static(b"123"), Bytes::from_static(b"456")];
+            assert_eq!(6, copy_into(&mut buf, bytes));
+            assert_eq!(&buf[0..6], b"123456");
+        }
+        // buf.len() < sum(bytes.len())
+        {
+            let mut buf = [0u8; 5];
+            let bytes = &[
+                Bytes::from_static(b"123"),
+                Bytes::from_static(b"456"),
+                Bytes::from_static(b"7"),
+                Bytes::from_static(b"890"),
+            ];
+            assert_eq!(5, copy_into(&mut buf, bytes));
+            assert_eq!(&buf[0..5], b"12345");
+        }
     }
 }

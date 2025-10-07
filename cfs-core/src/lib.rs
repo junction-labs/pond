@@ -1,15 +1,13 @@
-mod file;
+mod cache;
 mod location;
 mod metadata;
-mod read;
 mod volume;
 
 pub mod object_store;
 
-pub use file::File;
 pub use location::Location;
 pub use metadata::{VolumeError, VolumeMetadata};
-pub use volume::{AsyncFileReader, Error, Fd, Volume};
+pub use volume::{Error, Fd, Volume};
 
 use std::time::SystemTime;
 
