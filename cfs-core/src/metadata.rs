@@ -512,7 +512,7 @@ impl VolumeMetadata {
     /// refer to this blob. To relocate an individual file, see `modify`.
     pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
         let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
-            return Err(VolumeError::invalid("unknown location"));
+            return Err(VolumeError::DoesNotExist);
         };
         *from = to;
         Ok(())
@@ -719,10 +719,6 @@ impl VolumeMetadata {
             .iter()
             .map(from_fb_location)
             .collect::<Result<Vec<_>, _>>()?;
-
-        if fb_volume.entries().is_empty() {
-            return Err(VolumeError::invalid("no entries"));
-        }
 
         let mut max_ino = Ino::min_regular();
         let mut volume = Self::empty();
