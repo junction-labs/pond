@@ -21,3 +21,5 @@ url.workspace = true
 [dev-dependencies]
 rand.workspace = true
 tempfile.workspace = true
+arbtest.workspace = true
+arbitrary.workspace = true

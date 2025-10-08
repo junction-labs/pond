@@ -4,6 +4,9 @@ use std::{ops::Range, sync::Arc};
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum CacheError {
+    #[error("read bounds are too large")]
+    Overflow,
+
     #[error(transparent)]
     Cache(#[from] foyer_memory::Error),
 
@@ -69,8 +72,10 @@ impl ChunkCache {
         len: u64,
     ) -> Result<Vec<Bytes>, CacheError> {
         let mut chunks = vec![];
-        let read_chunks: Vec<_> = self.inner.read_chunks(offset, len).collect();
-        for offset in &read_chunks {
+        let read_offsets: Vec<_> = read_offsets(offset, len, self.inner.chunk_size)
+            .ok_or(CacheError::Overflow)?
+            .collect();
+        for offset in &read_offsets {
             let cache = self.inner.clone();
             let path = path.clone();
             let offset = *offset;
@@ -81,7 +86,14 @@ impl ChunkCache {
 
         // touch any readahead chunks. this gets done in background tasks
         // without waiting for them here.
-        for offset in self.inner.readahead_chunks(offset + len) {
+        let readahead_offsets = readahead_offsets(
+            offset,
+            len,
+            self.inner.readahead_policy.size,
+            self.inner.chunk_size,
+        )
+        .ok_or(CacheError::Overflow)?;
+        for offset in readahead_offsets {
             let cache = self.inner.clone();
             let path = path.clone();
             tokio::spawn(async move { cache.fetch_aligned(path, offset).await });
@@ -104,7 +116,7 @@ impl ChunkCache {
         // here means we're just taking a ref-counted view into the cache and not
         // actually copying the range.
         if let Some(first_chunk) = chunks.first_mut() {
-            let chunk_offset = read_chunks[0];
+            let chunk_offset = read_offsets[0];
             let slice_start = (offset - chunk_offset) as usize;
             *first_chunk = first_chunk.slice(slice_start..);
         }
@@ -115,7 +127,7 @@ impl ChunkCache {
         // slicing Bytes means that we're taking a ref-counted view into the cache
         // instead of making a copy of the range.
         if let Some(last_chunk) = chunks.last_mut() {
-            let chunk_offset = read_chunks[read_chunks.len() - 1];
+            let chunk_offset = read_offsets[read_offsets.len() - 1];
             let object_end = offset + len;
             let slice_end = std::cmp::min((object_end - chunk_offset) as usize, last_chunk.len());
             *last_chunk = last_chunk.slice(..slice_end);
@@ -155,24 +167,6 @@ impl ChunkCacheInner {
         let chunk = Chunk { path, offset };
         self.cache.contains(&chunk)
     }
-
-    fn read_chunks(&self, offset: u64, len: u64) -> impl Iterator<Item = u64> {
-        let last_byte = offset + len - 1;
-        let start_chunk = (offset / self.chunk_size) * self.chunk_size;
-        let end_chunk = (last_byte / self.chunk_size) * self.chunk_size;
-        (start_chunk..=end_chunk).step_by(self.chunk_size as usize)
-    }
-
-    fn readahead_chunks(&self, offset: u64) -> impl Iterator<Item = u64> {
-        if self.readahead_policy.size == 0 {
-            return (0..=0).step_by(1);
-        }
-
-        let last_readahead_byte = offset + self.readahead_policy.size - 1;
-        let start_chunk = (offset / self.chunk_size) * self.chunk_size;
-        let end_chunk = (last_readahead_byte / self.chunk_size) * self.chunk_size;
-        (start_chunk..=end_chunk).step_by(self.chunk_size as usize)
-    }
 }
 
 // NOTE: keeping this outlined makes rustc happy about move and local references
@@ -186,9 +180,44 @@ async fn get_range(
     Ok(bs)
 }
 
+#[inline]
+fn next_chunk(offset: u64, chunk_size: u64) -> Option<u64> {
+    ((offset / chunk_size) * chunk_size).checked_add(chunk_size)
+}
+
+fn read_offsets(offset: u64, len: u64, chunk_size: u64) -> Option<impl Iterator<Item = u64>> {
+    // safety: if offset + len doesn't overflow, subtracting 1 is safe.
+    let last_byte = offset.checked_add(len)? - 1;
+
+    // safety: the divide-then-multiply is safe here since the divided values
+    // are always less than last_byte, and by definiton the start of the chunk
+    // containing last_byte is always less than or equal to last_byte
+    let start_chunk = (offset / chunk_size) * chunk_size;
+    let end_chunk = (last_byte / chunk_size) * chunk_size;
+
+    // refuse to cause overflow later by checking to see if end_chunk +
+    // chunk_size would overflow
+    end_chunk.checked_add(chunk_size)?;
+
+    Some((start_chunk..=end_chunk).step_by(chunk_size as usize))
+}
+
+fn readahead_offsets(
+    offset: u64,
+    len: u64,
+    readahead: u64,
+    chunk_size: u64,
+) -> Option<impl Iterator<Item = u64>> {
+    let readahead_start = next_chunk(offset.checked_add(len)?, chunk_size)?;
+    read_offsets(readahead_start, readahead, chunk_size)
+}
+
 #[cfg(test)]
 mod test {
+    use std::num::NonZero;
+
     use super::*;
+    use arbtest::arbtest;
     use bytes::Bytes;
     use object_store::{PutPayload, memory::InMemory, path::Path};
 
@@ -202,6 +231,106 @@ mod test {
             .await
             .expect("put into inmemory store should be ok");
         object_store
+    }
+
+    #[test]
+    fn fuzz_read_offsets() {
+        arbtest(|u| {
+            let chunk_size: u64 = u.arbitrary::<NonZero<_>>()?.get();
+            let offset: u64 = u.arbitrary()?;
+            let len: u64 = u.arbitrary::<NonZero<_>>()?.get();
+
+            match read_offsets(offset, len, chunk_size) {
+                // no overflow
+                //
+                // we can play fast-and-loose with checked math here without
+                // spurious test failures since read_chunks returning Some(_)
+                // guarantees us that computing the end of the last chunk does
+                // not overflow.
+                Some(offsets) => {
+                    let offsets: Vec<_> = offsets.collect();
+                    assert!(!offsets.is_empty());
+
+                    let first_chunk = *offsets.first().unwrap();
+                    let last_chunk = *offsets.last().unwrap();
+                    let read_len = (last_chunk + chunk_size) - first_chunk;
+                    // total read length should be at least as large as the requested length
+                    assert!(read_len >= len, "read length is too short");
+                    // the maximum read length should allow for extending the start of the read
+                    // to the beginning of a chunk, a section of chunks that fully overlap the range,
+                    // and then touching the very beginning of a final chunk.
+                    //
+                    // have to check for overflow here since the max allowable value is larger
+                    if let Some(max) =
+                        (chunk_size + (len / chunk_size) * chunk_size).checked_add(chunk_size)
+                    {
+                        assert!(read_len <= max, "read_length is too long");
+                    }
+                }
+                // we overflowed! make sure it's reasonable
+                None => assert!(
+                    offset
+                        .checked_add(len)
+                        .and_then(|n| n.checked_add(chunk_size))
+                        .and_then(|n| n.checked_add(chunk_size))
+                        .is_none(),
+                    "should only return None on offset + len + 2 * chunk_size overflow"
+                ),
+            };
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fuzz_readahead_offsets() {
+        arbtest(|u| {
+            let chunk_size: u64 = u.arbitrary::<NonZero<_>>()?.get();
+            let offset: u64 = u.arbitrary()?;
+            let readahead: u64 = u.arbitrary()?;
+            let len: u64 = u.arbitrary::<NonZero<_>>()?.get();
+
+            // compute both read and readahead offsets so we can compare them
+            let read_offsets = read_offsets(offset, len, chunk_size);
+            let readahead_offsets = readahead_offsets(offset, len, readahead, chunk_size);
+
+            match (read_offsets, readahead_offsets) {
+                // we can actually validate things
+                (Some(read_offsets), Some(readahead_offsets)) => {
+                    let read_offsets: Vec<_> = read_offsets.collect();
+                    let readahead_offsets: Vec<_> = readahead_offsets.collect();
+
+                    assert!(!read_offsets.is_empty());
+                    assert!(!readahead_offsets.is_empty());
+
+                    assert!(
+                        read_offsets.last().unwrap() < readahead_offsets.first().unwrap(),
+                        "readahead offsets should all be larger than read offsets"
+                    );
+
+                    let readahead_len = (*readahead_offsets.last().unwrap() + chunk_size)
+                        - *readahead_offsets.first().unwrap();
+                    // total readahead length should be at least as much as requested
+                    assert!(readahead_len >= readahead);
+                    // total readahead length should be no more than to the end of the next chunk
+                    assert!(readahead_len <= (readahead / chunk_size) * chunk_size + chunk_size);
+                }
+                // validate that overflow should be happening
+                (None, None) | (Some(_), None) => assert!(
+                    offset
+                        .checked_add(len)
+                        .and_then(|n| n.checked_add(readahead))
+                        .and_then(|n| n.checked_add(chunk_size))
+                        .and_then(|n| n.checked_add(chunk_size))
+                        .is_none(),
+                    "should only overflow if offset + len + readahead + chunk_size overflows",
+                ),
+                // uhhhhhhhhhhh
+                (None, Some(_)) => panic!("read overflowed but readahead did not. this is a bug"),
+            }
+
+            Ok(())
+        });
     }
 
     #[tokio::test]

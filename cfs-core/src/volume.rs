@@ -62,6 +62,7 @@ impl From<CacheError> for ErrorKind {
         match value {
             CacheError::Cache(error) => Self::Unknown(Box::new(error)),
             CacheError::ObjectStore(error) => Self::ObjectStore(error),
+            CacheError::Overflow => Self::Unknown(Box::new(CacheError::Overflow)),
         }
     }
 }
