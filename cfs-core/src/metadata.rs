@@ -895,7 +895,6 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
             }
         }
         FileType::Directory => EntryData::Directory,
-        FileType::Symlink => return Err(VolumeError::invalid("symlinks are not yet supported")),
     };
 
     Ok(Entry {
@@ -926,7 +925,6 @@ impl From<FileType> for fb::FileType {
         match ft {
             FileType::Regular => fb::FileType::Regular,
             FileType::Directory => fb::FileType::Directory,
-            FileType::Symlink => fb::FileType::Symlink,
         }
     }
 }
@@ -938,7 +936,6 @@ impl TryFrom<fb::FileType> for FileType {
         match ft {
             fb::FileType::Regular => Ok(FileType::Regular),
             fb::FileType::Directory => Ok(FileType::Directory),
-            fb::FileType::Symlink => Ok(FileType::Symlink),
             ft => Err(VolumeError::invalid(format!(
                 "unknown file type: code={code}, name={name}",
                 code = ft.0,

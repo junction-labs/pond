@@ -17,8 +17,6 @@ pub enum FileType {
     Regular,
     /// A directory.
     Directory,
-    /// A link to another file or directory.
-    Symlink,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]

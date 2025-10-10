@@ -1,7 +1,6 @@
 enum FileType : byte {
     Regular,
     Directory,
-    Symlink,
 }
 
 struct Timespec {

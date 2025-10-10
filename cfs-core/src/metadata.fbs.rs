@@ -12,13 +12,12 @@ use self::flatbuffers::{EndianScalar, Follow};
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_FILE_TYPE: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_FILE_TYPE: i8 = 2;
+pub const ENUM_MAX_FILE_TYPE: i8 = 1;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_FILE_TYPE: [FileType; 3] = [
+pub const ENUM_VALUES_FILE_TYPE: [FileType; 2] = [
   FileType::Regular,
   FileType::Directory,
-  FileType::Symlink,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -28,21 +27,18 @@ pub struct FileType(pub i8);
 impl FileType {
   pub const Regular: Self = Self(0);
   pub const Directory: Self = Self(1);
-  pub const Symlink: Self = Self(2);
 
   pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 2;
+  pub const ENUM_MAX: i8 = 1;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Regular,
     Self::Directory,
-    Self::Symlink,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
     match self {
       Self::Regular => Some("Regular"),
       Self::Directory => Some("Directory"),
-      Self::Symlink => Some("Symlink"),
       _ => None,
     }
   }
