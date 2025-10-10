@@ -324,6 +324,7 @@ enum FuzzOp {
     Read(ArbPath),
     Write(ArbPath, String),
     Remove(ArbPath),
+    Commit,
 }
 
 impl std::fmt::Display for FuzzOp {
@@ -334,6 +335,7 @@ impl std::fmt::Display for FuzzOp {
             FuzzOp::Read(path) => write!(f, "read   {path}"),
             FuzzOp::Write(path, data) => write!(f, "write  {path}, {data:#?}"),
             FuzzOp::Remove(path) => write!(f, "remove {path}"),
+            FuzzOp::Commit => write!(f, "commit"),
         }
     }
 }
@@ -378,6 +380,11 @@ fn apply(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Error
         FuzzOp::Remove(path) => {
             let path = root.join(&path);
             tri!(std::fs::remove_file(path));
+            Ok(OpOutput::None)
+        }
+        FuzzOp::Commit => {
+            let path = root.join(".commit");
+            tri!(std::fs::write(path, "1"));
             Ok(OpOutput::None)
         }
     }
