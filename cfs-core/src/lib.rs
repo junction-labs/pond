@@ -1,13 +1,15 @@
 mod cache;
+mod error;
 mod location;
 mod metadata;
 mod volume;
 
 pub mod object_store;
 
+pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
-pub use metadata::{Modify, VolumeError, VolumeMetadata};
-pub use volume::{Error, Fd, Volume};
+pub use metadata::{Modify, VolumeMetadata};
+pub use volume::{Fd, Volume};
 
 use std::time::SystemTime;
 

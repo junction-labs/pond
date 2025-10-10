@@ -1,13 +1,14 @@
 use crate::{
-    ByteRange, FileAttr, Ino, Location,
-    cache::{CacheError, ChunkCache, ReadAheadPolicy},
-    metadata::{Modify, VolumeError, VolumeMetadata},
+    ByteRange, Error, FileAttr, Ino, Location, Result,
+    cache::{ChunkCache, ReadAheadPolicy},
+    error::ErrorKind,
+    metadata::{Modify, VolumeMetadata},
 };
 use bytes::Bytes;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::PathBuf, sync::Arc, time::SystemTime};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -17,55 +18,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 // deal with won't enforce that. Since we're hiding object paths we have to figure
 // out what we want to do about other encodings. Path/PathBuf are OsString under the
 // hood which is right if we want to support that.
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, thiserror::Error)]
-#[error("{kind}")]
-pub struct Error {
-    kind: ErrorKind,
-}
-
-impl<E> From<E> for Error
-where
-    E: Into<ErrorKind>,
-{
-    fn from(err: E) -> Self {
-        let kind = err.into();
-        Self { kind }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ErrorKind {
-    #[error("http request failed: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("not found")]
-    NotFound,
-
-    #[error("volume error: {0}")]
-    Volume(#[from] crate::volume::VolumeError),
-
-    #[error("open error: {0}")]
-    Open(#[from] std::io::Error),
-
-    #[error("object storage error: {0}")]
-    ObjectStore(#[from] object_store::Error),
-
-    #[error(transparent)]
-    Unknown(Box<dyn std::error::Error + Send + Sync + 'static>),
-}
-
-impl From<CacheError> for ErrorKind {
-    fn from(value: CacheError) -> Self {
-        match value {
-            CacheError::Cache(error) => Self::Unknown(Box::new(error)),
-            CacheError::ObjectStore(error) => Self::ObjectStore(error),
-            CacheError::Overflow => Self::Unknown(Box::new(CacheError::Overflow)),
-        }
-    }
-}
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Fd {
@@ -89,7 +41,7 @@ impl From<Fd> for u64 {
     }
 }
 
-#[allow(unused)]
+#[derive(Debug)]
 enum FileDescriptor {
     ReadOnly {
         location: Location,
@@ -97,7 +49,6 @@ enum FileDescriptor {
     },
     Staged {
         file: tokio::fs::File,
-        path: std::path::PathBuf,
     },
     Static(std::io::Cursor<Arc<[u8]>>),
     Commit,
@@ -157,7 +108,7 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(self.meta.to_bytes()?)
+        self.meta.to_bytes()
     }
 
     fn increment_version(&mut self) -> &[u8] {
@@ -169,9 +120,7 @@ impl Volume {
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
         match self.meta.getattr(ino) {
             Some(attr) => Ok(attr),
-            None => Err(Error {
-                kind: ErrorKind::NotFound,
-            }),
+            None => Err(ErrorKind::NotFound.into()),
         }
     }
 
@@ -181,7 +130,7 @@ impl Volume {
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
     ) -> Result<&FileAttr> {
-        Ok(self.meta.setattr(ino, mtime, ctime)?)
+        self.meta.setattr(ino, mtime, ctime)
     }
 
     pub fn modify(
@@ -205,7 +154,7 @@ impl Volume {
     }
 
     pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr> {
-        Ok(self.meta.mkdir(parent, name)?)
+        self.meta.mkdir(parent, name)
     }
 
     pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<()> {
@@ -224,7 +173,7 @@ impl Volume {
         name: String,
         exclusive: bool,
     ) -> Result<(&FileAttr, Fd)> {
-        let (path, f) = tempfile(self.tempdir.path());
+        let (path, file) = tempfile(self.tempdir.path());
 
         let attr = self.meta.create(
             parent,
@@ -234,11 +183,7 @@ impl Volume {
             ByteRange::empty(),
         )?;
 
-        let fd = new_fd(
-            &mut self.fds,
-            attr.ino,
-            FileDescriptor::Staged { file: f, path },
-        );
+        let fd = new_fd(&mut self.fds, attr.ino, FileDescriptor::Staged { file });
         Ok((attr, fd))
     }
 
@@ -259,22 +204,18 @@ impl Volume {
                 let fd = new_fd(&mut self.fds, ino, FileDescriptor::ClearCache);
                 Ok(fd)
             }
-            Ino::VERSION => Err(Error::from(VolumeError::PermissionDenied)),
+            Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = tokio::fs::File::open(path).await?;
-                    let fd = new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged {
-                            file,
-                            path: path.clone(),
-                        },
-                    );
+                    let file = tokio::fs::File::open(path).await.map_err(|e| {
+                        Error::new_context(e.kind().into(), "failed to open staged file", e)
+                    })?;
+
+                    let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
                     Ok(fd)
                 }
-                Some(_) => Err(Error::from(VolumeError::PermissionDenied)),
-                None => Err(Error::from(VolumeError::DoesNotExist)),
+                Some(_) => Err(ErrorKind::PermissionDenied.into()),
+                None => Err(ErrorKind::NotFound.into()),
             },
         }
     }
@@ -289,7 +230,7 @@ impl Volume {
                 );
                 Ok(fd)
             }
-            Ino::COMMIT | Ino::CLEAR_CACHE => Err(Error::from(VolumeError::PermissionDenied)),
+            Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((location, range)) => Ok(new_fd(
                     &mut self.fds,
@@ -299,7 +240,7 @@ impl Volume {
                         range: *range,
                     },
                 )),
-                None => Err(Error::from(VolumeError::DoesNotExist)),
+                None => Err(ErrorKind::NotFound.into()),
             },
         }
     }
@@ -309,11 +250,11 @@ impl Volume {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             // static bytes just use their cursor
-            Some(FileDescriptor::Static(cursor)) => {
-                std::io::Seek::seek(cursor, SeekFrom::Start(offset))?;
-                let n = std::io::Read::read(cursor, buf)?;
-                Ok(n)
-            }
+            Some(FileDescriptor::Static(cursor)) => Ok({
+                read_at(cursor, offset, buf)
+                    .await
+                    .expect("BUG: invalid read from metadata")
+            }),
             Some(FileDescriptor::ReadOnly { location, range }) => {
                 // FIXME: readahead needs to know the extent of the location -
                 // the range here only includes the extent of THIS file in the
@@ -328,14 +269,10 @@ impl Volume {
                     .await?;
                 Ok(copy_into(buf, &bytes))
             }
-            Some(FileDescriptor::Staged { file, .. }) => {
-                // TODO: find a way to do File::read_at here instead of
-                // a seek and a read as separate async ops
-                file.seek(SeekFrom::Start(offset)).await?;
-                let n = file.read(buf).await?;
-                Ok(n)
-            }
-            None => Err(Error::from(VolumeError::DoesNotExist)),
+            Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
+                .await
+                .map_err(|e| Error::new_context(e.kind().into(), "failed to read staged file", e)),
+            None => Err(ErrorKind::NotFound.into()),
         }
     }
 
@@ -351,24 +288,45 @@ impl Volume {
             }
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
-                file.seek(SeekFrom::Start(offset)).await?;
-                let n = file.write(data).await?;
+                let n = write_at(file, offset, data).await.map_err(|e| {
+                    let kind = e.kind().into();
+                    Error::new_context(kind, "failed to write staged filed", e)
+                })?;
                 self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
-
                 Ok(n)
             }
             // no other fds are writable
-            Some(_) => Err(Error::from(VolumeError::PermissionDenied)),
-            None => Err(Error::from(VolumeError::DoesNotExist)),
+            Some(_) => Err(ErrorKind::PermissionDenied.into()),
+            None => Err(ErrorKind::NotFound.into()),
         }
     }
 
     pub async fn release(&mut self, fd: Fd) -> Result<()> {
         match self.fds.remove(&fd) {
             Some(_) => Ok(()),
-            None => Err(Error::from(VolumeError::DoesNotExist)),
+            None => Err(ErrorKind::NotFound.into()),
         }
     }
+}
+
+async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
+    file: &mut R,
+    offset: u64,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    file.seek(SeekFrom::Start(offset)).await?;
+    let n = file.read(buf).await?;
+    Ok(n)
+}
+
+async fn write_at<W: AsyncWrite + AsyncSeek + Unpin>(
+    file: &mut W,
+    offset: u64,
+    buf: &[u8],
+) -> std::io::Result<usize> {
+    file.seek(SeekFrom::Start(offset)).await?;
+    let n = file.write(buf).await?;
+    Ok(n)
 }
 
 fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
@@ -424,20 +382,44 @@ impl StagedVolume<'_> {
     /// Returns the location of the newly uploaded blob and a vector that maps each newly written
     /// Ino to its ByteRange within the new blob.
     async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
+        macro_rules! try_mpu {
+            ($mpu:expr, $context:literal) => {
+                $mpu.await.map_err(|e| {
+                    let kind = match &e {
+                        object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
+                        object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
+                        object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
+                        _ => ErrorKind::Other,
+                    };
+                    Error::new_context(kind, $context, e)
+                })?
+            };
+        }
+
         let dest = self.inner.base.new_data();
 
         let mut offset = 0;
         let mut staged = Vec::new();
-        let mut writer = self.inner.object_store.put_multipart(&dest.path()).await?;
+        let mut writer = try_mpu!(
+            self.inner.object_store.put_multipart(&dest.path()),
+            "failed to start multipart upload"
+        );
+
         for (attr, path) in self.inner.meta.iter_staged() {
-            let data = bytes::Bytes::from(std::fs::read(path)?);
-            writer
-                .put_part(PutPayload::from_bytes(data.clone()))
-                .await?;
+            let data = tokio::fs::read(path)
+                .await
+                .map_err(|e| Error::new_context(e.kind().into(), "failed to read staged file", e))?
+                .into();
+
+            try_mpu!(
+                writer.put_part(PutPayload::from_bytes(data)),
+                "failed to upload part"
+            );
+
             staged.push((attr.ino, (offset, attr.size).into()));
             offset += attr.size;
         }
-        writer.complete().await?;
+        try_mpu!(writer.complete(), "failed to complete upload");
 
         Ok((dest, staged))
     }
@@ -462,15 +444,36 @@ impl StagedVolume<'_> {
         let version = self.inner.meta.version();
 
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
-        self.inner
+        let res = self
+            .inner
             .object_store
-            .put(
+            .put_opts(
                 &self.inner.base.metadata(version).path(),
                 PutPayload::from_bytes(new_volume),
+                PutOptions {
+                    mode: object_store::PutMode::Create,
+                    ..Default::default()
+                },
             )
-            .await?;
+            .await;
 
-        Ok(())
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let kind = match e {
+                    object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
+                    object_store::Error::AlreadyExists { .. } => ErrorKind::AlreadyExists,
+                    object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
+                    object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
+                    _ => ErrorKind::Other,
+                };
+                Err(Error::new_context(
+                    kind,
+                    "uploading volume metadata failed",
+                    e,
+                ))
+            }
+        }
     }
 }
 

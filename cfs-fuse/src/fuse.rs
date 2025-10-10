@@ -1,5 +1,6 @@
-use cfs_core::{ByteRange, Fd, Volume};
+use cfs_core::{ByteRange, ErrorKind, Fd, Volume};
 use cfs_core::{Ino, Modify};
+use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -17,6 +18,44 @@ impl Cfs {
     }
 }
 
+trait AsErrno {
+    fn as_errno(&self) -> libc::c_int;
+}
+
+impl AsErrno for cfs_core::ErrorKind {
+    fn as_errno(&self) -> libc::c_int {
+        match self {
+            cfs_core::ErrorKind::IsADirectory => libc::EISDIR,
+            cfs_core::ErrorKind::NotADirectory => libc::ENOTDIR,
+            cfs_core::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
+            cfs_core::ErrorKind::AlreadyExists => libc::EEXIST,
+            cfs_core::ErrorKind::NotFound => libc::ENOENT,
+            cfs_core::ErrorKind::PermissionDenied => libc::EPERM,
+            cfs_core::ErrorKind::InvalidData => libc::EINVAL,
+            cfs_core::ErrorKind::TimedOut => libc::ETIMEDOUT,
+            cfs_core::ErrorKind::Unsupported => libc::ENOTSUP,
+            cfs_core::ErrorKind::Other | _ => libc::EIO,
+        }
+    }
+}
+
+macro_rules! fs_try {
+    ($reply:expr, $e:expr $(,)*) => {
+        match $e {
+            Ok(v) => v,
+            Err(err) => {
+                let err: cfs_core::Error = err.into();
+                $reply.error(err.kind().as_errno());
+                return;
+            }
+        }
+    };
+}
+
+fn from_os_str(s: &OsStr) -> cfs_core::Result<&str> {
+    s.to_str().ok_or_else(|| ErrorKind::InvalidData.into())
+}
+
 impl fuser::Filesystem for Cfs {
     // TODO: set up uid/gid with init
     // TODO: set capabilities with init
@@ -28,24 +67,11 @@ impl fuser::Filesystem for Cfs {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        let Some(name) = name.to_str() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-        let attr = match self.volume.lookup(parent.into(), name) {
-            Ok(Some(attr)) => attr,
-            // nope
-            Ok(None) => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-            // TODO: this should return EISDIR/ENOTDIR when appropriate
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
-        };
-        reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0);
+        let name = fs_try!(reply, from_os_str(name));
+        match fs_try!(reply, self.volume.lookup(parent.into(), name)) {
+            Some(attr) => reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0),
+            None => reply.error(libc::ENOENT),
+        }
     }
 
     fn getattr(
@@ -55,10 +81,7 @@ impl fuser::Filesystem for Cfs {
         _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        let Ok(attr) = self.volume.getattr(ino.into()) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
+        let attr = fs_try!(reply, self.volume.getattr(ino.into()));
         reply.attr(&Duration::new(0, 0), &fuse_attr(attr));
     }
 
@@ -70,14 +93,8 @@ impl fuser::Filesystem for Cfs {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let Ok(iter) = self.volume.readdir(ino.into()) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
-        let Ok(offset) = offset.try_into() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
+        let iter = fs_try!(reply, self.volume.readdir(ino.into()));
+        let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
 
         for (i, (name, attr)) in iter.enumerate().skip(offset) {
             let is_full = reply.add(attr.ino.into(), (i + 1) as i64, fuse_kind(attr.kind), name);
@@ -97,18 +114,9 @@ impl fuser::Filesystem for Cfs {
         _umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        let Some(name) = name.to_str() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-
-        match self.volume.mkdir(parent.into(), name.to_string()) {
-            Ok(attr) => reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0),
-            Err(_err) => {
-                // FIXME: translate volume error to error code
-                reply.error(libc::EINVAL);
-            }
-        }
+        let name = fs_try!(reply, from_os_str(name));
+        let attr = fs_try!(reply, self.volume.mkdir(parent.into(), name.to_string()));
+        reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0);
     }
 
     fn rmdir(
@@ -118,15 +126,9 @@ impl fuser::Filesystem for Cfs {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        let Some(name) = name.to_str() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-        match self.volume.rmdir(parent.into(), name) {
-            Ok(()) => reply.ok(),
-            // FIXME: translate volume error to error code
-            Err(_e) => reply.error(libc::ENOENT),
-        }
+        let name = fs_try!(reply, from_os_str(name));
+        fs_try!(reply, self.volume.rmdir(parent.into(), name));
+        reply.ok();
     }
 
     fn create(
@@ -149,18 +151,13 @@ impl fuser::Filesystem for Cfs {
                 return;
             }
         }
-
         let excl = (flags & libc::O_EXCL) > 0;
-        let parent: Ino = parent.into();
-        let Some(name) = name.to_str() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
 
-        let Ok((attr, fd)) = self.volume.create(parent, name.to_string(), excl) else {
-            reply.error(libc::EIO); // FIXME
-            return;
-        };
+        let name = fs_try!(reply, from_os_str(name));
+        let (attr, fd) = fs_try!(
+            reply,
+            self.volume.create(parent.into(), name.to_string(), excl)
+        );
         reply.created(&Duration::new(0, 0), &fuse_attr(attr), 0, fd.into(), 0);
     }
 
@@ -178,23 +175,15 @@ impl fuser::Filesystem for Cfs {
         }
 
         match oflags_read_write(flags) {
-            // to open a file for reading, we ask the volume for an (async)
-            // reader and stash it in the filehande set for later.
             Some(OpenMode::Read) => {
-                let Ok(fd) = self.runtime.block_on(self.volume.open_read(ino)) else {
-                    reply.error(libc::EIO);
-                    return;
-                };
+                let fd = fs_try!(reply, self.runtime.block_on(self.volume.open_read(ino)));
                 reply.opened(fd.into(), reply_flags);
             }
-            // to open a file for writing, we modify the volume asap to try and
-            // overwrite any existing files, and then stash a filehandle to a
-            // local tempfile in the filehandle set for later.
             Some(OpenMode::Write | OpenMode::ReadWrite) => {
-                let Ok(fd) = self.runtime.block_on(self.volume.open_read_write(ino)) else {
-                    reply.error(libc::EIO);
-                    return;
-                };
+                let fd = fs_try!(
+                    reply,
+                    self.runtime.block_on(self.volume.open_read_write(ino))
+                );
                 reply.opened(fd.into(), reply_flags);
             }
             // you set an illegal file mode
@@ -213,17 +202,23 @@ impl fuser::Filesystem for Cfs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
+        // NOTE: it's not clear why offset is an i64 anywhere, libfuse defines offset as
+        // a u64 in fuse_read_in in the kernel API. the high level libfuse api defines it
+        // as an off_t which is a signed type.
+        //
+        // https://libfuse.github.io/doxygen/structfuse__lowlevel__ops.html#addd81057f639eec4b08927fc4c95dd41
+        // https://github.com/libfuse/libfuse/blob/fuse-3.0.0/include/fuse_kernel.h#L517-L525
+        let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
+
         let fd = Fd::new(ino.into(), fh);
         // TODO: re-use a scratch buffer instead of allocating here
         let mut buf = vec![0u8; size as usize];
-        let res = self
-            .runtime
-            .block_on(self.volume.read_at(fd, offset as u64, &mut buf));
-
-        match res {
-            Ok(n) => reply.data(&buf[..n]),
-            Err(_) => reply.error(libc::EIO), // FIXME: convert error code
-        }
+        let n = fs_try!(
+            reply,
+            self.runtime
+                .block_on(self.volume.read_at(fd, offset, &mut buf))
+        );
+        reply.data(&buf[..n]);
     }
 
     fn write(
@@ -239,14 +234,13 @@ impl fuser::Filesystem for Cfs {
         reply: fuser::ReplyWrite,
     ) {
         let fd = Fd::new(ino.into(), fh);
-        let res = self
-            .runtime
-            .block_on(self.volume.write_at(fd, offset as u64, data));
+        let n = fs_try!(
+            reply,
+            self.runtime
+                .block_on(self.volume.write_at(fd, offset as u64, data))
+        );
 
-        match res {
-            Ok(n) => reply.written(n as u32),
-            Err(_err) => reply.error(libc::EIO),
-        }
+        reply.written(n as u32);
     }
 
     fn setattr(
@@ -273,30 +267,24 @@ impl fuser::Filesystem for Cfs {
                 fuser::TimeOrNow::SpecificTime(t) => t,
                 fuser::TimeOrNow::Now => SystemTime::now(),
             });
-            if let Err(_err) = self.volume.setattr(ino, mtime, ctime) {
-                reply.error(libc::ENOENT);
-                return;
-            };
+            fs_try!(reply, self.volume.setattr(ino, mtime, ctime));
         };
 
-        if let Some(size) = size
-            && let Err(_err) = self.volume.modify(
-                ino,
-                None,
-                Some(Modify::Set(ByteRange {
-                    offset: 0,
-                    len: size,
-                })),
-            )
-        {
-            reply.error(libc::EINVAL);
-            return;
+        if let Some(size) = size {
+            fs_try!(
+                reply,
+                self.volume.modify(
+                    ino,
+                    None,
+                    Some(Modify::Set(ByteRange {
+                        offset: 0,
+                        len: size,
+                    })),
+                )
+            );
         };
 
-        let Ok(attr) = self.volume.getattr(ino) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
+        let attr = fs_try!(reply, self.volume.getattr(ino));
         reply.attr(&Duration::new(0, 0), &fuse_attr(attr));
     }
 
@@ -311,11 +299,8 @@ impl fuser::Filesystem for Cfs {
         reply: fuser::ReplyEmpty,
     ) {
         let fd = Fd::new(ino.into(), fh);
-        if let Err(_err) = self.runtime.block_on(self.volume.release(fd)) {
-            reply.error(libc::EINVAL);
-        } else {
-            reply.ok();
-        }
+        fs_try!(reply, self.runtime.block_on(self.volume.release(fd)));
+        reply.ok();
     }
 
     fn unlink(
@@ -325,20 +310,9 @@ impl fuser::Filesystem for Cfs {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        let Some(name) = name.to_str() else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-
-        match self.volume.delete(parent.into(), name) {
-            Err(_todo) => {
-                // FIXME: actually insepct the error and pick a code
-                reply.error(libc::ENOENT);
-            }
-            Ok(_) => {
-                reply.ok();
-            }
-        }
+        let name = fs_try!(reply, from_os_str(name));
+        fs_try!(reply, self.volume.delete(parent.into(), name));
+        reply.ok();
     }
 }
 

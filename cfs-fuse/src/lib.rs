@@ -3,7 +3,7 @@ mod fuse;
 use anyhow::Context;
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use cfs_core::{Ino, VolumeError, VolumeMetadata};
+use cfs_core::{Ino, VolumeMetadata};
 use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
 use object_store::{ObjectStore, PutPayload};
@@ -263,7 +263,7 @@ pub fn pack(
 
     match volume.relocate(&staging, data_location.clone()) {
         Ok(()) => (),
-        Err(VolumeError::DoesNotExist) if cursor == 0 => (), // we didn't do shit
+        Err(e) if e.kind() == cfs_core::ErrorKind::NotFound && cursor == 0 => (), // we didn't do shit
         Err(e) => return Err(e.into()),
     };
     volume_file.write_all(&volume.to_bytes()?)?;

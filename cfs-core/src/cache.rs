@@ -2,17 +2,19 @@ use bytes::Bytes;
 use object_store::ObjectStore;
 use std::{ops::Range, sync::Arc};
 
-#[derive(thiserror::Error, Debug)]
-pub(crate) enum CacheError {
-    #[error("read bounds are too large")]
-    Overflow,
+use crate::{Error, error::ErrorKind};
 
-    #[error(transparent)]
-    Cache(#[from] foyer_memory::Error),
+// #[derive(thiserror::Error, Debug)]
+// pub(crate) enum CacheError {
+//     #[error("read bounds are too large")]
+//     Overflow,
 
-    #[error(transparent)]
-    ObjectStore(#[from] object_store::Error),
-}
+//     #[error(transparent)]
+//     Cache(#[from] foyer_memory::Error),
+
+//     #[error(transparent)]
+//     ObjectStore(#[from] object_store::Error),
+// }
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadAheadPolicy {
@@ -70,11 +72,12 @@ impl ChunkCache {
         path: &object_store::path::Path,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<Bytes>, CacheError> {
+    ) -> crate::Result<Vec<Bytes>> {
         let mut chunks = vec![];
         let read_offsets: Vec<_> = read_offsets(offset, len, self.inner.chunk_size)
-            .ok_or(CacheError::Overflow)?
+            .ok_or(Error::new(ErrorKind::InvalidData, "overflow"))?
             .collect();
+
         for offset in &read_offsets {
             let cache = self.inner.clone();
             let path = path.clone();
@@ -92,7 +95,7 @@ impl ChunkCache {
             self.inner.readahead_policy.size,
             self.inner.chunk_size,
         )
-        .ok_or(CacheError::Overflow)?;
+        .ok_or(Error::new(ErrorKind::InvalidData, "overflow"))?;
         for offset in readahead_offsets {
             let cache = self.inner.clone();
             let path = path.clone();
@@ -145,7 +148,7 @@ impl ChunkCacheInner {
         &self,
         path: object_store::path::Path,
         offset: u64,
-    ) -> Result<Bytes, CacheError> {
+    ) -> crate::Result<Bytes> {
         assert!(offset.is_multiple_of(self.chunk_size));
 
         let range = offset..(offset + self.chunk_size);
@@ -169,14 +172,29 @@ impl ChunkCacheInner {
     }
 }
 
+impl From<foyer_memory::Error> for crate::Error {
+    fn from(value: foyer_memory::Error) -> Self {
+        Self::new(ErrorKind::Other, format!("cache error: {value}"))
+    }
+}
+
 // NOTE: keeping this outlined makes rustc happy about move and local references
 // where inlining it makes helllllllllla problems.
 async fn get_range(
     client: Arc<dyn ObjectStore>,
     path: object_store::path::Path,
     range: Range<u64>,
-) -> Result<Bytes, CacheError> {
-    let bs = client.get_range(&path, range).await?;
+) -> crate::Result<Bytes> {
+    let bs = client.get_range(&path, range).await.map_err(|e| match e {
+        object_store::Error::NotFound { path, .. } => Error::new(ErrorKind::NotFound, path),
+        object_store::Error::InvalidPath { source } => Error::new(ErrorKind::InvalidData, source),
+        object_store::Error::PermissionDenied { path, source }
+        | object_store::Error::Unauthenticated { path, source } => Error::new(
+            ErrorKind::PermissionDenied,
+            format!("permission denied: {path}: {source}"),
+        ),
+        err => Error::new_context(ErrorKind::Other, "get_range failed", err),
+    })?;
     Ok(bs)
 }
 
@@ -374,7 +392,7 @@ mod test {
         let object_store = Arc::new(InMemory::new());
         let cache = ChunkCache::new(10, 10, object_store, ReadAheadPolicy { size: 123 });
         let res = cache.get_at(&"some-key".into(), 10, 37).await;
-        assert!(matches!(res, Err(CacheError::ObjectStore(_))));
+        assert!(res.is_err());
         assert!(!cache.inner.is_cached("some-key".into(), 10));
     }
 }

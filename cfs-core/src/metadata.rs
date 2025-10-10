@@ -24,33 +24,33 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 #[rustfmt::skip]
 mod fb;
 
-use crate::{ByteRange, FileAttr, FileType, Ino, Location};
+use crate::{ByteRange, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
-pub enum VolumeError {
-    #[error("not a directory")]
-    NotADirectory,
-    #[error("is a directory")]
-    IsADirectory,
-    #[error("does not exist")]
-    DoesNotExist,
-    #[error("already exists")]
-    AlreadyExists,
-    #[error("directory is not empty")]
-    NotEmpty,
-    #[error("permission denied")]
-    PermissionDenied,
-    #[error("{message}")]
-    Invalid { message: Cow<'static, str> },
-}
+// #[derive(thiserror::Error, Debug, PartialEq, Eq)]
+// pub enum ErrorKind {
+//     #[error("not a directory")]
+//     NotADirectory,
+//     #[error("is a directory")]
+//     IsADirectory,
+//     #[error("does not exist")]
+//     DoesNotExist,
+//     #[error("already exists")]
+//     AlreadyExists,
+//     #[error("directory is not empty")]
+//     NotEmpty,
+//     #[error("permission denied")]
+//     PermissionDenied,
+//     #[error("{message}")]
+//     Invalid { message: Cow<'static, str> },
+// }
 
-impl VolumeError {
-    fn invalid<S: Into<Cow<'static, str>>>(msg: S) -> Self {
-        Self::Invalid {
-            message: msg.into(),
-        }
-    }
-}
+// impl ErrorKind {
+//     fn invalid<S: Into<Cow<'static, str>>>(msg: S) -> Self {
+//         Self::Invalid {
+//             message: msg.into(),
+//         }
+//     }
+// }
 
 /// `VolumeMetadata` holds all of file and directory metadata for a coolfs
 /// volume. Metadata is extremely low-level, and working with a it requires
@@ -261,14 +261,14 @@ impl VolumeMetadata {
     ///
     /// Returns an error if the parent directory does not exist, or if it
     /// already contains a file or directory with that name.
-    pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr, VolumeError> {
+    pub fn mkdir(&mut self, parent: Ino, name: String) -> crate::Result<&FileAttr> {
         // validate that it's okay to create the directory before any state is
         // modified - don't want to undo anything if we can help it
         //
         // lookup checks parent is a directory.
         let _ = self.dir_entry(parent)?;
         if self.lookup_unchecked(parent, &name).is_some() {
-            return Err(VolumeError::AlreadyExists);
+            return Err(ErrorKind::AlreadyExists.into());
         }
 
         // start modifying things
@@ -302,7 +302,7 @@ impl VolumeMetadata {
         &mut self,
         parent: Ino,
         dir_names: impl IntoIterator<Item = String>,
-    ) -> Result<&FileAttr, VolumeError> {
+    ) -> crate::Result<&FileAttr> {
         let parent = self.dir_entry(parent)?;
 
         // this is a little bit gross - we should get the final attr out of
@@ -318,7 +318,7 @@ impl VolumeMetadata {
             depth += 1;
             dir = match self.mkdir(dir, dir_name.clone()) {
                 Ok(attr) => attr.ino,
-                Err(VolumeError::AlreadyExists) => {
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     self.lookup_unchecked(dir, &dir_name)
                         .expect("BUG: lookup failed after exists error")
                         .ino
@@ -329,13 +329,13 @@ impl VolumeMetadata {
 
         // you gotta pass something man
         if depth == 0 {
-            return Err(VolumeError::invalid("empty path"));
+            return Err(Error::new(ErrorKind::InvalidData, "empty path"));
         }
         Ok(&self.data.get(&dir).unwrap().attr)
     }
 
     /// Remove a directory. Returns an error if the
-    pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<(), VolumeError> {
+    pub fn rmdir(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
         let _ = self.dir_entry(parent)?;
 
         // TODO: we shouldn't have to copy the string here, but
@@ -343,18 +343,18 @@ impl VolumeMetadata {
         // being EntryKey<'static> implies that this needs to be owned.
         let k = EntryKey::from((parent, name.to_string()));
 
-        let ino = *self.dirs.get(&k).ok_or(VolumeError::DoesNotExist)?;
+        let ino = *self.dirs.get(&k).ok_or(ErrorKind::NotFound)?;
         let data_entry = match self.data.entry(ino) {
             btree_map::Entry::Vacant(_) => unreachable!("BUG: inconsistent dir entry"),
             btree_map::Entry::Occupied(entry) => entry,
         };
 
         match data_entry.get().data {
-            EntryData::Dynamic | EntryData::File { .. } => Err(VolumeError::NotADirectory),
+            EntryData::Dynamic | EntryData::File { .. } => Err(ErrorKind::NotADirectory.into()),
             EntryData::Directory => {
                 let not_empty = self.dirs.range(entry_range(ino)).any(|_| true);
                 if not_empty {
-                    return Err(VolumeError::NotEmpty);
+                    return Err(ErrorKind::DirectoryNotEmpty.into());
                 }
 
                 data_entry.remove();
@@ -377,14 +377,14 @@ impl VolumeMetadata {
         exclusive: bool,
         location: Location,
         byte_range: ByteRange,
-    ) -> Result<&FileAttr, VolumeError> {
+    ) -> crate::Result<&FileAttr> {
         // validate that the parent directory exists and we're allowed to
         // create this file (permissions, O_EXCL, etc) before modifying
         // any state
         let _ = self.dir_entry(parent)?;
         match self.lookup_unchecked(parent, &name) {
-            Some(e) if exclusive => return Err(VolumeError::AlreadyExists),
-            Some(e) if e.is_directory() => return Err(VolumeError::IsADirectory),
+            Some(e) if exclusive => return Err(ErrorKind::AlreadyExists.into()),
+            Some(e) if e.is_directory() => return Err(ErrorKind::IsADirectory.into()),
             _ => (), // ok!
         }
 
@@ -422,7 +422,7 @@ impl VolumeMetadata {
     }
 
     /// Remove a file from a volume.
-    pub fn delete(&mut self, parent: Ino, name: &str) -> Result<(), VolumeError> {
+    pub fn delete(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
         let _ = self.dir_entry(parent)?;
 
         // TODO: we shouldn't have to copy the string here, but
@@ -431,7 +431,7 @@ impl VolumeMetadata {
         let k = EntryKey::from((parent, name.to_string()));
 
         let dir_entry = match self.dirs.entry(k) {
-            btree_map::Entry::Vacant(_) => return Err(VolumeError::DoesNotExist),
+            btree_map::Entry::Vacant(_) => return Err(ErrorKind::NotFound.into()),
             btree_map::Entry::Occupied(entry) => entry,
         };
         let data_entry = match self.data.entry(*dir_entry.get()) {
@@ -445,8 +445,8 @@ impl VolumeMetadata {
                 data_entry.remove();
                 Ok(())
             }
-            EntryData::Directory => Err(VolumeError::IsADirectory),
-            EntryData::Dynamic => Err(VolumeError::PermissionDenied),
+            EntryData::Directory => Err(ErrorKind::IsADirectory.into()),
+            EntryData::Dynamic => Err(ErrorKind::PermissionDenied.into()),
         }
     }
 
@@ -457,7 +457,7 @@ impl VolumeMetadata {
     }
 
     /// Lookup a directory entry by name.
-    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>, VolumeError> {
+    pub fn lookup(&self, parent: Ino, name: &str) -> crate::Result<Option<&FileAttr>> {
         let _ = self.dir_entry(parent)?;
 
         Ok(self.lookup_unchecked(parent, name))
@@ -495,8 +495,8 @@ impl VolumeMetadata {
         ino: Ino,
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
-    ) -> Result<&FileAttr, VolumeError> {
-        let entry = self.data.get_mut(&ino).ok_or(VolumeError::DoesNotExist)?;
+    ) -> crate::Result<&FileAttr> {
+        let entry = self.data.get_mut(&ino).ok_or(ErrorKind::NotFound)?;
         if let Some(mtime) = mtime {
             entry.attr.mtime = mtime;
         }
@@ -510,9 +510,9 @@ impl VolumeMetadata {
     ///
     /// This changes the physical location for all files in the volume that
     /// refer to this blob. To relocate an individual file, see `modify`.
-    pub fn relocate(&mut self, from: &Location, to: Location) -> Result<(), VolumeError> {
+    pub fn relocate(&mut self, from: &Location, to: Location) -> crate::Result<()> {
         let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
-            return Err(VolumeError::DoesNotExist);
+            return Err(ErrorKind::NotFound.into());
         };
         *from = to;
         Ok(())
@@ -567,16 +567,16 @@ impl VolumeMetadata {
         ino: Ino,
         location: Option<Location>,
         range: Option<Modify>,
-    ) -> Result<(), VolumeError> {
+    ) -> crate::Result<()> {
         let Some(entry) = self.data.get_mut(&ino) else {
-            return Err(VolumeError::DoesNotExist);
+            return Err(ErrorKind::NotFound.into());
         };
         let EntryData::File {
             location_idx,
             byte_range,
         } = &mut entry.data
         else {
-            return Err(VolumeError::IsADirectory);
+            return Err(ErrorKind::IsADirectory.into());
         };
 
         if let Some(location) = location {
@@ -602,7 +602,7 @@ impl VolumeMetadata {
     /// `(filename, attr)` pairs.
     ///
     /// Iterator order is not guaranteed to be stable.
-    pub fn readdir<'a>(&'a self, ino: Ino) -> Result<ReadDir<'a>, VolumeError> {
+    pub fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
         let _ = self.dir_entry(ino)?;
 
         Ok(ReadDir {
@@ -618,7 +618,7 @@ impl VolumeMetadata {
     /// `filename` and `attrs` are the same values that would be yielded from
     /// calling `readdir` on a directory and `ancestors` is a `Vec` of ancestor
     /// directory names.
-    pub fn walk<'a>(&'a self, ino: Ino) -> Result<WalkIter<'a>, VolumeError> {
+    pub fn walk<'a>(&'a self, ino: Ino) -> crate::Result<WalkIter<'a>> {
         let root_dir = self.dir_entry(ino)?;
         let root_iter = ReadDir {
             range: self.dirs.range(entry_range(ino)),
@@ -645,10 +645,10 @@ impl VolumeMetadata {
     }
 
     #[inline]
-    fn dir_entry(&self, ino: Ino) -> Result<&Entry, VolumeError> {
-        let entry = self.data.get(&ino).ok_or(VolumeError::DoesNotExist)?;
+    fn dir_entry(&self, ino: Ino) -> crate::Result<&Entry> {
+        let entry = self.data.get(&ino).ok_or(ErrorKind::NotFound)?;
         if !entry.is_dir() {
-            return Err(VolumeError::NotADirectory);
+            return Err(ErrorKind::NotADirectory.into());
         }
         Ok(entry)
     }
@@ -675,7 +675,7 @@ impl VolumeMetadata {
     /// Serialize committed data in this volume to bytes.
     ///
     /// Note: uncommitted changes will be dropped. Commit if you want them persisted!
-    pub fn to_bytes(&self) -> Result<Vec<u8>, VolumeError> {
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         let mut fbb = FlatBufferBuilder::new();
 
         let locations = {
@@ -710,9 +710,9 @@ impl VolumeMetadata {
 
     /// Read a serialized volume. Returns an error if the volume is invalid or
     /// inconsistent.
-    pub fn from_bytes(bs: &[u8]) -> Result<Self, VolumeError> {
-        let fb_volume =
-            fb::root_as_volume(bs).map_err(|_| VolumeError::invalid("invalid bytes"))?;
+    pub fn from_bytes(bs: &[u8]) -> crate::Result<Self> {
+        let fb_volume = fb::root_as_volume(bs)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid bytes"))?;
 
         let locations = fb_volume
             .locations()
@@ -864,7 +864,7 @@ fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<
     )
 }
 
-fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
+fn from_fb_entry(fb_entry: &fb::Entry) -> crate::Result<Entry> {
     let name = fb_entry.name().to_string().into();
     let parent_ino = fb_entry.parent_ino();
     let attr = {
@@ -881,10 +881,16 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> Result<Entry, VolumeError> {
     let data = match attr.kind {
         FileType::Regular => {
             let Some(location_ref) = fb_entry.location_ref() else {
-                return Err(VolumeError::invalid("missing file data pointer"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "missing file data pointer",
+                ));
             };
             let Some(byte_range) = location_ref.byte_range() else {
-                return Err(VolumeError::invalid("missing file data range"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "missing file data range",
+                ));
             };
             EntryData::File {
                 location_idx: location_ref.location_index() as usize,
@@ -930,17 +936,20 @@ impl From<FileType> for fb::FileType {
 }
 
 impl TryFrom<fb::FileType> for FileType {
-    type Error = VolumeError;
+    type Error = Error;
 
     fn try_from(ft: fb::FileType) -> Result<Self, Self::Error> {
         match ft {
             fb::FileType::Regular => Ok(FileType::Regular),
             fb::FileType::Directory => Ok(FileType::Directory),
-            ft => Err(VolumeError::invalid(format!(
-                "unknown file type: code={code}, name={name}",
-                code = ft.0,
-                name = ft.variant_name().unwrap_or("")
-            ))),
+            ft => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "unknown file type: code={code}, name={name}",
+                    code = ft.0,
+                    name = ft.variant_name().unwrap_or("")
+                ),
+            )),
         }
     }
 }
@@ -948,7 +957,7 @@ impl TryFrom<fb::FileType> for FileType {
 fn to_fb_location<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     location: &Location,
-) -> Result<WIPOffset<fb::LocationWrapper<'a>>, VolumeError> {
+) -> crate::Result<WIPOffset<fb::LocationWrapper<'a>>> {
     let union = match location {
         Location::Local { path } => {
             // FIXME: what do we do about non-utf8 paths?
@@ -970,7 +979,8 @@ fn to_fb_location<'a>(
             location.as_union_value()
         }
         _ => {
-            return Err(VolumeError::invalid(
+            return Err(Error::new(
+                ErrorKind::InvalidData,
                 "can't serialize a volume with staged data",
             ));
         }
@@ -991,7 +1001,7 @@ fn to_fb_location<'a>(
     ))
 }
 
-fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, VolumeError> {
+fn from_fb_location(fb_location: fb::LocationWrapper) -> crate::Result<Location> {
     match fb_location.location_type() {
         fb::Location::local => {
             let fb_location = fb_location.location_as_local().unwrap();
@@ -1003,22 +1013,27 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
             let key = object_store::path::Path::from(fb_location.key().to_string());
             Ok(Location::ObjectStorage { bucket, key })
         }
-        lt => Err(VolumeError::invalid(format!(
-            "unknown location type: code={code} name={name}",
-            code = lt.0,
-            name = lt.variant_name().unwrap_or("")
-        ))),
+        lt => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "unknown location type: code={code} name={name}",
+                code = lt.0,
+                name = lt.variant_name().unwrap_or("")
+            ),
+        )),
     }
 }
 
 #[cfg(test)]
 mod test {
+    use crate::error::ErrorKind;
+
     use super::*;
 
     pub fn readdir_nospecial(
         v: &VolumeMetadata,
         ino: Ino,
-    ) -> Result<impl Iterator<Item = (&str, &FileAttr)>, VolumeError> {
+    ) -> crate::Result<impl Iterator<Item = (&str, &FileAttr)>> {
         let _ = v.dir_entry(ino)?;
 
         let iter = ReadDir {
@@ -1132,8 +1147,8 @@ mod test {
         let mut volume = VolumeMetadata::empty();
         let _ = volume.mkdir(Ino::Root, "a".to_string()).unwrap();
         assert_eq!(
-            volume.delete(Ino::Root, "a"),
-            Err(VolumeError::IsADirectory)
+            volume.delete(Ino::Root, "a").map_err(|e| e.kind()),
+            Err(ErrorKind::IsADirectory)
         );
     }
 
@@ -1146,8 +1161,8 @@ mod test {
                 continue;
             }
             assert_eq!(
-                volume.delete(Ino::Root, &entry.name),
-                Err(VolumeError::PermissionDenied)
+                volume.delete(Ino::Root, &entry.name).map_err(|e| e.kind()),
+                Err(ErrorKind::PermissionDenied)
             );
         }
     }

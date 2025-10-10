@@ -158,7 +158,6 @@ fn fuzz_commit() {
         });
 
         // pack it to the pack_dir, which shouldn't include the uncommitted stuff.
-        dbg!(&pack_dir);
         pack(
             test_runtime(),
             &expected_dir,
