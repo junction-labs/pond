@@ -402,6 +402,7 @@ fn mount(args: MountArgs) -> anyhow::Result<()> {
 
     let metadata = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
     let volume = Volume::new(
+        location,
         metadata,
         args.read_behavior.max_cache_size.as_u64(),
         args.read_behavior.chunk_size.as_u64(),

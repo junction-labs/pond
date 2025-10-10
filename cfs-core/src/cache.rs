@@ -39,7 +39,7 @@ impl ChunkCache {
     pub fn new(
         max_cache_size: u64,
         chunk_size: u64,
-        object_store: Box<dyn ObjectStore>,
+        object_store: Arc<dyn ObjectStore>,
         readahead_policy: ReadAheadPolicy,
     ) -> Self {
         let max_cache_size = (max_cache_size / chunk_size) as usize;
@@ -195,8 +195,8 @@ mod test {
     async fn object_store_with_data(
         key: object_store::path::Path,
         bytes: Bytes,
-    ) -> Box<dyn ObjectStore> {
-        let object_store = Box::new(InMemory::new());
+    ) -> Arc<dyn ObjectStore> {
+        let object_store = Arc::new(InMemory::new());
         object_store
             .put(&Path::from(key), PutPayload::from_bytes(bytes))
             .await
@@ -242,7 +242,7 @@ mod test {
 
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
-        let object_store = Box::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let cache = ChunkCache::new(10, 10, object_store, ReadAheadPolicy { size: 123 });
         let res = cache.get_at(&"some-key".into(), 10, 37).await;
         assert!(matches!(res, Err(CacheError::ObjectStore(_))));

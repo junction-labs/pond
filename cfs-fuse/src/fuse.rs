@@ -1,5 +1,5 @@
-use cfs_core::Ino;
-use cfs_core::{ByteRange, Volume};
+use cfs_core::{ByteRange, Fd, Volume};
+use cfs_core::{Ino, Modify};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -205,7 +205,7 @@ impl fuser::Filesystem for Cfs {
     fn read(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         size: u32,
@@ -213,11 +213,12 @@ impl fuser::Filesystem for Cfs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
+        let fd = Fd::new(ino.into(), fh);
         // TODO: re-use a scratch buffer instead of allocating here
         let mut buf = vec![0u8; size as usize];
         let res = self
             .runtime
-            .block_on(self.volume.read_at(fh.into(), offset as u64, &mut buf));
+            .block_on(self.volume.read_at(fd, offset as u64, &mut buf));
 
         match res {
             Ok(n) => reply.data(&buf[..n]),
@@ -228,7 +229,7 @@ impl fuser::Filesystem for Cfs {
     fn write(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         data: &[u8],
@@ -237,9 +238,10 @@ impl fuser::Filesystem for Cfs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
+        let fd = Fd::new(ino.into(), fh);
         let res = self
             .runtime
-            .block_on(self.volume.write_at(fh.into(), offset as u64, data));
+            .block_on(self.volume.write_at(fd, offset as u64, data));
 
         match res {
             Ok(n) => reply.written(n as u32),
@@ -281,10 +283,10 @@ impl fuser::Filesystem for Cfs {
             && let Err(_err) = self.volume.modify(
                 ino,
                 None,
-                Some(ByteRange {
+                Some(Modify::Set(ByteRange {
                     offset: 0,
                     len: size,
-                }),
+                })),
             )
         {
             reply.error(libc::EINVAL);
@@ -301,14 +303,15 @@ impl fuser::Filesystem for Cfs {
     fn release(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        if let Err(_err) = self.runtime.block_on(self.volume.release(fh.into())) {
+        let fd = Fd::new(ino.into(), fh);
+        if let Err(_err) = self.runtime.block_on(self.volume.release(fd)) {
             reply.error(libc::EINVAL);
         } else {
             reply.ok();

@@ -6,7 +6,7 @@ mod volume;
 pub mod object_store;
 
 pub use location::Location;
-pub use metadata::{VolumeError, VolumeMetadata};
+pub use metadata::{Modify, VolumeError, VolumeMetadata};
 pub use volume::{Error, Fd, Volume};
 
 use std::time::SystemTime;
@@ -21,11 +21,11 @@ pub enum FileType {
     Symlink,
 }
 
-// NOTE:
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ino {
     /// A missing or null ino. May be used to signal that a file is deleted or
     /// invalid.
+    #[default]
     None,
 
     /// The root inode of a volume.

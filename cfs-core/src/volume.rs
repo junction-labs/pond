@@ -1,10 +1,10 @@
 use crate::{
     ByteRange, FileAttr, Ino, Location,
     cache::{CacheError, ChunkCache, ReadAheadPolicy},
-    metadata::{VolumeError, VolumeMetadata},
+    metadata::{Modify, VolumeError, VolumeMetadata},
 };
 use bytes::Bytes;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::PathBuf, sync::Arc, time::SystemTime};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -67,23 +67,24 @@ impl From<CacheError> for ErrorKind {
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Fd(u64);
+pub struct Fd {
+    ino: Ino,
+    fh: u64,
+}
 
-impl From<u64> for Fd {
-    fn from(n: u64) -> Self {
-        Self(n)
+impl Fd {
+    pub fn new(ino: Ino, fh: u64) -> Self {
+        Self { ino, fh }
+    }
+
+    fn add_fh(&self, rhs: u64) -> u64 {
+        self.fh.checked_add(rhs).expect("BUG: fd overflow")
     }
 }
 
 impl From<Fd> for u64 {
-    fn from(value: Fd) -> Self {
-        value.0
-    }
-}
-
-impl Fd {
-    fn add(&self, rhs: u64) -> Fd {
-        Fd(self.0.checked_add(rhs).expect("BUG: fd overflow"))
+    fn from(fd: Fd) -> Self {
+        fd.fh
     }
 }
 
@@ -103,12 +104,14 @@ enum FileDescriptor {
 }
 
 pub struct Volume {
+    base: Location,
     meta: VolumeMetadata,
     version_bytes: Arc<[u8]>,
 
     cache: Arc<ChunkCache>,
     tempdir: TempDir,
     fds: BTreeMap<Fd, FileDescriptor>,
+    object_store: Arc<dyn ObjectStore>,
 }
 
 // TODO: the reads and writes here are mostly read_at and write_at, which would
@@ -122,34 +125,44 @@ impl Volume {
 
 impl Volume {
     pub fn new(
+        base: Location,
         metadata: VolumeMetadata,
         max_cache_size: u64,
         chunk_size: u64,
         readahead: u64,
-        object_store: Box<dyn ObjectStore>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let cache = Arc::new(ChunkCache::new(
             max_cache_size,
             chunk_size,
-            object_store,
+            object_store.clone(),
             ReadAheadPolicy { size: readahead },
         ));
 
         // FIXME
         let tempdir = TempDir::with_prefix("cfs-").unwrap();
-        let volume_version = std::sync::Arc::from(format!("{:#x}", 0xBEEF).into_bytes().as_slice());
+        let volume_version =
+            std::sync::Arc::from(format!("{:#x}", metadata.version()).into_bytes().as_slice());
 
         Self {
+            base,
             tempdir,
             meta: metadata,
             version_bytes: volume_version,
             cache,
             fds: Default::default(),
+            object_store,
         }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(self.meta.to_bytes()?)
+    }
+
+    fn increment_version(&mut self) -> &[u8] {
+        let v = self.meta.increment_version();
+        self.version_bytes = Arc::new(v.to_le_bytes());
+        &self.version_bytes
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
@@ -174,10 +187,10 @@ impl Volume {
         &mut self,
         ino: Ino,
         location: Option<Location>,
-        range: Option<ByteRange>,
+        range: Option<Modify>,
     ) -> Result<()> {
         match ino {
-            Ino::CLEAR_CACHE => Ok(()),
+            Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
                 self.meta.modify(ino, location, range)?;
                 Ok(())
@@ -220,7 +233,11 @@ impl Volume {
             ByteRange::empty(),
         )?;
 
-        let fd = new_fd(&mut self.fds, FileDescriptor::Staged { file: f, path });
+        let fd = new_fd(
+            &mut self.fds,
+            attr.ino,
+            FileDescriptor::Staged { file: f, path },
+        );
         Ok((attr, fd))
     }
 
@@ -234,11 +251,11 @@ impl Volume {
     pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::COMMIT => {
-                let fd = new_fd(&mut self.fds, FileDescriptor::Commit);
+                let fd = new_fd(&mut self.fds, ino, FileDescriptor::Commit);
                 Ok(fd)
             }
             Ino::CLEAR_CACHE => {
-                let fd = new_fd(&mut self.fds, FileDescriptor::ClearCache);
+                let fd = new_fd(&mut self.fds, ino, FileDescriptor::ClearCache);
                 Ok(fd)
             }
             Ino::VERSION => Err(Error::from(VolumeError::PermissionDenied)),
@@ -247,6 +264,7 @@ impl Volume {
                     let file = tokio::fs::File::open(path).await?;
                     let fd = new_fd(
                         &mut self.fds,
+                        ino,
                         FileDescriptor::Staged {
                             file,
                             path: path.clone(),
@@ -265,6 +283,7 @@ impl Volume {
             Ino::VERSION => {
                 let fd = new_fd(
                     &mut self.fds,
+                    ino,
                     FileDescriptor::Static(std::io::Cursor::new(self.version_bytes.clone())),
                 );
                 Ok(fd)
@@ -273,6 +292,7 @@ impl Volume {
             ino => match self.meta.location(ino) {
                 Some((location, range)) => Ok(new_fd(
                     &mut self.fds,
+                    ino,
                     FileDescriptor::ReadOnly {
                         location: location.clone(),
                         range: *range,
@@ -332,6 +352,8 @@ impl Volume {
             Some(FileDescriptor::Staged { file, .. }) => {
                 file.seek(SeekFrom::Start(offset)).await?;
                 let n = file.write(data).await?;
+                self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
+
                 Ok(n)
             }
             // no other fds are writable
@@ -362,10 +384,11 @@ fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
 // FIXME: this needs to allocate and check for remaining fds instead of just
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
-fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, d: FileDescriptor) -> Fd {
-    let next_fd = fd_set.keys().last().cloned().unwrap_or_default().add(1);
-    fd_set.insert(next_fd, d);
-    next_fd
+fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor) -> Fd {
+    let next_fh = fd_set.keys().last().cloned().unwrap_or_default().add_fh(1);
+    let fd = Fd { ino, fh: next_fh };
+    fd_set.insert(fd, d);
+    fd
 }
 
 // FIXME: handle errors
@@ -381,22 +404,79 @@ fn tempfile(tempdir: &std::path::Path) -> (PathBuf, tokio::fs::File) {
 
 impl Volume {
     async fn commit(&mut self) -> Result<()> {
-        // - pick a new `Location` for the data, should be relative to the volume
-        // - stage a multipart upload, collecting all of the new locations as
-        //   we go. should be able to parallelize this step, optimize by chunking
-        //   files together, but don't have to do that up front. save the location
-        //   list while putting together the upload.
-        // - once the data is written, modify the volume:
-        //   - update the version
-        //   - relocate individual files with volume.modify
-        //   - write and upload the new volume metadata
-        todo!()
+        let mut staged = StagedVolume { inner: self };
+        let (dest, ranges) = staged.upload().await?;
+        staged.modify(dest, ranges)?;
+        staged.persist().await?;
+
+        Ok(())
+    }
+}
+
+struct StagedVolume<'a> {
+    inner: &'a mut Volume,
+}
+
+impl StagedVolume<'_> {
+    /// Upload all staged files into a single blob under base.
+    ///
+    /// Returns the location of the newly uploaded blob and a vector that maps each newly written
+    /// Ino to its ByteRange within the new blob.
+    async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
+        let dest = self.inner.base.new_data();
+
+        let mut offset = 0;
+        let mut staged = Vec::new();
+        let mut writer = self.inner.object_store.put_multipart(&dest.path()).await?;
+        for (attr, path) in self.inner.meta.iter_staged() {
+            let data = bytes::Bytes::from(std::fs::read(path)?);
+            writer
+                .put_part(PutPayload::from_bytes(data.clone()))
+                .await?;
+            staged.push((attr.ino, (offset, attr.size).into()));
+            offset += attr.size;
+        }
+        writer.complete().await?;
+
+        Ok((dest, staged))
+    }
+
+    /// Relocate all staged files to dest.
+    fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
+        for (ino, byte_range) in ranges {
+            self.inner
+                .meta
+                .modify(ino, Some(dest.clone()), Some(Modify::Set(byte_range)))?;
+        }
+
+        // deduplicate and clean up all hanging staged Locations
+        self.inner.meta.clean_staged_locations(dest);
+
+        Ok(())
+    }
+
+    /// Mint and upload a new version of Volume.
+    async fn persist(self) -> Result<()> {
+        self.inner.increment_version();
+        let version = self.inner.meta.version();
+
+        let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
+        self.inner
+            .object_store
+            .put(
+                &self.inner.base.metadata(version).path(),
+                PutPayload::from_bytes(new_volume),
+            )
+            .await?;
+
+        Ok(())
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
+    use object_store::local::LocalFileSystem;
 
     #[test]
     fn test_copy_into() {
@@ -431,5 +511,92 @@ mod test {
             assert_eq!(5, copy_into(&mut buf, bytes));
             assert_eq!(&buf[0..5], b"12345");
         }
+    }
+
+    async fn write(volume: &mut Volume, fd: Fd, contents: &'static str) {
+        volume.write_at(fd, 0, contents.as_bytes()).await.unwrap();
+        volume.release(fd).await.unwrap();
+    }
+
+    async fn assert_read(volume: &mut Volume, name: &'static str, contents: &'static str) {
+        let attr = volume.lookup(Ino::Root, name).unwrap().unwrap();
+        let mut buf = vec![0u8; attr.size as usize];
+        let fd = volume.open_read(attr.ino).await.unwrap();
+        let n = volume.read_at(fd, 0, &mut buf).await.unwrap();
+        assert_eq!(n, contents.len());
+        assert_eq!(buf, contents.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn commit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let store_root = root.path().join("store");
+        std::fs::create_dir_all(&store_root).unwrap();
+
+        let base = Location::local(&store_root);
+        let mut volume = Volume::new(
+            base.clone(),
+            VolumeMetadata::empty(),
+            1024,
+            1024,
+            1024,
+            Arc::new(LocalFileSystem::new()),
+        );
+        let version = volume.meta.version();
+
+        // clean volume -- this is not staged
+        assert!(!volume.meta.is_staged());
+
+        // creating two files, it should be a staged volume now.
+        let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let attr1 = attr1.clone();
+        write(&mut volume, fd1, "hello").await;
+        let (attr2, fd2) = volume.create(Ino::Root, "world.txt".into(), true).unwrap();
+        let attr2 = attr2.clone();
+        write(&mut volume, fd2, "world").await;
+
+        assert!(volume.meta.is_staged());
+        for attr in [&attr1, &attr2] {
+            assert!(matches!(
+                volume.meta.location(attr.ino),
+                Some((Location::Staged { .. }, _))
+            ));
+        }
+
+        // commit!!!
+        let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
+        write(&mut volume, commit_fd, "1").await;
+
+        // after commit, both files are no longer staged
+        assert!(!volume.meta.is_staged());
+        for attr in [&attr1, &attr2] {
+            assert!(matches!(
+                volume.meta.location(attr.ino),
+                Some((Location::Local { .. }, _))
+            ));
+        }
+
+        // read the new volume and assert that the previously staged files have the right
+        // contents, and the version is bumped
+        let metadata_path = base
+            .metadata(version + 1)
+            .local_path()
+            .unwrap()
+            .to_path_buf();
+        let metadata_bytes = std::fs::read(&metadata_path).unwrap();
+
+        let metadata = VolumeMetadata::from_bytes(&metadata_bytes).unwrap();
+        let mut volume = Volume::new(
+            base.clone(),
+            metadata,
+            1024,
+            1024,
+            1024,
+            Arc::new(LocalFileSystem::new()),
+        );
+        assert_eq!(volume.meta.version(), version + 1);
+
+        assert_read(&mut volume, "hello.txt", "hello").await;
+        assert_read(&mut volume, "world.txt", "world").await;
     }
 }

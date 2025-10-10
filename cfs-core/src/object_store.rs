@@ -1,24 +1,25 @@
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem};
+use std::sync::Arc;
 
 use crate::Location;
 
 /// Create an object store for a Location.
 ///
-/// Local filesystem locations will return `Ok(None)`. Object storage based
+/// Local filesystem locations will return `Ok(LocalFileSystem)`. Object storage based
 /// locations will use environment based credentials where possible and fall
 /// back to their default configurations.
-pub fn from_location(location: &Location) -> Result<Box<dyn ObjectStore>, object_store::Error> {
+pub fn from_location(location: &Location) -> Result<Arc<dyn ObjectStore>, object_store::Error> {
     match location {
         Location::Local { .. } | Location::Staged { .. } => {
             let fs = LocalFileSystem::new();
-            Ok(Box::new(fs))
+            Ok(Arc::new(fs))
         }
         Location::ObjectStorage { bucket, .. } => {
             let s3 = AmazonS3Builder::from_env()
                 .with_bucket_name(bucket)
                 .build()?;
 
-            Ok(Box::new(s3))
+            Ok(Arc::new(s3))
         }
     }
 }

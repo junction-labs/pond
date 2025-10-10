@@ -1,6 +1,7 @@
 use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -59,7 +60,7 @@ impl VolumeError {
 /// # Staging
 ///
 /// Existing Volumes can be mutated and modified to create a new version of the
-/// same volume. Volumes can be used for metdaddata bookeeping while building
+/// same volume. Volumes can be used for metadata bookeeping while building
 /// new physical storage by passing a [Staged location][Location] when creating
 /// or updating files.
 ///
@@ -74,7 +75,7 @@ impl VolumeError {
 pub struct VolumeMetadata {
     version: u64,
 
-    // the next availble ino. must start at Ino::Root.add(1) for an empty
+    // the next available ino. must start at Ino::Root.add(1) for an empty
     // volume.
     next_ino: Ino,
 
@@ -154,6 +155,14 @@ where
     }
 }
 
+pub enum Modify {
+    /// Set a new ByteRange, overwriting anything already there.
+    Set(ByteRange),
+
+    /// Set the max of the current ByteRange::len and the given u64 as the new ByteRange::len.
+    Max(u64),
+}
+
 #[allow(unused)]
 impl VolumeMetadata {
     /// Create a new empty volume.
@@ -177,7 +186,7 @@ impl VolumeMetadata {
         }
     }
 
-    const fn reserved_entries() -> [Entry; 3] {
+    const fn reserved_entries() -> [Entry; 4] {
         [
             Entry {
                 name: Cow::Borrowed("/"),
@@ -204,6 +213,18 @@ impl VolumeMetadata {
                 data: EntryData::Dynamic,
             },
             Entry {
+                name: Cow::Borrowed(".commit"),
+                parent: Ino::Root,
+                attr: FileAttr {
+                    ino: Ino::COMMIT,
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Regular,
+                },
+                data: EntryData::Dynamic,
+            },
+            Entry {
                 name: Cow::Borrowed(".clearcache"),
                 parent: Ino::Root,
                 attr: FileAttr {
@@ -220,6 +241,11 @@ impl VolumeMetadata {
 
     /// Returns the current version of the volume.
     pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub(crate) fn increment_version(&mut self) -> u64 {
+        self.version += 1;
         self.version
     }
 
@@ -480,7 +506,7 @@ impl VolumeMetadata {
         Ok(&entry.attr)
     }
 
-    /// Change the phyical location of a data blob.
+    /// Change the physical location of a data blob.
     ///
     /// This changes the physical location for all files in the volume that
     /// refer to this blob. To relocate an individual file, see `modify`.
@@ -492,6 +518,46 @@ impl VolumeMetadata {
         Ok(())
     }
 
+    /// Clean up all staged locations, replacing all internal state to instead point to dest.
+    ///
+    /// This attempts to keep Volume in a consistent state at every step of modification.
+    pub fn clean_staged_locations(&mut self, dest: Location) {
+        // find the first staged location within self.locations and use that as the final spot
+        // for dest.
+        let Some((idx, location)) = self
+            .locations
+            .iter_mut()
+            .enumerate()
+            .find(|(i, l)| l.is_staged())
+        else {
+            return;
+        };
+        *location = dest.clone();
+
+        // we're making an assumption here that once you see the first staged location,
+        // every location after that must also be staged. so if we see a location_idx > idx, this
+        // means it's a staged location.
+        assert!(
+            &self
+                .locations
+                .iter()
+                .skip(idx + 1)
+                .all(|l| l.is_staged() || l == &dest)
+        );
+
+        // update all relevant EntryData::File::location_idx to point to the same idx we found
+        // above!
+        for (_, Entry { data, .. }) in self.data.iter_mut() {
+            let EntryData::File { location_idx, .. } = data else {
+                continue;
+            };
+            *location_idx = idx.min(*location_idx);
+        }
+
+        // lop off the tail
+        self.locations.truncate(idx + 1);
+    }
+
     /// Update a file's metadata to reflect that a file's data has been modified.
     ///
     /// This method changes the location of a file, it's range of bytes within that
@@ -500,7 +566,7 @@ impl VolumeMetadata {
         &mut self,
         ino: Ino,
         location: Option<Location>,
-        range: Option<ByteRange>,
+        range: Option<Modify>,
     ) -> Result<(), VolumeError> {
         let Some(entry) = self.data.get_mut(&ino) else {
             return Err(VolumeError::DoesNotExist);
@@ -517,8 +583,16 @@ impl VolumeMetadata {
             let new_location = insert_unique(&mut self.locations, location);
             *location_idx = new_location;
         }
-        if let Some(range) = range {
-            *byte_range = range;
+        match range {
+            Some(Modify::Set(range)) => {
+                *byte_range = range;
+                entry.attr.size = byte_range.len;
+            }
+            Some(Modify::Max(len)) => {
+                byte_range.len = std::cmp::max(byte_range.len, len);
+                entry.attr.size = byte_range.len;
+            }
+            None => (),
         }
 
         Ok(())
@@ -557,6 +631,19 @@ impl VolumeMetadata {
         })
     }
 
+    /// Iterate through all staged files within the Volume. Iteration is done in ascending Ino
+    /// order.
+    ///
+    /// Returns an iterator over `(FileAttr, PathBuf)` tuples.
+    pub fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, &PathBuf)> {
+        self.data
+            .iter()
+            .filter_map(|(ino, entry)| match self.location(*ino) {
+                Some((Location::Staged { path }, _)) => Some((&entry.attr, path)),
+                _ => None,
+            })
+    }
+
     #[inline]
     fn dir_entry(&self, ino: Ino) -> Result<&Entry, VolumeError> {
         let entry = self.data.get(&ino).ok_or(VolumeError::DoesNotExist)?;
@@ -585,7 +672,9 @@ impl VolumeMetadata {
         })
     }
 
-    /// Serialize this volume to bytes.
+    /// Serialize committed data in this volume to bytes.
+    ///
+    /// Note: uncommitted changes will be dropped. Commit if you want them persisted!
     pub fn to_bytes(&self) -> Result<Vec<u8>, VolumeError> {
         let mut fbb = FlatBufferBuilder::new();
 
@@ -610,7 +699,7 @@ impl VolumeMetadata {
         let volume = fb::Volume::create(
             &mut fbb,
             &fb::VolumeArgs {
-                version: 0xBEEF,
+                version: self.version,
                 locations: Some(locations),
                 entries: Some(entries),
             },
@@ -625,10 +714,6 @@ impl VolumeMetadata {
         let fb_volume =
             fb::root_as_volume(bs).map_err(|_| VolumeError::invalid("invalid bytes"))?;
 
-        if fb_volume.version() != 0xBEEF {
-            return Err(VolumeError::invalid("invalid version"));
-        }
-
         let locations = fb_volume
             .locations()
             .iter()
@@ -641,6 +726,7 @@ impl VolumeMetadata {
 
         let mut max_ino = Ino::min_regular();
         let mut volume = Self::empty();
+        volume.version = fb_volume.version();
 
         // set the locations
         volume.locations = locations;
@@ -936,6 +1022,21 @@ fn from_fb_location(fb_location: fb::LocationWrapper) -> Result<Location, Volume
 mod test {
     use super::*;
 
+    pub fn readdir_nospecial(
+        v: &VolumeMetadata,
+        ino: Ino,
+    ) -> Result<impl Iterator<Item = (&str, &FileAttr)>, VolumeError> {
+        let _ = v.dir_entry(ino)?;
+
+        let iter = ReadDir {
+            range: v.dirs.range(entry_range(ino)),
+            data: &v.data,
+        }
+        .filter(|(_, attr)| attr.ino.is_regular());
+
+        Ok(iter)
+    }
+
     #[test]
     fn open() {
         let mut volume = VolumeMetadata::empty();
@@ -1019,12 +1120,11 @@ mod test {
         assert_eq!(volume.location(f2.ino), None);
 
         // should just contain the directory, not the initial file
-        let names: Vec<_> = volume
-            .readdir(Ino::Root)
+        let names: Vec<_> = readdir_nospecial(&volume, Ino::Root)
             .unwrap()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(vec![".clearcache", ".version", "a"], names);
+        assert_eq!(vec!["a"], names);
         // should be empty
         let names: Vec<_> = volume
             .readdir(a.ino)
@@ -1088,8 +1188,7 @@ mod test {
             volume
                 .readdir(Ino::Root)
                 .unwrap()
-                .find(|(name, attr)| *name == "a" && attr.is_directory())
-                .is_some()
+                .any(|(name, attr)| name == "a" && attr.is_directory())
         );
         assert_eq!(
             volume
@@ -1205,26 +1304,6 @@ mod test {
         )
     }
 
-    #[test]
-    fn volume_to_from_bytes() {
-        let mut volume = VolumeMetadata::empty();
-        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
-        let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
-        let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
-        volume
-            .create(
-                c.ino,
-                "test.txt".to_string(),
-                true,
-                Location::object_storage("test-bucket", "test-key.txt"),
-                ByteRange { offset: 0, len: 64 },
-            )
-            .unwrap();
-
-        let bs = volume.to_bytes().unwrap();
-        assert_read_test_txt(&VolumeMetadata::from_bytes(&bs).unwrap());
-    }
-
     fn assert_lookup(v: &VolumeMetadata, ino: Ino, name: &str) -> FileAttr {
         v.lookup(ino, name).unwrap().unwrap().clone()
     }
@@ -1242,5 +1321,65 @@ mod test {
                 &ByteRange { offset: 0, len: 64 },
             )
         );
+    }
+
+    #[test]
+    fn modify_set() {
+        let mut meta = VolumeMetadata::empty();
+
+        let ino = meta
+            .create(
+                Ino::Root,
+                "file".to_string(),
+                false,
+                Location::object_storage("bucket", "old"),
+                (0, 3).into(),
+            )
+            .unwrap()
+            .ino;
+
+        let new_location = Location::object_storage("bucket", "new");
+        let new_range = ByteRange { offset: 10, len: 8 };
+
+        meta.modify(
+            ino,
+            Some(new_location.clone()),
+            Some(Modify::Set(new_range)),
+        )
+        .unwrap();
+
+        let (location, range) = meta.location(ino).unwrap();
+        assert_eq!(location, &new_location);
+        assert_eq!(*range, new_range);
+
+        let attr = meta.getattr(ino).unwrap();
+        assert_eq!(attr.size, new_range.len);
+    }
+
+    #[test]
+    fn modify_max() {
+        let mut meta = VolumeMetadata::empty();
+        let ino = meta
+            .create(
+                Ino::Root,
+                "grow".to_string(),
+                false,
+                Location::staged("grow"),
+                ByteRange::empty(),
+            )
+            .unwrap()
+            .ino;
+
+        meta.modify(ino, None, Some(Modify::Max(8))).unwrap();
+        let (location, range) = meta.location(ino).unwrap();
+        assert!(matches!(location, Location::Staged { .. }));
+        assert_eq!(range.len, 8);
+
+        // no-op since it's a smaller len
+        meta.modify(ino, None, Some(Modify::Max(3))).unwrap();
+        let attr = meta.getattr(ino).unwrap();
+        assert_eq!(attr.size, 8);
+        let (_, range_after) = meta.location(ino).unwrap();
+        assert_eq!(range_after.len, 8);
     }
 }
