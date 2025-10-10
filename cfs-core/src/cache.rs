@@ -54,7 +54,7 @@ impl ChunkCache {
             cache,
             chunk_size,
             readahead_policy,
-            client: Arc::from(object_store),
+            client: object_store,
         };
         Self {
             inner: Arc::new(inner),
@@ -219,7 +219,7 @@ mod test {
     use super::*;
     use arbtest::arbtest;
     use bytes::Bytes;
-    use object_store::{PutPayload, memory::InMemory, path::Path};
+    use object_store::{PutPayload, memory::InMemory};
 
     async fn object_store_with_data(
         key: object_store::path::Path,
@@ -227,7 +227,7 @@ mod test {
     ) -> Arc<dyn ObjectStore> {
         let object_store = Arc::new(InMemory::new());
         object_store
-            .put(&Path::from(key), PutPayload::from_bytes(bytes))
+            .put(&key, PutPayload::from_bytes(bytes))
             .await
             .expect("put into inmemory store should be ok");
         object_store

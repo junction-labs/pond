@@ -83,7 +83,7 @@ fn fuzz_pack() {
             match entry {
                 FuzzEntry::Dir(path) => {
                     let path = expected_dir.join(path);
-                    mkdir(&path.as_ref()).unwrap()
+                    mkdir(path.as_ref()).unwrap()
                 }
                 FuzzEntry::File(path, content) => {
                     let path = expected_dir.join(path);
@@ -180,7 +180,7 @@ impl From<fuser::BackgroundSession> for AutoUnmount {
 
 impl Drop for AutoUnmount {
     fn drop(&mut self) {
-        self.0.take().map(|s| s.join());
+        if let Some(s) = self.0.take() { s.join() }
     }
 }
 
@@ -358,27 +358,27 @@ fn apply(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Error
 
     match op {
         FuzzOp::Mkdir(path) => {
-            let path = root.join(&path);
+            let path = root.join(path);
             tri!(std::fs::create_dir_all(path));
             Ok(OpOutput::None)
         }
         FuzzOp::RmDir(path) => {
-            let path = root.join(&path);
+            let path = root.join(path);
             tri!(std::fs::remove_dir(path));
             Ok(OpOutput::None)
         }
         FuzzOp::Read(path) => {
-            let path = root.join(&path);
+            let path = root.join(path);
             let bs = tri!(std::fs::read_to_string(path));
             Ok(OpOutput::Read(bs))
         }
         FuzzOp::Write(path, data) => {
-            let path = root.join(&path);
-            tri!(std::fs::write(path, &data));
+            let path = root.join(path);
+            tri!(std::fs::write(path, data));
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
-            let path = root.join(&path);
+            let path = root.join(path);
             tri!(std::fs::remove_file(path));
             Ok(OpOutput::None)
         }
