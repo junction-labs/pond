@@ -6,7 +6,7 @@ use std::time::SystemTime;
 // TODO: write a conversion from VolumeERror to libc error codes
 // TODO: write a try! macro that gets rid of most of the let-else spam in here.
 
-pub(crate) struct Cfs {
+pub struct Cfs {
     volume: Volume,
     runtime: tokio::runtime::Runtime,
 }

@@ -317,7 +317,7 @@ fn spawn_mount(
         Arc::from(object_store),
     );
 
-    cfs_fuse::mount_volume(
+    let session = cfs_fuse::mount_volume(
         mountpoint,
         volume,
         test_runtime(),
@@ -327,10 +327,11 @@ fn spawn_mount(
         // in different tests.
         false, // allow_other
         false, // auto_unmount
-        false, // debug
     )
-    .unwrap()
-    .into()
+    .unwrap();
+
+    // start in the background and let it rip
+    session.spawn().unwrap().into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -4,13 +4,12 @@ use cfs_fuse::*;
 
 fn main() {
     tracing_subscriber::fmt::init();
+    let args = Args::parse();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-
-    let args = Args::parse();
 
     let res = match args.cmd {
         Cmd::Dump { volume, version } => dump(runtime, volume, version),

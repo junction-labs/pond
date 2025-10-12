@@ -1,5 +1,4 @@
 mod fuse;
-mod trace;
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -394,21 +393,15 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         object_store,
     );
 
-    let _session = mount_volume(
+    let mut session = mount_volume(
         args.mountpoint,
         volume,
         runtime,
         args.allow_other,
         args.auto_unmount,
-        args.debug,
     )?;
-
-    // TODO: wait for signals and try to gracefully shut down here. if you
-    // run with auto-unmount fuser will do the thing here even though we're
-    // not calling session.join() ourselves.
-    loop {
-        std::thread::park();
-    }
+    session.run()?;
+    Ok(())
 }
 
 pub fn mount_volume(
@@ -417,8 +410,7 @@ pub fn mount_volume(
     runtime: tokio::runtime::Runtime,
     allow_other: bool,
     auto_unmount: bool,
-    debug: bool,
-) -> anyhow::Result<fuser::BackgroundSession> {
+) -> anyhow::Result<fuser::Session<Cfs>> {
     let cfs = Cfs::new(runtime, volume);
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
@@ -436,10 +428,5 @@ pub fn mount_volume(
         opts.push(fuser::MountOption::AutoUnmount);
     }
 
-    let session = if debug {
-        fuser::spawn_mount2(trace::Trace::new(cfs), mountpoint, &opts)?
-    } else {
-        fuser::spawn_mount2(cfs, mountpoint, &opts)?
-    };
-    Ok(session)
+    Ok(fuser::Session::new(cfs, mountpoint, &opts)?)
 }
