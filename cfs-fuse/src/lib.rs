@@ -164,7 +164,6 @@ pub fn dump(
                 offset = 0;
                 len = 0;
             }
-            cfs_core::FileType::Symlink => todo!(),
         }
         println!("{kind:4} {location:40} {offset:12} {len:8} {path:40}");
     }

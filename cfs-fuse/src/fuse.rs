@@ -366,7 +366,6 @@ fn fuse_kind(kind: cfs_core::FileType) -> fuser::FileType {
     match kind {
         cfs_core::FileType::Regular => fuser::FileType::RegularFile,
         cfs_core::FileType::Directory => fuser::FileType::Directory,
-        cfs_core::FileType::Symlink => fuser::FileType::Symlink,
     }
 }
 
