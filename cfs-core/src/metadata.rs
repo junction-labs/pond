@@ -930,7 +930,7 @@ fn to_fb_location<'a>(
 ) -> crate::Result<WIPOffset<fb::Location<'a>>> {
     match location {
         Location::Committed { key } => {
-            let key = fbb.create_string(key.as_ref());
+            let key = fbb.create_string(key.as_ref().as_ref());
             Ok(fb::Location::create(
                 fbb,
                 &fb::LocationArgs { key: Some(key) },
@@ -987,7 +987,7 @@ mod test {
             .clone();
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
+        assert_eq!(l1, &Location::committed("zzzz"));
 
         let f2 = volume
             .create(
@@ -1005,10 +1005,10 @@ mod test {
 
         // old locations should be stable
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
+        assert_eq!(l1, &Location::committed("zzzz"));
         // location should match what we just created with
         let (l2, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l2, &Location::Committed { key: "aaaa".into() });
+        assert_eq!(l2, &Location::committed("aaaa"));
     }
 
     #[test]
@@ -1036,15 +1036,15 @@ mod test {
 
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
+        assert_eq!(l1, &Location::committed("zzzz"));
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
+        assert_eq!(l1, &Location::committed("zzzz"));
 
         // delete the first file
         volume.delete(Ino::Root, "zzzz").unwrap();
         assert_eq!(volume.location(f1.ino), None);
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
+        assert_eq!(l1, &Location::committed("zzzz"));
 
         // delete both files
         volume.delete(a.ino, "zzzz").unwrap();

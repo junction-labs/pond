@@ -43,8 +43,8 @@ impl From<Fd> for u64 {
 
 #[derive(Debug)]
 enum FileDescriptor {
-    ReadOnly {
-        location: Location,
+    Committed {
+        key: Arc<object_store::path::Path>,
         range: ByteRange,
     },
     Staged {
@@ -64,9 +64,6 @@ pub struct Volume {
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::object_store::RemoteStore,
 }
-
-// TODO: the reads and writes here are mostly read_at and write_at, which would
-// be way better than the existing
 
 impl Volume {
     pub fn new(
@@ -247,11 +244,11 @@ impl Volume {
                     })?;
                     Ok(new_fd(&mut self.fds, ino, FileDescriptor::Staged { file }))
                 }
-                Some((location, range)) => Ok(new_fd(
+                Some((Location::Committed { key }, range)) => Ok(new_fd(
                     &mut self.fds,
                     ino,
-                    FileDescriptor::ReadOnly {
-                        location: location.clone(),
+                    FileDescriptor::Committed {
+                        key: key.clone(),
                         range: *range,
                     },
                 )),
@@ -270,7 +267,7 @@ impl Volume {
                     .await
                     .expect("BUG: invalid read from metadata")
             }),
-            Some(FileDescriptor::ReadOnly { location, range }) => {
+            Some(FileDescriptor::Committed { key, range }) => {
                 // FIXME: readahead needs to know the extent of the location -
                 // the range here only includes the extent of THIS file in the
                 // total blob. without knowing the full range we can TRY to prefetch
@@ -278,10 +275,7 @@ impl Volume {
                 // on the object store's API being kind enough to return partial ranges.
                 let read_len = std::cmp::min(range.len, buf.len() as u64);
                 let blob_offset = range.offset + offset;
-                let bytes: Vec<Bytes> = self
-                    .cache
-                    .get_at(&location.path(), blob_offset, read_len)
-                    .await?;
+                let bytes: Vec<Bytes> = self.cache.get_at(key, blob_offset, read_len).await?;
                 Ok(copy_into(buf, &bytes))
             }
             Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
