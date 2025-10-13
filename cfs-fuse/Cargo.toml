@@ -14,7 +14,7 @@ fuser = { workspace = true, default_features = false, features = [] }
 libc.workspace = true
 object_store = { workspace = true, features = ["aws"] }
 tempfile.workspace = true
-tokio = {workspace = true, features = ["full"]}
+tokio = {workspace = true, features = ["rt-multi-thread", "io-util", "net"]}
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"]}
 url.workspace = true
