@@ -9,7 +9,6 @@ use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
 use cfs_core::{Location, Volume, VolumeMetadata};
 use cfs_fuse::pack;
-use nix::NixPath;
 use object_store::ObjectStore;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
@@ -398,7 +397,7 @@ fn read_entries(root: impl AsRef<Path>) -> Vec<FuzzEntry> {
         let entry = entry.unwrap();
 
         let path = entry.path().strip_prefix(&root).unwrap();
-        if path.is_empty() {
+        if path.as_os_str().is_empty() {
             continue;
         }
 

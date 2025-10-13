@@ -319,7 +319,6 @@ dependencies = [
  "comfy-table",
  "fuser",
  "libc",
- "nix",
  "object_store",
  "rand 0.9.2",
  "reqwest",
