@@ -69,12 +69,6 @@ pub struct Volume {
 // be way better than the existing
 
 impl Volume {
-    fn lookup_fd(&mut self, fd: Fd) -> Option<&mut FileDescriptor> {
-        self.fds.get_mut(&fd)
-    }
-}
-
-impl Volume {
     pub fn new(
         metadata: VolumeMetadata,
         max_cache_size: u64,
@@ -298,7 +292,7 @@ impl Volume {
     }
 
     pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
-        match self.lookup_fd(fd) {
+        match self.fds.get_mut(&fd) {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
                 Ok(data.len())
