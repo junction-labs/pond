@@ -688,11 +688,7 @@ impl VolumeMetadata {
         let fb_volume = fb::root_as_volume(bs)
             .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid bytes"))?;
 
-        let locations = fb_volume
-            .locations()
-            .iter()
-            .map(from_fb_location)
-            .collect::<Result<Vec<_>, _>>()?;
+        let locations: Vec<_> = fb_volume.locations().iter().map(from_fb_location).collect();
 
         let mut max_ino = Ino::min_regular();
         let mut volume = Self::empty();
@@ -931,71 +927,25 @@ impl TryFrom<fb::FileType> for FileType {
 fn to_fb_location<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     location: &Location,
-) -> crate::Result<WIPOffset<fb::LocationWrapper<'a>>> {
-    let union = match location {
-        Location::Local { path } => {
-            // FIXME: what do we do about non-utf8 paths?
-            let path = fbb.create_string(path.to_str().expect("BUG: path is not utf8"));
-            let location =
-                fb::LocalLocation::create(fbb, &fb::LocalLocationArgs { path: Some(path) });
-            location.as_union_value()
-        }
-        Location::ObjectStorage { bucket, key } => {
-            let bucket = fbb.create_shared_string(bucket);
+) -> crate::Result<WIPOffset<fb::Location<'a>>> {
+    match location {
+        Location::Committed { key } => {
             let key = fbb.create_string(key.as_ref());
-            let location = fb::S3Location::create(
+            Ok(fb::Location::create(
                 fbb,
-                &fb::S3LocationArgs {
-                    bucket: Some(bucket),
-                    key: Some(key),
-                },
-            );
-            location.as_union_value()
+                &fb::LocationArgs { key: Some(key) },
+            ))
         }
-        _ => {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "can't serialize a volume with staged data",
-            ));
-        }
-    };
-
-    let location_type = match location {
-        Location::Local { .. } => fb::Location::local,
-        Location::ObjectStorage { .. } => fb::Location::s3,
-        _ => panic!("BUG: unknown location type"),
-    };
-
-    Ok(fb::LocationWrapper::create(
-        fbb,
-        &fb::LocationWrapperArgs {
-            location: Some(union),
-            location_type,
-        },
-    ))
-}
-
-fn from_fb_location(fb_location: fb::LocationWrapper) -> crate::Result<Location> {
-    match fb_location.location_type() {
-        fb::Location::local => {
-            let fb_location = fb_location.location_as_local().unwrap();
-            Ok(Location::local(fb_location.path()))
-        }
-        fb::Location::s3 => {
-            let fb_location = fb_location.location_as_s_3().unwrap();
-            let bucket = fb_location.bucket().to_string();
-            let key = object_store::path::Path::from(fb_location.key().to_string());
-            Ok(Location::ObjectStorage { bucket, key })
-        }
-        lt => Err(Error::new(
+        _ => Err(Error::new(
             ErrorKind::InvalidData,
-            format!(
-                "unknown location type: code={code} name={name}",
-                code = lt.0,
-                name = lt.variant_name().unwrap_or("")
-            ),
+            "can't serialize a volume with staged data",
         )),
     }
+}
+
+fn from_fb_location(fb_location: fb::Location) -> Location {
+    let key = object_store::path::Path::from(fb_location.key().to_string());
+    Location::committed(key)
 }
 
 #[cfg(test)]
@@ -1027,7 +977,7 @@ mod test {
                 Ino::Root,
                 "zzzz".to_string(),
                 true,
-                Location::local("zzzz"),
+                Location::committed("zzzz"),
                 ByteRange {
                     offset: 0,
                     len: 123,
@@ -1037,14 +987,14 @@ mod test {
             .clone();
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(local_path(l1), Some("zzzz"));
+        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
 
         let f2 = volume
             .create(
                 Ino::Root,
                 "aaaa".to_string(),
                 true,
-                Location::local("aaaa"),
+                Location::committed("aaaa"),
                 ByteRange {
                     offset: 0,
                     len: 123,
@@ -1055,10 +1005,10 @@ mod test {
 
         // old locations should be stable
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(local_path(l1), Some("zzzz"));
+        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
         // location should match what we just created with
         let (l2, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(local_path(l2), Some("aaaa"));
+        assert_eq!(l2, &Location::Committed { key: "aaaa".into() });
     }
 
     #[test]
@@ -1070,7 +1020,7 @@ mod test {
                     parent,
                     "zzzz".to_string(),
                     true,
-                    Location::local("zzzz"),
+                    Location::committed("zzzz"),
                     ByteRange {
                         offset: 0,
                         len: 123,
@@ -1086,15 +1036,15 @@ mod test {
 
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(local_path(l1), Some("zzzz"));
+        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(local_path(l1), Some("zzzz"));
+        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
 
         // delete the first file
         volume.delete(Ino::Root, "zzzz").unwrap();
         assert_eq!(volume.location(f1.ino), None);
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(local_path(l1), Some("zzzz"));
+        assert_eq!(l1, &Location::Committed { key: "zzzz".into() });
 
         // delete both files
         volume.delete(a.ino, "zzzz").unwrap();
@@ -1141,13 +1091,6 @@ mod test {
         }
     }
 
-    fn local_path(l: &Location) -> Option<&str> {
-        match l {
-            Location::Local { path, .. } => Some(path.to_str().unwrap()),
-            _ => None,
-        }
-    }
-
     #[test]
     fn lookup() {
         let mut volume = VolumeMetadata::empty();
@@ -1160,7 +1103,7 @@ mod test {
                 c.ino,
                 "test.txt".to_string(),
                 true,
-                Location::object_storage("test-bucket", "test-key.txt"),
+                Location::committed("test-key.txt"),
                 ByteRange { offset: 0, len: 64 },
             )
             .unwrap();
@@ -1258,7 +1201,7 @@ mod test {
                 b.ino,
                 "c.txt".to_string(),
                 true,
-                Location::object_storage("test-bucket", "test-key.txt"),
+                Location::committed("test-key.txt"),
                 (0, 10).into(),
             )
             .unwrap();
@@ -1275,7 +1218,7 @@ mod test {
                 c.ino,
                 "f.txt".to_string(),
                 true,
-                Location::object_storage("test-bucket", "test-key.txt"),
+                Location::committed("test-key.txt"),
                 (0, 10).into(),
             )
             .unwrap();
@@ -1299,7 +1242,7 @@ mod test {
         assert_eq!(
             volume.location(test_txt.ino).unwrap(),
             (
-                &Location::object_storage("test-bucket", "test-key.txt"),
+                &Location::committed("test-key.txt"),
                 &ByteRange { offset: 0, len: 64 },
             )
         );
@@ -1314,13 +1257,13 @@ mod test {
                 Ino::Root,
                 "file".to_string(),
                 false,
-                Location::object_storage("bucket", "old"),
+                Location::committed("old"),
                 (0, 3).into(),
             )
             .unwrap()
             .ino;
 
-        let new_location = Location::object_storage("bucket", "new");
+        let new_location = Location::committed("new");
         let new_range = ByteRange { offset: 10, len: 8 };
 
         meta.modify(

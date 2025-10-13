@@ -94,97 +94,6 @@ impl<'a> flatbuffers::Verifiable for FileType {
 }
 
 impl flatbuffers::SimpleToVerifyInSlice for FileType {}
-#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MIN_LOCATION: u8 = 0;
-#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_LOCATION: u8 = 2;
-#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-#[allow(non_camel_case_types)]
-pub const ENUM_VALUES_LOCATION: [Location; 3] = [
-  Location::NONE,
-  Location::local,
-  Location::s3,
-];
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[repr(transparent)]
-pub struct Location(pub u8);
-#[allow(non_upper_case_globals)]
-impl Location {
-  pub const NONE: Self = Self(0);
-  pub const local: Self = Self(1);
-  pub const s3: Self = Self(2);
-
-  pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 2;
-  pub const ENUM_VALUES: &'static [Self] = &[
-    Self::NONE,
-    Self::local,
-    Self::s3,
-  ];
-  /// Returns the variant's name or "" if unknown.
-  pub fn variant_name(self) -> Option<&'static str> {
-    match self {
-      Self::NONE => Some("NONE"),
-      Self::local => Some("local"),
-      Self::s3 => Some("s3"),
-      _ => None,
-    }
-  }
-}
-impl core::fmt::Debug for Location {
-  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-    if let Some(name) = self.variant_name() {
-      f.write_str(name)
-    } else {
-      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
-    }
-  }
-}
-impl<'a> flatbuffers::Follow<'a> for Location {
-  type Inner = Self;
-  #[inline]
-  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
-    Self(b)
-  }
-}
-
-impl flatbuffers::Push for Location {
-    type Output = Location;
-    #[inline]
-    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
-    }
-}
-
-impl flatbuffers::EndianScalar for Location {
-  type Scalar = u8;
-  #[inline]
-  fn to_little_endian(self) -> u8 {
-    self.0.to_le()
-  }
-  #[inline]
-  #[allow(clippy::wrong_self_convention)]
-  fn from_little_endian(v: u8) -> Self {
-    let b = u8::from_le(v);
-    Self(b)
-  }
-}
-
-impl<'a> flatbuffers::Verifiable for Location {
-  #[inline]
-  fn run_verifier(
-    v: &mut flatbuffers::Verifier, pos: usize
-  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
-    use self::flatbuffers::Verifiable;
-    u8::run_verifier(v, pos)
-  }
-}
-
-impl flatbuffers::SimpleToVerifyInSlice for Location {}
-pub struct LocationUnionTableOffset {}
-
 // struct Timespec, aligned to 8
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq)]
@@ -441,385 +350,101 @@ impl<'a> ByteRange {
 
 }
 
-pub enum S3LocationOffset {}
+pub enum LocationOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-pub struct S3Location<'a> {
+pub struct Location<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for S3Location<'a> {
-  type Inner = S3Location<'a>;
+impl<'a> flatbuffers::Follow<'a> for Location<'a> {
+  type Inner = Location<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
   }
 }
 
-impl<'a> S3Location<'a> {
-  pub const VT_BUCKET: flatbuffers::VOffsetT = 4;
-  pub const VT_KEY: flatbuffers::VOffsetT = 6;
+impl<'a> Location<'a> {
+  pub const VT_KEY: flatbuffers::VOffsetT = 4;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    S3Location { _tab: table }
+    Location { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args S3LocationArgs<'args>
-  ) -> flatbuffers::WIPOffset<S3Location<'bldr>> {
-    let mut builder = S3LocationBuilder::new(_fbb);
+    args: &'args LocationArgs<'args>
+  ) -> flatbuffers::WIPOffset<Location<'bldr>> {
+    let mut builder = LocationBuilder::new(_fbb);
     if let Some(x) = args.key { builder.add_key(x); }
-    if let Some(x) = args.bucket { builder.add_bucket(x); }
     builder.finish()
   }
 
 
-  #[inline]
-  pub fn bucket(&self) -> &'a str {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(S3Location::VT_BUCKET, None).unwrap()}
-  }
   #[inline]
   pub fn key(&self) -> &'a str {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(S3Location::VT_KEY, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Location::VT_KEY, None).unwrap()}
   }
 }
 
-impl flatbuffers::Verifiable for S3Location<'_> {
+impl flatbuffers::Verifiable for Location<'_> {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("bucket", Self::VT_BUCKET, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("key", Self::VT_KEY, true)?
      .finish();
     Ok(())
   }
 }
-pub struct S3LocationArgs<'a> {
-    pub bucket: Option<flatbuffers::WIPOffset<&'a str>>,
+pub struct LocationArgs<'a> {
     pub key: Option<flatbuffers::WIPOffset<&'a str>>,
 }
-impl<'a> Default for S3LocationArgs<'a> {
+impl<'a> Default for LocationArgs<'a> {
   #[inline]
   fn default() -> Self {
-    S3LocationArgs {
-      bucket: None, // required field
+    LocationArgs {
       key: None, // required field
     }
   }
 }
 
-pub struct S3LocationBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+pub struct LocationBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> S3LocationBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_bucket(&mut self, bucket: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(S3Location::VT_BUCKET, bucket);
-  }
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> LocationBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_key(&mut self, key: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(S3Location::VT_KEY, key);
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Location::VT_KEY, key);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> S3LocationBuilder<'a, 'b, A> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> LocationBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
-    S3LocationBuilder {
+    LocationBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<S3Location<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<Location<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, S3Location::VT_BUCKET,"bucket");
-    self.fbb_.required(o, S3Location::VT_KEY,"key");
+    self.fbb_.required(o, Location::VT_KEY,"key");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
-impl core::fmt::Debug for S3Location<'_> {
+impl core::fmt::Debug for Location<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("S3Location");
-      ds.field("bucket", &self.bucket());
+    let mut ds = f.debug_struct("Location");
       ds.field("key", &self.key());
-      ds.finish()
-  }
-}
-pub enum LocalLocationOffset {}
-#[derive(Copy, Clone, PartialEq)]
-
-pub struct LocalLocation<'a> {
-  pub _tab: flatbuffers::Table<'a>,
-}
-
-impl<'a> flatbuffers::Follow<'a> for LocalLocation<'a> {
-  type Inner = LocalLocation<'a>;
-  #[inline]
-  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
-  }
-}
-
-impl<'a> LocalLocation<'a> {
-  pub const VT_PATH: flatbuffers::VOffsetT = 4;
-
-  #[inline]
-  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    LocalLocation { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args LocalLocationArgs<'args>
-  ) -> flatbuffers::WIPOffset<LocalLocation<'bldr>> {
-    let mut builder = LocalLocationBuilder::new(_fbb);
-    if let Some(x) = args.path { builder.add_path(x); }
-    builder.finish()
-  }
-
-
-  #[inline]
-  pub fn path(&self) -> &'a str {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(LocalLocation::VT_PATH, None).unwrap()}
-  }
-}
-
-impl flatbuffers::Verifiable for LocalLocation<'_> {
-  #[inline]
-  fn run_verifier(
-    v: &mut flatbuffers::Verifier, pos: usize
-  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
-    use self::flatbuffers::Verifiable;
-    v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("path", Self::VT_PATH, true)?
-     .finish();
-    Ok(())
-  }
-}
-pub struct LocalLocationArgs<'a> {
-    pub path: Option<flatbuffers::WIPOffset<&'a str>>,
-}
-impl<'a> Default for LocalLocationArgs<'a> {
-  #[inline]
-  fn default() -> Self {
-    LocalLocationArgs {
-      path: None, // required field
-    }
-  }
-}
-
-pub struct LocalLocationBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
-}
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> LocalLocationBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_path(&mut self, path: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(LocalLocation::VT_PATH, path);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> LocalLocationBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    LocalLocationBuilder {
-      fbb_: _fbb,
-      start_: start,
-    }
-  }
-  #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<LocalLocation<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, LocalLocation::VT_PATH,"path");
-    flatbuffers::WIPOffset::new(o.value())
-  }
-}
-
-impl core::fmt::Debug for LocalLocation<'_> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("LocalLocation");
-      ds.field("path", &self.path());
-      ds.finish()
-  }
-}
-pub enum LocationWrapperOffset {}
-#[derive(Copy, Clone, PartialEq)]
-
-pub struct LocationWrapper<'a> {
-  pub _tab: flatbuffers::Table<'a>,
-}
-
-impl<'a> flatbuffers::Follow<'a> for LocationWrapper<'a> {
-  type Inner = LocationWrapper<'a>;
-  #[inline]
-  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
-  }
-}
-
-impl<'a> LocationWrapper<'a> {
-  pub const VT_LOCATION_TYPE: flatbuffers::VOffsetT = 4;
-  pub const VT_LOCATION: flatbuffers::VOffsetT = 6;
-
-  #[inline]
-  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    LocationWrapper { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args LocationWrapperArgs
-  ) -> flatbuffers::WIPOffset<LocationWrapper<'bldr>> {
-    let mut builder = LocationWrapperBuilder::new(_fbb);
-    if let Some(x) = args.location { builder.add_location(x); }
-    builder.add_location_type(args.location_type);
-    builder.finish()
-  }
-
-
-  #[inline]
-  pub fn location_type(&self) -> Location {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<Location>(LocationWrapper::VT_LOCATION_TYPE, Some(Location::NONE)).unwrap()}
-  }
-  #[inline]
-  pub fn location(&self) -> Option<flatbuffers::Table<'a>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(LocationWrapper::VT_LOCATION, None)}
-  }
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn location_as_local(&self) -> Option<LocalLocation<'a>> {
-    if self.location_type() == Location::local {
-      self.location().map(|t| {
-       // Safety:
-       // Created from a valid Table for this object
-       // Which contains a valid union in this slot
-       unsafe { LocalLocation::init_from_table(t) }
-     })
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn location_as_s_3(&self) -> Option<S3Location<'a>> {
-    if self.location_type() == Location::s3 {
-      self.location().map(|t| {
-       // Safety:
-       // Created from a valid Table for this object
-       // Which contains a valid union in this slot
-       unsafe { S3Location::init_from_table(t) }
-     })
-    } else {
-      None
-    }
-  }
-
-}
-
-impl flatbuffers::Verifiable for LocationWrapper<'_> {
-  #[inline]
-  fn run_verifier(
-    v: &mut flatbuffers::Verifier, pos: usize
-  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
-    use self::flatbuffers::Verifiable;
-    v.visit_table(pos)?
-     .visit_union::<Location, _>("location_type", Self::VT_LOCATION_TYPE, "location", Self::VT_LOCATION, false, |key, v, pos| {
-        match key {
-          Location::local => v.verify_union_variant::<flatbuffers::ForwardsUOffset<LocalLocation>>("Location::local", pos),
-          Location::s3 => v.verify_union_variant::<flatbuffers::ForwardsUOffset<S3Location>>("Location::s3", pos),
-          _ => Ok(()),
-        }
-     })?
-     .finish();
-    Ok(())
-  }
-}
-pub struct LocationWrapperArgs {
-    pub location_type: Location,
-    pub location: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
-}
-impl<'a> Default for LocationWrapperArgs {
-  #[inline]
-  fn default() -> Self {
-    LocationWrapperArgs {
-      location_type: Location::NONE,
-      location: None,
-    }
-  }
-}
-
-pub struct LocationWrapperBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
-}
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> LocationWrapperBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_location_type(&mut self, location_type: Location) {
-    self.fbb_.push_slot::<Location>(LocationWrapper::VT_LOCATION_TYPE, location_type, Location::NONE);
-  }
-  #[inline]
-  pub fn add_location(&mut self, location: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(LocationWrapper::VT_LOCATION, location);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> LocationWrapperBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    LocationWrapperBuilder {
-      fbb_: _fbb,
-      start_: start,
-    }
-  }
-  #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<LocationWrapper<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    flatbuffers::WIPOffset::new(o.value())
-  }
-}
-
-impl core::fmt::Debug for LocationWrapper<'_> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("LocationWrapper");
-      ds.field("location_type", &self.location_type());
-      match self.location_type() {
-        Location::local => {
-          if let Some(x) = self.location_as_local() {
-            ds.field("location", &x)
-          } else {
-            ds.field("location", &"InvalidFlatbuffer: Union discriminant does not match value.")
-          }
-        },
-        Location::s3 => {
-          if let Some(x) = self.location_as_s_3() {
-            ds.field("location", &x)
-          } else {
-            ds.field("location", &"InvalidFlatbuffer: Union discriminant does not match value.")
-          }
-        },
-        _ => {
-          let x: Option<()> = None;
-          ds.field("location", &x)
-        },
-      };
       ds.finish()
   }
 }
@@ -1309,11 +934,11 @@ impl<'a> Volume<'a> {
     unsafe { self._tab.get::<u64>(Volume::VT_VERSION, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn locations(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<LocationWrapper<'a>>> {
+  pub fn locations(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Location<'a>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<LocationWrapper>>>>(Volume::VT_LOCATIONS, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Location>>>>(Volume::VT_LOCATIONS, None).unwrap()}
   }
   #[inline]
   pub fn entries(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry<'a>>> {
@@ -1332,7 +957,7 @@ impl flatbuffers::Verifiable for Volume<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<u64>("version", Self::VT_VERSION, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<LocationWrapper>>>>("locations", Self::VT_LOCATIONS, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Location>>>>("locations", Self::VT_LOCATIONS, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Entry>>>>("entries", Self::VT_ENTRIES, true)?
      .finish();
     Ok(())
@@ -1340,7 +965,7 @@ impl flatbuffers::Verifiable for Volume<'_> {
 }
 pub struct VolumeArgs<'a> {
     pub version: u64,
-    pub locations: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<LocationWrapper<'a>>>>>,
+    pub locations: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Location<'a>>>>>,
     pub entries: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry<'a>>>>>,
 }
 impl<'a> Default for VolumeArgs<'a> {
@@ -1364,7 +989,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> VolumeBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(Volume::VT_VERSION, version, 0);
   }
   #[inline]
-  pub fn add_locations(&mut self, locations: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<LocationWrapper<'b >>>>) {
+  pub fn add_locations(&mut self, locations: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Location<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Volume::VT_LOCATIONS, locations);
   }
   #[inline]

@@ -7,9 +7,8 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use cfs_core::{Location, Volume, VolumeMetadata};
+use cfs_core::{Volume, VolumeMetadata};
 use cfs_fuse::pack;
-use object_store::ObjectStore;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
 // known-bad seeds or anything like that.
@@ -99,7 +98,7 @@ fn fuzz_pack() {
         pack(
             test_runtime(),
             &expected_dir,
-            pack_dir.display().to_string(),
+            format!("file://{}", pack_dir.display()),
             None,
         )
         .unwrap();
@@ -161,7 +160,7 @@ fn fuzz_commit() {
         pack(
             test_runtime(),
             &expected_dir,
-            pack_dir.display().to_string(),
+            format!("file://{}", pack_dir.display()),
             None,
         )
         .unwrap();
@@ -286,34 +285,29 @@ fn spawn_mount(
     metadata: VolumeMetadata,
     local_path: Option<&Path>,
 ) -> AutoUnmount {
-    let (location, object_store): (_, Box<dyn ObjectStore>) = match local_path {
+    let store = match local_path {
         Some(path) => {
-            let location = Location::Local {
-                path: path.to_path_buf(),
-            };
-            let object_store = Box::new(object_store::local::LocalFileSystem::new());
-
-            (location, object_store)
+            let client = Arc::new(object_store::local::LocalFileSystem::new());
+            cfs_core::object_store::RemoteStore {
+                base_path: Arc::new(object_store::path::Path::from(
+                    path.to_string_lossy().as_ref(),
+                )),
+                client,
+            }
         }
         None => {
             // TODO: this is wrong, but it's to get testing right now
-            let location = Location::Local {
-                path: mountpoint.as_ref().to_path_buf(),
-            };
-            let object_store = Box::new(object_store::memory::InMemory::new());
-
-            (location, object_store)
+            let client = Arc::new(object_store::memory::InMemory::new());
+            cfs_core::object_store::RemoteStore {
+                base_path: Arc::new(object_store::path::Path::from(
+                    mountpoint.as_ref().to_string_lossy().as_ref(),
+                )),
+                client,
+            }
         }
     };
 
-    let volume = Volume::new(
-        location,
-        metadata,
-        1024 * 1024,
-        1024,
-        0,
-        Arc::from(object_store),
-    );
+    let volume = Volume::new(metadata, 1024 * 1024, 1024, 0, store);
 
     let session = cfs_fuse::mount_volume(
         mountpoint,

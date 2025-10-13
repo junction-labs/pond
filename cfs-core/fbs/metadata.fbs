@@ -13,23 +13,8 @@ struct ByteRange {
     length: uint64;
 }
 
-table S3Location {
-    bucket: string (required);
+table Location {
     key: string (required);
-}
-
-table LocalLocation {
-    path: string (required);
-}
-
-union Location {
-    local: LocalLocation,
-    s3: S3Location,
-}
-
-// vec of unions isn't supported in rust?
-table LocationWrapper {
-    location: Location;
 }
 
 table LocationRef {
@@ -55,7 +40,7 @@ table Entry {
 
 table Volume {
     version: uint64;
-    locations: [LocationWrapper] (required);
+    locations: [Location] (required);
     entries: [Entry] (required);
 }
 

@@ -56,14 +56,13 @@ enum FileDescriptor {
 }
 
 pub struct Volume {
-    base: Location,
     meta: VolumeMetadata,
     version_bytes: Arc<[u8]>,
 
     cache: Arc<ChunkCache>,
     tempdir: TempDir,
     fds: BTreeMap<Fd, FileDescriptor>,
-    object_store: Arc<dyn ObjectStore>,
+    store: crate::object_store::RemoteStore,
 }
 
 // TODO: the reads and writes here are mostly read_at and write_at, which would
@@ -77,17 +76,16 @@ impl Volume {
 
 impl Volume {
     pub fn new(
-        base: Location,
         metadata: VolumeMetadata,
         max_cache_size: u64,
         chunk_size: u64,
         readahead: u64,
-        object_store: Arc<dyn ObjectStore>,
+        store: crate::object_store::RemoteStore,
     ) -> Self {
         let cache = Arc::new(ChunkCache::new(
             max_cache_size,
             chunk_size,
-            object_store.clone(),
+            store.clone(),
             ReadAheadPolicy { size: readahead },
         ));
 
@@ -97,13 +95,12 @@ impl Volume {
             std::sync::Arc::from(format!("{:#x}", metadata.version()).into_bytes().as_slice());
 
         Self {
-            base,
             tempdir,
             meta: metadata,
             version_bytes: volume_version,
             cache,
             fds: Default::default(),
-            object_store,
+            store,
         }
     }
 
@@ -402,12 +399,12 @@ impl StagedVolume<'_> {
             };
         }
 
-        let dest = self.inner.base.new_data();
+        let dest = self.inner.store.new_data();
 
         let mut offset = 0;
         let mut staged = Vec::new();
         let mut writer = try_mpu!(
-            self.inner.object_store.put_multipart(&dest.path()),
+            self.inner.store.client.put_multipart(&dest),
             "failed to start multipart upload"
         );
 
@@ -427,7 +424,7 @@ impl StagedVolume<'_> {
         }
         try_mpu!(writer.complete(), "failed to complete upload");
 
-        Ok((dest, staged))
+        Ok((Location::committed(dest), staged))
     }
 
     /// Relocate all staged files to dest.
@@ -452,9 +449,10 @@ impl StagedVolume<'_> {
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
         let res = self
             .inner
-            .object_store
+            .store
+            .client
             .put_opts(
-                &self.inner.base.metadata(version).path(),
+                &self.inner.store.metadata(version),
                 PutPayload::from_bytes(new_volume),
                 PutOptions {
                     mode: object_store::PutMode::Create,
@@ -485,9 +483,9 @@ impl StagedVolume<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use object_store::local::LocalFileSystem;
+    use std::str::FromStr;
 
+    use super::*;
     #[test]
     fn test_copy_into() {
         // buf.len() = sum(bytes.len())
@@ -543,15 +541,11 @@ mod tests {
         let store_root = root.path().join("store");
         std::fs::create_dir_all(&store_root).unwrap();
 
-        let base = Location::local(&store_root);
-        let mut volume = Volume::new(
-            base.clone(),
-            VolumeMetadata::empty(),
-            1024,
-            1024,
-            1024,
-            Arc::new(LocalFileSystem::new()),
-        );
+        let client =
+            crate::object_store::RemoteStore::from_str(&format!("file://{}", store_root.display()))
+                .unwrap();
+
+        let mut volume = Volume::new(VolumeMetadata::empty(), 1024, 1024, 1024, client.clone());
         let version = volume.meta.version();
 
         // clean volume -- this is not staged
@@ -582,28 +576,24 @@ mod tests {
         for attr in [&attr1, &attr2] {
             assert!(matches!(
                 volume.meta.location(attr.ino),
-                Some((Location::Local { .. }, _))
+                Some((Location::Committed { .. }, _))
             ));
         }
 
         // read the new volume and assert that the previously staged files have the right
         // contents, and the version is bumped
-        let metadata_path = base
-            .metadata(version + 1)
-            .local_path()
+        let metadata = client.metadata(version + 1);
+        let metadata_bytes = client
+            .client
+            .get(&metadata)
+            .await
             .unwrap()
-            .to_path_buf();
-        let metadata_bytes = std::fs::read(&metadata_path).unwrap();
+            .bytes()
+            .await
+            .unwrap();
 
         let metadata = VolumeMetadata::from_bytes(&metadata_bytes).unwrap();
-        let mut volume = Volume::new(
-            base.clone(),
-            metadata,
-            1024,
-            1024,
-            1024,
-            Arc::new(LocalFileSystem::new()),
-        );
+        let mut volume = Volume::new(metadata, 1024, 1024, 1024, client);
         assert_eq!(volume.meta.version(), version + 1);
 
         assert_read(&mut volume, "hello.txt", "hello").await;

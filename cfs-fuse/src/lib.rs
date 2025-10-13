@@ -6,7 +6,7 @@ use bytesize::ByteSize;
 use cfs_core::{Ino, VolumeMetadata};
 use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
-use object_store::{ObjectStore, PutPayload};
+use object_store::PutPayload;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -109,16 +109,12 @@ pub fn dump(
         }
     }
 
-    let volume = Location::from_str(&volume)?;
-    let object_store = cfs_core::object_store::from_location(&volume)?;
+    let store = cfs_core::object_store::RemoteStore::from_str(&volume)?;
 
     let version = match version {
         Some(v) => v.get(),
         None => {
-            let versions = runtime.block_on(cfs_core::object_store::list_versions(
-                &object_store,
-                &volume,
-            ))?;
+            let versions = runtime.block_on(store.list_versions())?;
             versions
                 .iter()
                 .cloned()
@@ -126,10 +122,10 @@ pub fn dump(
                 .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
         }
     };
-    let volume = volume.metadata(version);
+    let volume = store.metadata(version);
 
     let bs = runtime.block_on(async {
-        let res = object_store.get(&volume.path()).await?;
+        let res = store.client.get(&volume).await?;
         res.bytes().await
     })?;
     let volume = VolumeMetadata::from_bytes(&bs).unwrap();
@@ -179,25 +175,21 @@ pub fn pack(
     // defaults to version 1
     let version = version.map(|v| v.get()).unwrap_or(1);
 
-    let pack_location = Location::from_str(to.as_ref())?;
-    let (volume_location, data_location) =
-        (pack_location.metadata(version), pack_location.new_data());
-
-    let object_store = cfs_core::object_store::from_location(&pack_location)?;
+    let store = cfs_core::object_store::RemoteStore::from_str(to.as_ref())?;
+    let volume_location = store.metadata(version);
+    let data_location = store.new_data();
 
     runtime.block_on(async {
-        if cfs_core::object_store::exists(&object_store, &volume_location).await? {
+        if store.exists(&volume_location).await? {
             anyhow::bail!("{volume_location}: already exists");
         }
-        if cfs_core::object_store::exists(&object_store, &data_location).await? {
+        if store.exists(&data_location).await? {
             anyhow::bail!("{data_location}: already exists");
         }
         Ok(())
     })?;
 
-    let tempdir = tempfile::Builder::new()
-        .prefix(".cfs-pack-")
-        .tempdir_in(to.as_ref())?;
+    let tempdir = tempfile::Builder::new().prefix(".cfs-pack-").tempdir()?;
 
     let mut volume_file = tempfile::NamedTempFile::new_in(&tempdir)?;
     let mut data_file = tempfile::NamedTempFile::new_in(&tempdir)?;
@@ -261,43 +253,29 @@ pub fn pack(
         }
     }
 
-    match volume.relocate(&staging, data_location.clone()) {
+    match volume.relocate(
+        &staging,
+        cfs_core::Location::committed(data_location.clone()),
+    ) {
         Ok(()) => (),
         Err(e) if e.kind() == cfs_core::ErrorKind::NotFound && cursor == 0 => (), // we didn't do shit
         Err(e) => return Err(e.into()),
     };
     volume_file.write_all(&volume.to_bytes()?)?;
 
-    match &pack_location {
-        Location::Local { .. } => {
-            data_file.persist(data_location.local_path().unwrap())?;
-            volume_file.persist(volume_location.local_path().unwrap())?;
-        }
-        Location::ObjectStorage { .. } => {
-            runtime.block_on(upload_file(
-                &object_store,
-                &data_location.path(),
-                data_file.path(),
-            ))?;
-            runtime.block_on(upload_file(
-                &object_store,
-                &volume_location.path(),
-                volume_file.path(),
-            ))?;
-        }
-        _ => unreachable!("pack location should never be staged"),
-    }
+    runtime.block_on(upload_file(&store, &data_location, data_file.path()))?;
+    runtime.block_on(upload_file(&store, &volume_location, volume_file.path()))?;
 
     Ok(())
 }
 
 async fn upload_file(
-    s3: &dyn ObjectStore,
+    store: &cfs_core::object_store::RemoteStore,
     key: &object_store::path::Path,
     local_path: &Path,
 ) -> anyhow::Result<()> {
     let mut file = tokio::fs::File::open(local_path).await?;
-    let mut put = s3.put_multipart(key).await?;
+    let mut put = store.client.put_multipart(key).await?;
 
     let mut buf = BytesMut::with_capacity(1024 * 1024 * 100);
     loop {
@@ -339,13 +317,9 @@ async fn read_up_to<R: AsyncRead + Unpin>(
 }
 
 pub fn list(runtime: tokio::runtime::Runtime, location: String) -> anyhow::Result<()> {
-    let location = Location::from_str(&location)?;
-    let object_store = cfs_core::object_store::from_location(&location)?;
+    let store = cfs_core::object_store::RemoteStore::from_str(&location)?;
 
-    let versions = runtime.block_on(cfs_core::object_store::list_versions(
-        &object_store,
-        &location,
-    ))?;
+    let versions = runtime.block_on(store.list_versions())?;
     for version in versions {
         println!("{version}");
     }
@@ -359,16 +333,12 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         .build()
         .unwrap();
 
-    let location = Location::from_str(&args.volume)?;
-    let object_store = cfs_core::object_store::from_location(&location)?;
+    let store = cfs_core::object_store::RemoteStore::from_str(&args.volume)?;
 
     let version: u64 = match args.version {
         Some(v) => v.get(),
         None => {
-            let versions = runtime.block_on(cfs_core::object_store::list_versions(
-                &object_store,
-                &location,
-            ))?;
+            let versions = runtime.block_on(store.list_versions())?;
             versions
                 .iter()
                 .cloned()
@@ -376,21 +346,20 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
         }
     };
-    let location = location.metadata(version);
+    let volume = store.metadata(version);
 
     let bytes = runtime.block_on(async {
-        let res = object_store.get(&location.path()).await?;
+        let res = store.client.get(&volume).await?;
         res.bytes().await
     })?;
 
     let metadata = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
     let volume = Volume::new(
-        location,
         metadata,
         args.read_behavior.max_cache_size.as_u64(),
         args.read_behavior.chunk_size.as_u64(),
         args.read_behavior.readahead_size.as_u64(),
-        object_store,
+        store,
     );
 
     let mut session = mount_volume(
