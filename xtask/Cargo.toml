@@ -3,8 +3,11 @@ name = "xtask"
 version = "0.1.0"
 edition = "2024"
 
+# use workspace deps when we can just to keep versions consistent, but if you
+# need something only for an xtask, add it here instead of adding it as a
+# workspace dependency.
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
-glob.workspace = true
-xshell.workspace = true
+glob = "0.3"
+xshell = "0.2"

@@ -5,16 +5,14 @@ edition = "2024"
 
 [dependencies]
 bytes.workspace = true
-dashmap.workspace = true
 flatbuffers.workspace = true
 foyer.workspace = true
 foyer-memory.workspace = true
 futures.workspace = true
 object_store.workspace = true
 rand.workspace = true
-reqwest.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = {workspace = true, features = ["fs"]}
 tempfile.workspace = true
 url.workspace = true
 
