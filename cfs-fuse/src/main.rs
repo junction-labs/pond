@@ -15,7 +15,7 @@ fn main() {
         Cmd::Dump { volume, version } => dump(runtime, volume, version),
         Cmd::Pack { dir, to, version } => pack(runtime, dir, to, version),
         Cmd::List { volume } => list(runtime, volume),
-        Cmd::Mount(mount_args) => mount(mount_args),
+        Cmd::Mount(mount_args) => mount(runtime, mount_args),
     };
 
     if let Err(e) = res {

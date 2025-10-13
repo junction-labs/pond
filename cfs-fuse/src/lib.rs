@@ -1,18 +1,12 @@
 mod fuse;
 
-use anyhow::Context;
-use bytes::BytesMut;
 use bytesize::ByteSize;
-use cfs_core::{Ino, VolumeMetadata};
+use cfs_core::Ino;
 use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
-use object_store::PutPayload;
-use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::fuse::Cfs;
 
@@ -109,28 +103,10 @@ pub fn dump(
         }
     }
 
-    let store = cfs_core::object_store::RemoteStore::from_str(&volume)?;
+    let volume = runtime.block_on(Volume::builder(volume)?.load(version.map(|v| v.get())))?;
+    let metadata = volume.metadata();
 
-    let version = match version {
-        Some(v) => v.get(),
-        None => {
-            let versions = runtime.block_on(store.list_versions())?;
-            versions
-                .iter()
-                .cloned()
-                .max()
-                .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
-        }
-    };
-    let volume = store.metadata(version);
-
-    let bs = runtime.block_on(async {
-        let res = store.client.get(&volume).await?;
-        res.bytes().await
-    })?;
-    let volume = VolumeMetadata::from_bytes(&bs).unwrap();
-
-    for (name, path, attrs) in volume.walk(Ino::Root).unwrap() {
+    for (name, path, attrs) in metadata.walk(Ino::Root).unwrap() {
         if path.is_empty() && !attrs.ino.is_regular() {
             continue;
         }
@@ -148,7 +124,7 @@ pub fn dump(
         match attrs.kind {
             cfs_core::FileType::Regular => {
                 kind = "f";
-                let (l, b) = volume.location(attrs.ino).unwrap();
+                let (l, b) = metadata.location(attrs.ino).unwrap();
                 location = location_path(l);
                 offset = b.offset;
                 len = b.len;
@@ -172,39 +148,23 @@ pub fn pack(
     to: impl AsRef<str>,
     version: Option<NonZeroU64>,
 ) -> anyhow::Result<()> {
-    // defaults to version 1
+    // default to version 1
     let version = version.map(|v| v.get()).unwrap_or(1);
 
-    let store = cfs_core::object_store::RemoteStore::from_str(to.as_ref())?;
-    let volume_location = store.metadata(version);
-    let data_location = store.new_data();
+    let mut volume = runtime.block_on(Volume::builder(to.as_ref())?.create(version))?;
+    let metadata = volume.metadata_mut();
 
-    runtime.block_on(async {
-        if store.exists(&volume_location).await? {
-            anyhow::bail!("{volume_location}: already exists");
-        }
-        if store.exists(&data_location).await? {
-            anyhow::bail!("{data_location}: already exists");
-        }
-        Ok(())
-    })?;
+    // walk the entire tree in dfs order. make sure directories are sorted by
+    // filename so that doing things like cat some/dir/* will traverse the
+    // directory in the order we've packed it.
+    let walk_root: &Path = dir.as_ref();
+    let walker = walkdir::WalkDir::new(walk_root)
+        .min_depth(1)
+        .sort_by_file_name();
 
-    let tempdir = tempfile::Builder::new().prefix(".cfs-pack-").tempdir()?;
-
-    let mut volume_file = tempfile::NamedTempFile::new_in(&tempdir)?;
-    let mut data_file = tempfile::NamedTempFile::new_in(&tempdir)?;
-
-    let root: &Path = dir.as_ref();
-    let mut volume = VolumeMetadata::empty();
-    let mut cursor = 0u64;
-
-    // create a staging blob
-    let staging = Location::staged(data_file.path().to_string_lossy().to_string());
-
-    let walker = walkdir::WalkDir::new(root).min_depth(1).sort_by_file_name();
     for entry in walker {
         let entry = entry?;
-        let path = entry.path().strip_prefix(root).unwrap();
+        let path = entry.path().strip_prefix(walk_root).unwrap();
 
         // for a directory, just mkdir_all on the volume
         if entry.file_type().is_dir() {
@@ -212,7 +172,7 @@ pub fn pack(
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            volume.mkdir_all(Ino::Root, dirs)?;
+            metadata.mkdir_all(Ino::Root, dirs)?;
         }
         // for a file:
         //
@@ -231,136 +191,44 @@ pub fn pack(
                 let dirs = dir
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string());
-                volume.mkdir_all(Ino::Root, dirs).unwrap().ino
+                metadata.mkdir_all(Ino::Root, dirs).unwrap().ino
             } else {
                 Ino::Root
             };
 
-            let mut file = std::fs::File::open(entry.path()).unwrap();
-            let n = std::io::copy(&mut file, &mut data_file).unwrap();
-            volume.create(
+            let len = entry.metadata().unwrap().len();
+            metadata.create(
                 dir_ino,
                 name.to_string_lossy().to_string(),
                 true,
-                staging.clone(),
-                cfs_core::ByteRange {
-                    offset: cursor,
-                    len: n,
-                },
+                Location::staged(entry.path()),
+                cfs_core::ByteRange { offset: 0, len },
             )?;
-
-            cursor += n;
         }
     }
 
-    match volume.relocate(
-        &staging,
-        cfs_core::Location::committed(data_location.clone()),
-    ) {
-        Ok(()) => (),
-        Err(e) if e.kind() == cfs_core::ErrorKind::NotFound && cursor == 0 => (), // we didn't do shit
-        Err(e) => return Err(e.into()),
-    };
-    volume_file.write_all(&volume.to_bytes()?)?;
-
-    runtime.block_on(upload_file(&store, &data_location, data_file.path()))?;
-    runtime.block_on(upload_file(&store, &volume_location, volume_file.path()))?;
+    runtime.block_on(volume.commit())?;
 
     Ok(())
 }
 
-async fn upload_file(
-    store: &cfs_core::object_store::RemoteStore,
-    key: &object_store::path::Path,
-    local_path: &Path,
-) -> anyhow::Result<()> {
-    let mut file = tokio::fs::File::open(local_path).await?;
-    let mut put = store.client.put_multipart(key).await?;
-
-    let mut buf = BytesMut::with_capacity(1024 * 1024 * 100);
-    loop {
-        let n = read_up_to(&mut file, &mut buf, 1024 * 1024 * 100).await?;
-        if n == 0 {
-            break;
-        }
-
-        let bytes = buf.split_to(n);
-        put.put_part(PutPayload::from_bytes(bytes.freeze())).await?;
-        buf.reserve(1024 * 1024 * 100);
-    }
-
-    put.complete().await?;
-    Ok(())
-}
-
-async fn read_up_to<R: AsyncRead + Unpin>(
-    r: &mut R,
-    buf: &mut BytesMut,
-    limit: usize,
-) -> std::io::Result<usize> {
-    buf.reserve(limit);
-    let mut read = 0;
-
-    loop {
-        let n = r.read_buf(buf).await?;
-        if n == 0 {
-            break;
-        }
-
-        read += n;
-        if read >= limit {
-            break;
-        }
-    }
-
-    Ok(read)
-}
-
-pub fn list(runtime: tokio::runtime::Runtime, location: String) -> anyhow::Result<()> {
-    let store = cfs_core::object_store::RemoteStore::from_str(&location)?;
-
-    let versions = runtime.block_on(store.list_versions())?;
+pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
+    let volumes = Volume::builder(&volume)?;
+    let versions = runtime.block_on(volumes.list_versions())?;
     for version in versions {
         println!("{version}");
     }
     Ok(())
 }
 
-pub fn mount(args: MountArgs) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .unwrap();
-
-    let store = cfs_core::object_store::RemoteStore::from_str(&args.volume)?;
-
-    let version: u64 = match args.version {
-        Some(v) => v.get(),
-        None => {
-            let versions = runtime.block_on(store.list_versions())?;
-            versions
-                .iter()
-                .cloned()
-                .max()
-                .ok_or_else(|| anyhow::anyhow!("no volume metadata found"))?
-        }
-    };
-    let volume = store.metadata(version);
-
-    let bytes = runtime.block_on(async {
-        let res = store.client.get(&volume).await?;
-        res.bytes().await
-    })?;
-
-    let metadata = VolumeMetadata::from_bytes(&bytes).context("failed to parse volume")?;
-    let volume = Volume::new(
-        metadata,
-        args.read_behavior.max_cache_size.as_u64(),
-        args.read_behavior.chunk_size.as_u64(),
-        args.read_behavior.readahead_size.as_u64(),
-        store,
-    );
+pub fn mount(runtime: tokio::runtime::Runtime, args: MountArgs) -> anyhow::Result<()> {
+    let volume = runtime.block_on(
+        Volume::builder(&args.volume)?
+            .with_cache_size(args.read_behavior.chunk_size.as_u64())
+            .with_chunk_size(args.read_behavior.chunk_size.as_u64())
+            .with_readahead(args.read_behavior.readahead_size.as_u64())
+            .load(args.version.map(|v| v.get())),
+    )?;
 
     let mut session = mount_volume(
         args.mountpoint,

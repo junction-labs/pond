@@ -230,21 +230,19 @@ mod test {
     use super::*;
     use arbtest::arbtest;
     use bytes::Bytes;
-    use object_store::{ObjectStore, PutPayload, memory::InMemory};
+    use object_store::{ObjectStore, PutPayload};
 
-    async fn object_store_with_data(
+    async fn storage_with_data(
         key: object_store::path::Path,
         bytes: Bytes,
     ) -> crate::object_store::RemoteStore {
-        let client = Arc::new(InMemory::new());
-        client
+        let storage = crate::object_store::RemoteStore::new_in_memory();
+        storage
+            .client
             .put(&key, PutPayload::from_bytes(bytes))
             .await
             .expect("put into inmemory store should be ok");
-        crate::object_store::RemoteStore {
-            base_path: Default::default(),
-            client,
-        }
+        storage
     }
 
     #[test]
@@ -350,13 +348,12 @@ mod test {
     #[tokio::test]
     async fn test_readahead() {
         let key = object_store::path::Path::from("some-key");
-        let object_store =
-            object_store_with_data(key.clone(), Bytes::from(vec![0u8; 1 << 10])).await;
+        let storage = storage_with_data(key.clone(), Bytes::from(vec![0u8; 1 << 10])).await;
 
         // volume store fetches/caches 10 byte chunks with a readahead size of
         // 40 bytes (4 chunks)
         let chunk_size = 10;
-        let cache = ChunkCache::new(1024, 10, object_store, ReadAheadPolicy { size: 40 });
+        let cache = ChunkCache::new(1024, 10, storage, ReadAheadPolicy { size: 40 });
         let read_offset = 123;
         let read_len = 234;
         let last_cached_byte =
@@ -385,12 +382,8 @@ mod test {
 
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
-        let client = Arc::new(InMemory::new());
-        let store = crate::object_store::RemoteStore {
-            base_path: Default::default(),
-            client,
-        };
-        let cache = ChunkCache::new(10, 10, store, ReadAheadPolicy { size: 123 });
+        let storage = crate::object_store::RemoteStore::new_in_memory();
+        let cache = ChunkCache::new(10, 10, storage, ReadAheadPolicy { size: 123 });
         let res = cache.get_at(&"some-key".into(), 10, 37).await;
         assert!(res.is_err());
         assert!(!cache.inner.is_cached("some-key".into(), 10));

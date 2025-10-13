@@ -1,13 +1,11 @@
 use std::{
     io::ErrorKind,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use cfs_core::{Volume, VolumeMetadata};
+use cfs_core::Volume;
 use cfs_fuse::pack;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
@@ -33,7 +31,11 @@ fn fuzz_empty_volume() {
 
         let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
 
-        let _mount = spawn_mount(&actual_dir, VolumeMetadata::empty(), None);
+        let volume = test_runtime()
+            .block_on(Volume::builder("memory://").unwrap().create(123))
+            .unwrap();
+        let _mount = spawn_mount(&actual_dir, volume);
+
         let test_res: Vec<_> = ops.iter().map(|op| apply(&actual_dir, op)).collect();
 
         // print our own error history so it's easy to spot when things don't match.
@@ -101,10 +103,14 @@ fn fuzz_pack() {
         .unwrap();
 
         // mount the new dir as filesystem
-        let volume_file = find_volume(&pack_dir).unwrap();
-        let metadata = VolumeMetadata::from_bytes(&std::fs::read(&volume_file).unwrap()).unwrap();
-
-        let _mount = spawn_mount(&actual_dir, metadata, Some(&actual_dir));
+        let volume = test_runtime()
+            .block_on(
+                Volume::builder(pack_dir.to_str().unwrap())
+                    .unwrap()
+                    .load(None),
+            )
+            .unwrap();
+        let _mount = spawn_mount(&actual_dir, volume);
 
         // walk both directories and see if we have the same files and directories
         let expected = read_entries(&expected_dir);
@@ -135,7 +141,14 @@ fn fuzz_commit() {
 
         let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
 
-        let mount = spawn_mount(&actual_dir, VolumeMetadata::empty(), None);
+        let volume = test_runtime()
+            .block_on(
+                Volume::builder(pack_dir.to_str().unwrap())
+                    .unwrap()
+                    .create(123),
+            )
+            .unwrap();
+        let mount = spawn_mount(&actual_dir, volume);
         let test_res: Vec<_> = ops.iter().map(|op| apply(&actual_dir, op)).collect();
 
         // we're only testing commit here, so don't spit out any complicated comparison output.
@@ -164,9 +177,15 @@ fn fuzz_commit() {
 
         // remount the packed volume
         drop(mount);
-        let volume_file = find_volume(&pack_dir).unwrap();
-        let metadata = VolumeMetadata::from_bytes(&std::fs::read(&volume_file).unwrap()).unwrap();
-        let _mount = spawn_mount(&actual_dir, metadata, Some(&actual_dir));
+
+        let volume = test_runtime()
+            .block_on(
+                Volume::builder(pack_dir.to_str().unwrap())
+                    .unwrap()
+                    .load(None),
+            )
+            .unwrap();
+        let _mount = spawn_mount(&actual_dir, volume);
 
         // walk both directories and see if we have the same files and directories
         let mut expected = read_entries(&expected_dir);
@@ -230,21 +249,6 @@ fn create_dir_all(
     }
 }
 
-fn find_volume(dir: impl AsRef<Path>) -> std::io::Result<PathBuf> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|s| s.as_bytes()) == Some(b"volume") {
-            return Ok(path);
-        }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "no volume found",
-    ))
-}
-
 fn project_root() -> PathBuf {
     Path::new(&env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -277,35 +281,7 @@ impl Drop for AutoUnmount {
 }
 
 // spawn a new mount on a background thread
-fn spawn_mount(
-    mountpoint: impl AsRef<Path>,
-    metadata: VolumeMetadata,
-    local_path: Option<&Path>,
-) -> AutoUnmount {
-    let store = match local_path {
-        Some(path) => {
-            let client = Arc::new(object_store::local::LocalFileSystem::new());
-            cfs_core::object_store::RemoteStore {
-                base_path: Arc::new(object_store::path::Path::from(
-                    path.to_string_lossy().as_ref(),
-                )),
-                client,
-            }
-        }
-        None => {
-            // TODO: this is wrong, but it's to get testing right now
-            let client = Arc::new(object_store::memory::InMemory::new());
-            cfs_core::object_store::RemoteStore {
-                base_path: Arc::new(object_store::path::Path::from(
-                    mountpoint.as_ref().to_string_lossy().as_ref(),
-                )),
-                client,
-            }
-        }
-    };
-
-    let volume = Volume::new(metadata, 1024 * 1024, 1024, 0, store);
-
+fn spawn_mount(mountpoint: impl AsRef<Path>, volume: Volume) -> AutoUnmount {
     let session = cfs_fuse::mount_volume(
         mountpoint,
         volume,
