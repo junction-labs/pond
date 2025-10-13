@@ -232,6 +232,12 @@ impl Volume {
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
+                Some((Location::Staged { path }, _)) => {
+                    let file = tokio::fs::File::open(path).await.map_err(|e| {
+                        Error::new_context(e.kind().into(), "failed to open staged file", e)
+                    })?;
+                    Ok(new_fd(&mut self.fds, ino, FileDescriptor::Staged { file }))
+                }
                 Some((location, range)) => Ok(new_fd(
                     &mut self.fds,
                     ino,
