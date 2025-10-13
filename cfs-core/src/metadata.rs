@@ -26,32 +26,6 @@ mod fb;
 
 use crate::{ByteRange, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
-// #[derive(thiserror::Error, Debug, PartialEq, Eq)]
-// pub enum ErrorKind {
-//     #[error("not a directory")]
-//     NotADirectory,
-//     #[error("is a directory")]
-//     IsADirectory,
-//     #[error("does not exist")]
-//     DoesNotExist,
-//     #[error("already exists")]
-//     AlreadyExists,
-//     #[error("directory is not empty")]
-//     NotEmpty,
-//     #[error("permission denied")]
-//     PermissionDenied,
-//     #[error("{message}")]
-//     Invalid { message: Cow<'static, str> },
-// }
-
-// impl ErrorKind {
-//     fn invalid<S: Into<Cow<'static, str>>>(msg: S) -> Self {
-//         Self::Invalid {
-//             message: msg.into(),
-//         }
-//     }
-// }
-
 /// `VolumeMetadata` holds all of file and directory metadata for a coolfs
 /// volume. Metadata is extremely low-level, and working with a it requires
 /// knowledge of the internals of CFS. This should never be the first thing

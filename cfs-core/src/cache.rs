@@ -4,18 +4,6 @@ use std::{ops::Range, sync::Arc};
 
 use crate::{Error, error::ErrorKind};
 
-// #[derive(thiserror::Error, Debug)]
-// pub(crate) enum CacheError {
-//     #[error("read bounds are too large")]
-//     Overflow,
-
-//     #[error(transparent)]
-//     Cache(#[from] foyer_memory::Error),
-
-//     #[error(transparent)]
-//     ObjectStore(#[from] object_store::Error),
-// }
-
 #[derive(Debug, Clone, Default)]
 pub struct ReadAheadPolicy {
     /// Size of read-ahead in bytes. if you read a byte at index i, we will
