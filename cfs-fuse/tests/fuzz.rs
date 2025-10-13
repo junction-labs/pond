@@ -113,10 +113,106 @@ fn fuzz_pack() {
 
         // walk both directories and see if we have the same files and directories
         let expected = read_entries(&expected_dir);
-        dbg!(&expected);
         let actual = read_entries(&actual_dir);
 
+        assert_eq!(expected, actual, "pack entries differ");
+
+        Ok(())
+    });
+}
+
+#[test]
+fn fuzz_commit() {
+    let fuzz_dir = project_root().join("target/cfs/integration/fuzz_commit");
+    let pack_dir = fuzz_dir.join("volume");
+    let expected_dir = fuzz_dir.join("expected");
+    let actual_dir = fuzz_dir.join("actual");
+    std::fs::create_dir_all(&fuzz_dir).unwrap();
+
+    arbtest(|u| {
+        // for every run, remove everything in the test dirs and recreate them
+        // as empty.
+        reset_dir(&expected_dir);
+        reset_dir(&actual_dir);
+        reset_dir(&pack_dir);
+
+        let ops: Vec<FuzzOp> = u.arbitrary()?;
+
+        let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
+
+        let mount = spawn_mount(&actual_dir, VolumeMetadata::empty(), None);
+        let test_res: Vec<_> = ops.iter().map(|op| apply(&actual_dir, op)).collect();
+
+        // we're only testing commit here, so don't spit out any complicated comparison output.
+        // fuzz_empty does that.
+        assert_eq!(reference_res, test_res, "pre-commit results differ");
+
+        // now do a bunch of FuzzOps but don't call commit before packing it. when we unpack it, we
+        // shouldn't see any of the uncommitted stuff.
+        let after_commit: Vec<FuzzOp> = u.arbitrary()?;
+        let after_commit: Vec<FuzzOp> = after_commit
+            .into_iter()
+            .filter(|op| !matches!(op, FuzzOp::Commit))
+            .collect();
+        after_commit.iter().for_each(|op| {
+            let _ = apply(&expected_dir, op);
+        });
+
+        // pack it to the pack_dir, which shouldn't include the uncommitted stuff.
+        dbg!(&pack_dir);
+        pack(
+            test_runtime(),
+            &expected_dir,
+            pack_dir.display().to_string(),
+            None,
+        )
+        .unwrap();
+
+        // remount the packed volume
+        drop(mount);
+        let volume_file = find_volume(&pack_dir).unwrap();
+        let metadata = VolumeMetadata::from_bytes(&std::fs::read(&volume_file).unwrap()).unwrap();
+        let _mount = spawn_mount(&actual_dir, metadata, Some(&actual_dir));
+
+        // walk both directories and see if we have the same files and directories
+        let mut expected = read_entries(&expected_dir);
+        let mut actual = read_entries(&actual_dir);
+        expected.sort();
+        actual.sort();
+
         if expected != actual {
+            let mut expected_iter = expected.iter().peekable();
+            let mut actual_iter = actual.iter().peekable();
+
+            eprintln!("FuzzOps executed after commit but before packing: {after_commit:?}");
+            eprintln!("differences");
+            while expected_iter.peek().is_some() || actual_iter.peek().is_some() {
+                match (expected_iter.peek(), actual_iter.peek()) {
+                    (Some(&expected_entry), Some(&actual_entry)) => {
+                        match expected_entry.cmp(actual_entry) {
+                            std::cmp::Ordering::Less => {
+                                eprintln!("-  {expected_entry:?}");
+                                expected_iter.next();
+                            }
+                            std::cmp::Ordering::Greater => {
+                                eprintln!("+  {actual_entry:?}");
+                                actual_iter.next();
+                            }
+                            std::cmp::Ordering::Equal => {
+                                expected_iter.next();
+                                actual_iter.next();
+                            }
+                        }
+                    }
+                    (Some(_), None) => {
+                        expected_iter.next();
+                    }
+                    (None, Some(_)) => {
+                        actual_iter.next();
+                    }
+                    (None, None) => break,
+                }
+            }
             assert_eq!(expected, actual, "pack entries differ");
         }
 
@@ -180,7 +276,9 @@ impl From<fuser::BackgroundSession> for AutoUnmount {
 
 impl Drop for AutoUnmount {
     fn drop(&mut self) {
-        if let Some(s) = self.0.take() { s.join() }
+        if let Some(s) = self.0.take() {
+            s.join()
+        }
     }
 }
 
@@ -235,7 +333,7 @@ fn spawn_mount(
     .into()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ArbPath(PathBuf);
 
 impl AsRef<Path> for ArbPath {
@@ -267,7 +365,7 @@ impl<'a> Arbitrary<'a> for ArbPath {
     }
 }
 
-#[derive(Debug, Clone, Arbitrary, PartialEq, Eq)]
+#[derive(Debug, Clone, Arbitrary, PartialEq, Eq, PartialOrd, Ord)]
 enum FuzzEntry {
     Dir(ArbPath),
     File(ArbPath, String),
@@ -384,7 +482,9 @@ fn apply(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Error
         }
         FuzzOp::Commit => {
             let path = root.join(".commit");
-            tri!(std::fs::write(path, "1"));
+            if root.join(".commit").exists() {
+                tri!(std::fs::write(path, "1"));
+            }
             Ok(OpOutput::None)
         }
     }
