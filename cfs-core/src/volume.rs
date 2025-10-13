@@ -176,7 +176,7 @@ impl Volume {
             parent,
             name,
             exclusive,
-            Location::Staged { path: path.clone() },
+            Location::Staged { path },
             ByteRange::empty(),
         )?;
 
@@ -191,6 +191,9 @@ impl Volume {
 }
 
 impl Volume {
+    /// Open a Fd to a locally staged file for reading and writing.
+    ///
+    /// Opening a Fd with write permissions will always truncate the file.
     pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::COMMIT => {
@@ -211,7 +214,17 @@ impl Volume {
                     let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
                     Ok(fd)
                 }
-                Some(_) => Err(ErrorKind::PermissionDenied.into()),
+                Some((Location::Committed { .. }, ..)) => {
+                    // truncate the file (by assigning it a brand new staged file) if it's
+                    // committed. the alternative would be to keep a copy of the committed
+                    // file locally as a staged file, which can be expensive if it's a large file.
+                    let (path, file) = tempfile(self.tempdir.path());
+                    let staged = Location::Staged { path };
+                    self.modify(ino, Some(staged), Some(Modify::Set((0, 0).into())))?;
+
+                    let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
+                    Ok(fd)
+                }
                 None => Err(ErrorKind::NotFound.into()),
             },
         }
