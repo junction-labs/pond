@@ -207,9 +207,14 @@ impl Volume {
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = tokio::fs::File::open(path).await.map_err(|e| {
-                        Error::new_context(e.kind().into(), "failed to open staged file", e)
-                    })?;
+                    let file = tokio::fs::File::options()
+                        .read(true)
+                        .write(true)
+                        .open(path)
+                        .await
+                        .map_err(|e| {
+                            Error::new_context(e.kind().into(), "failed to open staged file", e)
+                        })?;
 
                     let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
                     Ok(fd)
@@ -306,7 +311,7 @@ impl Volume {
             Some(FileDescriptor::Staged { file, .. }) => {
                 let n = write_at(file, offset, data).await.map_err(|e| {
                     let kind = e.kind().into();
-                    Error::new_context(kind, "failed to write staged filed", e)
+                    Error::new_context(kind, "failed to write staged file", e)
                 })?;
                 self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
                 Ok(n)
