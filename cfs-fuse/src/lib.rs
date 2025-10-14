@@ -201,7 +201,7 @@ pub fn pack(
     // create a staging blob
     let staging = Location::staged(data_file.path().to_string_lossy().to_string());
 
-    let walker = walkdir::WalkDir::new(root).min_depth(1);
+    let walker = walkdir::WalkDir::new(root).min_depth(1).sort_by_file_name();
     for entry in walker {
         let entry = entry?;
         let path = entry.path().strip_prefix(root).unwrap();
