@@ -29,7 +29,7 @@ fn fuzz_empty_volume() {
         reset_dir(&expected_dir);
         reset_dir(&actual_dir);
 
-        let ops: Vec<FuzzOp> = u.arbitrary()?;
+        let ops: Vec<FuzzOp> = arbitrary_vec(u)?;
 
         let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
 
@@ -69,10 +69,7 @@ fn fuzz_pack() {
         reset_dir(&pack_dir);
 
         // create a random test volume
-        let mut entries: Vec<FuzzEntry> = u.arbitrary()?;
-        if entries.is_empty() {
-            entries.push(u.arbitrary()?);
-        }
+        let entries: Vec<FuzzEntry> = arbitrary_vec(u)?;
 
         let mkdir =
             |p: &Path| create_dir_all(p, [ErrorKind::AlreadyExists, ErrorKind::NotADirectory]);
@@ -134,7 +131,7 @@ fn fuzz_commit() {
         reset_dir(&actual_dir);
         reset_dir(&pack_dir);
 
-        let ops: Vec<FuzzOp> = u.arbitrary()?;
+        let ops: Vec<FuzzOp> = arbitrary_vec(u)?;
 
         let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
 
@@ -147,7 +144,7 @@ fn fuzz_commit() {
 
         // now do a bunch of FuzzOps but don't call commit before packing it. when we unpack it, we
         // shouldn't see any of the uncommitted stuff.
-        let after_commit: Vec<FuzzOp> = u.arbitrary()?;
+        let after_commit: Vec<FuzzOp> = arbitrary_vec(u)?;
         let after_commit: Vec<FuzzOp> = after_commit
             .into_iter()
             .filter(|op| !matches!(op, FuzzOp::Commit))
@@ -324,6 +321,17 @@ fn spawn_mount(
 
     // start in the background and let it rip
     session.spawn().unwrap().into()
+}
+
+fn arbitrary_vec<'a, T: Arbitrary<'a>>(
+    u: &mut Unstructured<'a>,
+) -> Result<Vec<T>, arbitrary::Error> {
+    let size = u.arbitrary_len::<usize>()?;
+    let mut rv = Vec::with_capacity(size);
+    for _ in 0..size {
+        rv.push(u.arbitrary()?);
+    }
+    Ok(rv)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
