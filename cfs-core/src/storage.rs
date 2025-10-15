@@ -7,10 +7,10 @@ use url::Url;
 use crate::{Error, ErrorKind, Result, VolumeMetadata};
 
 #[derive(Debug, Clone)]
-pub struct Storage {
-    pub temp_dir: Arc<TempDir>,
-    pub base_path: Option<object_store::path::Path>,
-    pub remote: Arc<dyn ObjectStore>,
+pub(crate) struct Storage {
+    pub(crate) temp_dir: Arc<TempDir>,
+    pub(crate) base_path: Option<object_store::path::Path>,
+    pub(crate) remote: Arc<dyn ObjectStore>,
 }
 
 impl Storage {
