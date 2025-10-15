@@ -919,19 +919,19 @@ impl<'a> Volume<'a> {
     args: &'args VolumeArgs<'args>
   ) -> flatbuffers::WIPOffset<Volume<'bldr>> {
     let mut builder = VolumeBuilder::new(_fbb);
-    builder.add_version(args.version);
     if let Some(x) = args.entries { builder.add_entries(x); }
     if let Some(x) = args.locations { builder.add_locations(x); }
+    if let Some(x) = args.version { builder.add_version(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn version(&self) -> u64 {
+  pub fn version(&self) -> &'a str {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Volume::VT_VERSION, Some(0)).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Volume::VT_VERSION, None).unwrap()}
   }
   #[inline]
   pub fn locations(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Location<'a>>> {
@@ -956,7 +956,7 @@ impl flatbuffers::Verifiable for Volume<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<u64>("version", Self::VT_VERSION, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Location>>>>("locations", Self::VT_LOCATIONS, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Entry>>>>("entries", Self::VT_ENTRIES, true)?
      .finish();
@@ -964,7 +964,7 @@ impl flatbuffers::Verifiable for Volume<'_> {
   }
 }
 pub struct VolumeArgs<'a> {
-    pub version: u64,
+    pub version: Option<flatbuffers::WIPOffset<&'a str>>,
     pub locations: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Location<'a>>>>>,
     pub entries: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Entry<'a>>>>>,
 }
@@ -972,7 +972,7 @@ impl<'a> Default for VolumeArgs<'a> {
   #[inline]
   fn default() -> Self {
     VolumeArgs {
-      version: 0,
+      version: None, // required field
       locations: None, // required field
       entries: None, // required field
     }
@@ -985,8 +985,8 @@ pub struct VolumeBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> VolumeBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_version(&mut self, version: u64) {
-    self.fbb_.push_slot::<u64>(Volume::VT_VERSION, version, 0);
+  pub fn add_version(&mut self, version: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Volume::VT_VERSION, version);
   }
   #[inline]
   pub fn add_locations(&mut self, locations: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Location<'b >>>>) {
@@ -1007,6 +1007,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> VolumeBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<Volume<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Volume::VT_VERSION,"version");
     self.fbb_.required(o, Volume::VT_LOCATIONS,"locations");
     self.fbb_.required(o, Volume::VT_ENTRIES,"entries");
     flatbuffers::WIPOffset::new(o.value())

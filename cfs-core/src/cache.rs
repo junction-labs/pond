@@ -239,7 +239,7 @@ mod test {
         let storage = crate::storage::Storage::new_in_memory();
         storage
             .remote
-            .put(&key, PutPayload::from_bytes(bytes))
+            .put(key, PutPayload::from_bytes(bytes))
             .await
             .expect("put into inmemory store should be ok");
         storage

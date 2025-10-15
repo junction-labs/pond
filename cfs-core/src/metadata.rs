@@ -1,7 +1,9 @@
 use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, btree_map},
+    fmt::Debug,
     path::PathBuf,
+    str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -26,6 +28,74 @@ mod fb;
 
 use crate::{ByteRange, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
+/// An arbitrary sequence of bytes that identifies a version of a volume.
+///
+/// Versions are always exactly 64 bytes, with the high bits set to zero
+/// if unspecified.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version(Box<str>);
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<[u8]> for Version {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl AsRef<str> for Version {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for Version {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() > Self::MAX_LEN {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "version must be no more than 64 bytes",
+            ));
+        }
+
+        Ok(Self(Box::from(s)))
+    }
+}
+
+impl Version {
+    const MAX_LEN: usize = 64;
+
+    #[inline(always)]
+    fn empty() -> Self {
+        Self(Box::from(""))
+    }
+
+    /// Create a `Version` from a static string, but panic if the input is
+    /// invalid in any way.
+    ///
+    /// This is equivalent to `from_str`. Prefer that method outside of tests.
+    pub fn from_static(version: &'static str) -> Self {
+        Self::from_str(version).expect("BUG: invalid version")
+    }
+
+    /// Create a `Version` from a slice of bytes.
+    pub fn from_bytes(bs: &[u8]) -> crate::Result<Self> {
+        let Ok(str) = str::from_utf8(bs) else {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "version must be valid utf-8",
+            ));
+        };
+        Self::from_str(str)
+    }
+}
+
 /// `VolumeMetadata` holds all of file and directory metadata for a coolfs
 /// volume. Metadata is extremely low-level, and working with a it requires
 /// knowledge of the internals of CFS. This should never be the first thing
@@ -47,7 +117,7 @@ use crate::{ByteRange, Error, FileAttr, FileType, Ino, Location, error::ErrorKin
 // # TODO: should we guarantee inodes are stable in the docs?
 #[derive(Debug)]
 pub struct VolumeMetadata {
-    version: u64,
+    version: Version,
 
     // the next available ino. must start at Ino::Root.add(1) for an empty
     // volume.
@@ -141,6 +211,10 @@ pub enum Modify {
 impl VolumeMetadata {
     /// Create a new empty volume.
     pub fn empty() -> Self {
+        Self::new(Version::empty())
+    }
+
+    pub(crate) fn new(version: Version) -> Self {
         let mut data = BTreeMap::new();
         let mut dirs = BTreeMap::new();
         for entry in Self::reserved_entries() {
@@ -152,7 +226,7 @@ impl VolumeMetadata {
         }
 
         Self {
-            version: 0xBEEF,
+            version,
             next_ino: Ino::min_regular(),
             locations: vec![],
             data,
@@ -214,13 +288,12 @@ impl VolumeMetadata {
     }
 
     /// Returns the current version of the volume.
-    pub fn version(&self) -> u64 {
-        self.version
+    pub fn version(&self) -> &Version {
+        &self.version
     }
 
-    pub(crate) fn increment_version(&mut self) -> u64 {
-        self.version += 1;
-        self.version
+    pub(crate) fn set_version(&mut self, next_version: Version) {
+        self.version = next_version;
     }
 
     /// Check whether this volume is being staged. Staged volumes contain
@@ -723,10 +796,11 @@ impl VolumeMetadata {
             fbb.create_vector(&dir_entries)
         };
 
+        let fb_version = fbb.create_string(self.version.as_ref());
         let volume = fb::Volume::create(
             &mut fbb,
             &fb::VolumeArgs {
-                version: self.version,
+                version: Some(fb_version),
                 locations: Some(locations),
                 entries: Some(entries),
             },
@@ -744,8 +818,8 @@ impl VolumeMetadata {
         let locations: Vec<_> = fb_volume.locations().iter().map(from_fb_location).collect();
 
         let mut max_ino = Ino::min_regular();
-        let mut volume = Self::empty();
-        volume.version = fb_volume.version();
+        let version = Version::from_str(fb_volume.version())?;
+        let mut volume = Self::new(version);
 
         // set the locations
         volume.locations = locations;

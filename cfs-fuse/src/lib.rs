@@ -1,12 +1,12 @@
 mod fuse;
 
 use bytesize::ByteSize;
-use cfs_core::{Client, Ino};
+use cfs_core::{Client, Ino, Version};
 use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
-use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::fuse::Cfs;
 
@@ -26,7 +26,7 @@ pub enum Cmd {
         /// The version of the volume. Defaults to the latest version of the
         /// volume.
         #[clap(long)]
-        version: Option<NonZeroU64>,
+        version: Option<String>,
     },
 
     /// *Experimental* - Pack a local directory into a CFS volume.
@@ -39,8 +39,7 @@ pub enum Cmd {
 
         /// The version of the volume. Defaults to version 1, assuming this is a
         /// new volume.
-        #[clap(long)]
-        version: Option<NonZeroU64>,
+        version: String,
     },
 
     /// List all versions in the volume.
@@ -69,7 +68,7 @@ pub struct MountArgs {
     /// Specific version of the volume to mount. Defaults to the latest version
     /// of the volume.
     #[clap(long)]
-    pub version: Option<NonZeroU64>,
+    pub version: Option<String>,
 
     #[command(flatten)]
     pub read_behavior: ReadBehaviorArgs,
@@ -94,7 +93,7 @@ pub struct ReadBehaviorArgs {
 pub fn dump(
     runtime: tokio::runtime::Runtime,
     volume: String,
-    version: Option<NonZeroU64>,
+    version: Option<String>,
 ) -> anyhow::Result<()> {
     fn location_path(l: &Location) -> String {
         match l {
@@ -103,8 +102,9 @@ pub fn dump(
         }
     }
 
+    let version = version.map(|v| v.parse()).transpose()?;
     let client = Client::new(volume)?;
-    let volume = runtime.block_on(client.load_volume(version.map(|v| v.get())))?;
+    let volume = runtime.block_on(client.load_volume(&version))?;
     let metadata = volume.metadata();
 
     for (name, path, attrs) in metadata.walk(Ino::Root).unwrap() {
@@ -147,12 +147,16 @@ pub fn pack(
     runtime: tokio::runtime::Runtime,
     dir: impl AsRef<Path>,
     to: impl AsRef<str>,
-    version: Option<NonZeroU64>,
+    version: impl AsRef<str>,
 ) -> anyhow::Result<()> {
     let client = Client::new(to.as_ref())?;
     // default to version 1
-    let version = version.map(|v| v.get()).unwrap_or(1);
-    let mut volume = runtime.block_on(client.create_volume(version))?;
+    let version = Version::from_str(version.as_ref())?;
+
+    if runtime.block_on(client.exists(&version))? {
+        anyhow::bail!("version {version} already exists");
+    }
+    let mut volume = runtime.block_on(client.create_volume())?;
     let metadata = volume.metadata_mut();
 
     // walk the entire tree in dfs order. make sure directories are sorted by
@@ -208,7 +212,7 @@ pub fn pack(
         }
     }
 
-    runtime.block_on(volume.commit())?;
+    runtime.block_on(volume.commit(version))?;
 
     Ok(())
 }
@@ -223,13 +227,14 @@ pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<
 }
 
 pub fn mount(runtime: tokio::runtime::Runtime, args: MountArgs) -> anyhow::Result<()> {
+    let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
     let client = Client::new(args.volume)?;
     let volume = runtime.block_on(
         client
             .with_cache_size(args.read_behavior.chunk_size.as_u64())
             .with_chunk_size(args.read_behavior.chunk_size.as_u64())
             .with_readahead(args.read_behavior.readahead_size.as_u64())
-            .load_volume(args.version.map(|v| v.get())),
+            .load_volume(&version),
     )?;
 
     let mut session = mount_volume(

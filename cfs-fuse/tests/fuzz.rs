@@ -6,7 +6,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use cfs_core::{Client, Volume};
+use cfs_core::{Client, Version, Volume};
 use cfs_fuse::pack;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
@@ -34,12 +34,22 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     reset_dir(expected_dir);
     reset_dir(actual_dir);
 
-    let reference_res: Vec<_> = ops.iter().map(|op| apply_op(expected_dir, op)).collect();
     let client = Client::new("memory://").unwrap();
-    let volume = test_runtime().block_on(client.create_volume(123)).unwrap();
+    let volume = test_runtime().block_on(client.create_volume()).unwrap();
     let _mount = spawn_mount(actual_dir, volume);
 
-    let test_res: Vec<_> = ops.iter().map(|op| apply_op(actual_dir, op)).collect();
+    // apply but ignore errors when trying to commit with the same
+    // version twice. they should be no-ops - we know they're different
+    // in the reference fs and we don't care.
+    let apply = |dir: &Path, op: &FuzzOp| {
+        let res = apply_op(dir, op);
+        match (op, res) {
+            (FuzzOp::Commit(_), Err(ErrorKind::AlreadyExists)) => Ok(OpOutput::None),
+            (_, res) => res,
+        }
+    };
+    let reference_res: Vec<_> = ops.iter().map(|op| apply(expected_dir, op)).collect();
+    let test_res: Vec<_> = ops.iter().map(|op| apply(actual_dir, op)).collect();
 
     // print our own error history so it's easy to spot when things don't match.
     if reference_res != test_res {
@@ -113,13 +123,13 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
         test_runtime(),
         expected_dir,
         format!("file://{}", pack_dir.display()),
-        None,
+        "123",
     )
     .unwrap();
 
     // mount the new dir as filesystem
     let client = Client::new(pack_dir.to_str().unwrap()).unwrap();
-    let volume = test_runtime().block_on(client.load_volume(None)).unwrap();
+    let volume = test_runtime().block_on(client.load_volume(&None)).unwrap();
     let _mount = spawn_mount(actual_dir, volume);
 
     // walk both directories and see if we have the same files and directories
@@ -179,8 +189,7 @@ fn test_commit(
 
     // create an empty volume and write a bunch of files and directories to it.
     // write the same entries to a local filesystem as a reference.
-    let volume = test_runtime().block_on(client.create_volume(123)).unwrap();
-    let first_version = volume.metadata().version();
+    let volume = test_runtime().block_on(client.create_volume()).unwrap();
 
     let mount = spawn_mount(mount_dir, volume);
     for entry in &pre_commit_entries {
@@ -190,7 +199,7 @@ fn test_commit(
     let before_commit = read_entries(mount_dir);
 
     // commit
-    apply_op(mount_dir, &FuzzOp::Commit).unwrap();
+    apply_op(mount_dir, &FuzzOp::Commit("v1".to_string())).unwrap();
 
     // write a whole bunch of stuff to the mount, then drop it without
     // committing. we should lose all of this.
@@ -202,8 +211,8 @@ fn test_commit(
     // reload the volume at the lastest version and assert that
     // we have all the data from before the commit and nothing
     // from after it.
-    let volume = test_runtime().block_on(client.load_volume(None)).unwrap();
-    assert_eq!(volume.metadata().version(), first_version + 1);
+    let volume = test_runtime().block_on(client.load_volume(&None)).unwrap();
+    assert_eq!(volume.metadata().version(), &Version::from_static("v1"));
 
     let mount = spawn_mount(mount_dir, volume);
     let expected = read_entries(expected_dir);
@@ -455,7 +464,7 @@ enum FuzzOp {
     Read(ArbPath),
     Write(ArbPath, String),
     Remove(ArbPath),
-    Commit,
+    Commit(String),
 }
 
 impl std::fmt::Display for FuzzOp {
@@ -467,7 +476,7 @@ impl std::fmt::Display for FuzzOp {
             FuzzOp::Read(path) => write!(f, "read   {path}"),
             FuzzOp::Write(path, data) => write!(f, "write  {path}, {data:#?}"),
             FuzzOp::Remove(path) => write!(f, "remove {path}"),
-            FuzzOp::Commit => write!(f, "commit"),
+            FuzzOp::Commit(version) => write!(f, "commit version={version:#?}"),
         }
     }
 }
@@ -520,10 +529,10 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
             tri!(std::fs::remove_file(path));
             Ok(OpOutput::None)
         }
-        FuzzOp::Commit => {
+        FuzzOp::Commit(version) => {
             let path = root.join(".commit");
             if root.join(".commit").exists() {
-                tri!(std::fs::write(path, "1"));
+                tri!(std::fs::write(path, version));
             }
             Ok(OpOutput::None)
         }

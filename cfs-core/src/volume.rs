@@ -2,7 +2,7 @@ use crate::{
     ByteRange, Error, FileAttr, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
-    metadata::{Modify, VolumeMetadata},
+    metadata::{Modify, Version, VolumeMetadata},
 };
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutOptions, PutPayload};
@@ -49,14 +49,13 @@ enum FileDescriptor {
     Staged {
         file: tokio::fs::File,
     },
-    Static(std::io::Cursor<Arc<[u8]>>),
+    Version,
     Commit,
     ClearCache,
 }
 
 pub struct Volume {
     meta: VolumeMetadata,
-    version_bytes: Arc<[u8]>,
     cache: Arc<ChunkCache>,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
@@ -68,12 +67,8 @@ impl Volume {
         cache: Arc<ChunkCache>,
         store: crate::storage::Storage,
     ) -> Self {
-        let version_bytes =
-            std::sync::Arc::from(format!("{:#x}", meta.version()).into_bytes().as_slice());
-
         Self {
             meta,
-            version_bytes,
             cache,
             fds: Default::default(),
             store,
@@ -90,12 +85,6 @@ impl Volume {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.meta.to_bytes()
-    }
-
-    fn increment_version(&mut self) -> &[u8] {
-        let v = self.meta.increment_version();
-        self.version_bytes = Arc::new(v.to_le_bytes());
-        &self.version_bytes
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
@@ -233,11 +222,7 @@ impl Volume {
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => {
-                let fd = new_fd(
-                    &mut self.fds,
-                    ino,
-                    FileDescriptor::Static(std::io::Cursor::new(self.version_bytes.clone())),
-                );
+                let fd = new_fd(&mut self.fds, ino, FileDescriptor::Version);
                 Ok(fd)
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
@@ -265,12 +250,7 @@ impl Volume {
         match self.fds.get_mut(&fd) {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
-            // static bytes just use their cursor
-            Some(FileDescriptor::Static(cursor)) => Ok({
-                read_at(cursor, offset, buf)
-                    .await
-                    .expect("BUG: invalid read from metadata")
-            }),
+            Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
             Some(FileDescriptor::Committed { key, range }) => {
                 // FIXME: readahead needs to know the extent of the location -
                 // the range here only includes the extent of THIS file in the
@@ -299,8 +279,26 @@ impl Volume {
                 Ok(data.len())
             }
             Some(FileDescriptor::Commit) => {
-                self.commit().await?;
-                Ok(data.len())
+                // only let writes happen at offset zero. man write(2) says
+                // EINVAL is ok if "the file offset is not suitably aligned".
+                if offset != 0 {
+                    return Err(ErrorKind::InvalidData.into());
+                }
+
+                // for writing to the magic fd - and only for writing to the
+                // magic fd - we trim trailing ascii whitespace so that using
+                // `echo` or `cat` to commit doesn't leave you with garbage
+                // versions.
+                //
+                // even though we're trimming the bytes here, save the original
+                // input length so that the caller doesn't try to write the
+                // trailing space again.
+                let data_len = data.len();
+                let data = data.trim_ascii_end();
+
+                let version = Version::from_bytes(data)?;
+                self.commit(version).await?;
+                Ok(data_len)
             }
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
@@ -324,14 +322,28 @@ impl Volume {
         }
     }
 
-    pub async fn commit(&mut self) -> Result<()> {
+    pub async fn commit(&mut self, version: Version) -> Result<()> {
         let mut staged = StagedVolume { inner: self };
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
-        staged.persist().await?;
+        staged.persist(version).await?;
 
         Ok(())
     }
+}
+
+fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    let version: &[u8] = version.as_ref();
+    let offset: usize = offset.try_into().map_err(|_| ErrorKind::InvalidData)?;
+
+    if offset > version.len() {
+        return Err(ErrorKind::InvalidData.into());
+    }
+
+    let version = &version[offset..];
+    let amt = std::cmp::min(version.len(), buf.len());
+    buf[..amt].copy_from_slice(&version[..amt]);
+    Ok(amt)
 }
 
 async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
@@ -444,9 +456,9 @@ impl StagedVolume<'_> {
     }
 
     /// Mint and upload a new version of Volume.
-    async fn persist(self) -> Result<()> {
-        self.inner.increment_version();
-        let version = self.inner.meta.version();
+    async fn persist(self, version: Version) -> Result<()> {
+        let meta_path = self.inner.store.metadata(&version);
+        self.inner.meta.set_version(version);
 
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
         let res = self
@@ -454,7 +466,7 @@ impl StagedVolume<'_> {
             .store
             .remote
             .put_opts(
-                &self.inner.store.metadata(version),
+                &meta_path,
                 PutPayload::from_bytes(new_volume),
                 PutOptions {
                     mode: object_store::PutMode::Create,
@@ -559,8 +571,7 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let client = Client::new(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume(123).await.unwrap();
-        let version = volume.meta.version();
+        let mut volume = client.create_volume().await.unwrap();
 
         // clean volume -- this is not staged
         assert!(!volume.meta.is_staged());
@@ -583,7 +594,7 @@ mod tests {
 
         // commit!!!
         let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
-        assert_write(&mut volume, commit_fd, "1").await;
+        assert_write(&mut volume, commit_fd, "next-version").await;
 
         // after commit, both files are no longer staged
         assert!(!volume.meta.is_staged());
@@ -596,8 +607,9 @@ mod tests {
 
         // read the new volume, assert that the committed files have the
         // right contents, and check the version is bumped as expected
-        let mut next_volume = client.load_volume(None).await.unwrap();
-        assert_eq!(next_volume.meta.version(), version + 1);
+        let mut next_volume = client.load_volume(&None).await.unwrap();
+        let next_version: &str = next_volume.meta.version().as_ref();
+        assert_eq!(next_version, "next-version",);
         assert_read(&mut next_volume, "hello.txt", "hello").await;
         assert_read(&mut next_volume, "world.txt", "world").await;
     }

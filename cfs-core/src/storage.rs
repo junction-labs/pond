@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
 
-use crate::{Error, ErrorKind, Result, VolumeMetadata};
+use crate::{Error, ErrorKind, Result, VolumeMetadata, metadata::Version};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Storage {
@@ -119,7 +119,7 @@ impl Storage {
         Ok((path.to_path_buf(), tokio::fs::File::from_std(f)))
     }
 
-    pub(crate) async fn list_versions(&self) -> Result<Vec<u64>> {
+    pub(crate) async fn list_versions(&self) -> Result<Vec<Version>> {
         let res = self
             .remote
             .list_with_delimiter(self.base_path.as_ref())
@@ -149,16 +149,16 @@ impl Storage {
         Ok(versions)
     }
 
-    pub(crate) async fn latest_version(&self) -> Result<u64> {
+    pub(crate) async fn latest_version(&self) -> Result<Version> {
         let versions = self.list_versions().await?;
         let version = versions
-            .iter()
+            .into_iter()
             .max()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "not a cfs volume"))?;
-        Ok(*version)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "no metadata found"))?;
+        Ok(version)
     }
 
-    pub(crate) async fn load_version(&self, version: u64) -> Result<VolumeMetadata> {
+    pub(crate) async fn load_version(&self, version: &Version) -> Result<VolumeMetadata> {
         let path = self.metadata(version);
         let get = self.remote.get(&path).and_then(|res| res.bytes());
         let bytes = get.await.map_err(|e| {
@@ -190,8 +190,8 @@ impl Storage {
         }
     }
 
-    pub(crate) fn metadata(&self, version: u64) -> object_store::path::Path {
-        let part = format!("{version:016}.volume");
+    pub(crate) fn metadata(&self, version: &Version) -> object_store::path::Path {
+        let part = format!("{version}.volume");
         match &self.base_path {
             Some(p) => p.child(part),
             None => object_store::path::Path::from(part),

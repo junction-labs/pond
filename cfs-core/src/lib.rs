@@ -9,7 +9,7 @@ mod volume;
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
-pub use metadata::{Modify, VolumeMetadata};
+pub use metadata::{Modify, Version, VolumeMetadata};
 pub use volume::{Fd, Volume};
 
 use std::time::SystemTime;

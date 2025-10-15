@@ -37,9 +37,8 @@ table Entry {
     location_ref: LocationRef;
 }
 
-
 table Volume {
-    version: uint64;
+    version: string (required);
     locations: [Location] (required);
     entries: [Entry] (required);
 }

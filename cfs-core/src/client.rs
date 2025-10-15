@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    Error, ErrorKind, Result, Volume, VolumeMetadata,
+    Result, Volume, VolumeMetadata,
     cache::{ChunkCache, ReadAheadPolicy},
+    metadata::Version,
 };
 
 pub struct Client {
@@ -42,14 +43,18 @@ impl Client {
         self
     }
 
-    pub async fn list_versions(&self) -> Result<Vec<u64>> {
+    pub async fn list_versions(&self) -> Result<Vec<Version>> {
         self.store.list_versions().await
     }
 
-    pub async fn load_volume(&self, version: Option<u64>) -> Result<Volume> {
+    pub async fn exists(&self, version: &Version) -> Result<bool> {
+        self.store.exists(&self.store.metadata(version)).await
+    }
+
+    pub async fn load_volume(&self, version: &Option<Version>) -> Result<Volume> {
         let version = match version {
             Some(version) => version,
-            None => self.store.latest_version().await?,
+            None => &self.store.latest_version().await?,
         };
         let metadata = self.store.load_version(version).await?;
         let cache = Arc::new(ChunkCache::new(
@@ -64,15 +69,8 @@ impl Client {
         Ok(Volume::new(metadata, cache, self.store.clone()))
     }
 
-    pub async fn create_volume(&self, version: u64) -> Result<Volume> {
-        let meta_path = self.store.metadata(version);
-        if self.store.exists(&meta_path).await? {
-            return Err(Error::new(
-                ErrorKind::AlreadyExists,
-                format!("version already exists: {version}"),
-            ));
-        }
-
+    /// Create an empty volume
+    pub async fn create_volume(&self) -> Result<Volume> {
         let metadata = VolumeMetadata::empty();
         let cache = Arc::new(ChunkCache::new(
             self.cache_size,
