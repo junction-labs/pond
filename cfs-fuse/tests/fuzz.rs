@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -29,14 +30,14 @@ fn fuzz_empty_volume() {
 
         let ops: Vec<FuzzOp> = arbitrary_vec(u)?;
 
-        let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
+        let reference_res: Vec<_> = ops.iter().map(|op| apply_op(&expected_dir, op)).collect();
 
         let volume = test_runtime()
             .block_on(Volume::builder("memory://").unwrap().create(123))
             .unwrap();
         let _mount = spawn_mount(&actual_dir, volume);
 
-        let test_res: Vec<_> = ops.iter().map(|op| apply(&actual_dir, op)).collect();
+        let test_res: Vec<_> = ops.iter().map(|op| apply_op(&actual_dir, op)).collect();
 
         // print our own error history so it's easy to spot when things don't match.
         if reference_res != test_res {
@@ -125,112 +126,91 @@ fn fuzz_pack() {
 #[test]
 fn fuzz_commit() {
     let fuzz_dir = project_root().join("target/cfs/integration/fuzz_commit");
-    let pack_dir = fuzz_dir.join("volume");
     let expected_dir = fuzz_dir.join("expected");
-    let actual_dir = fuzz_dir.join("actual");
+    let mount_dir = fuzz_dir.join("mount");
+    let volume_dir = fuzz_dir.join("volume");
     std::fs::create_dir_all(&fuzz_dir).unwrap();
 
     arbtest(|u| {
         // for every run, remove everything in the test dirs and recreate them
         // as empty.
         reset_dir(&expected_dir);
-        reset_dir(&actual_dir);
-        reset_dir(&pack_dir);
+        reset_dir(&mount_dir);
+        reset_dir(&volume_dir);
 
-        let ops: Vec<FuzzOp> = arbitrary_vec(u)?;
-
-        let reference_res: Vec<_> = ops.iter().map(|op| apply(&expected_dir, op)).collect();
-
+        // create an empty volume and write a bunch of files and directories to it.
+        // write the same entries to a local filesystem as a reference.
         let volume = test_runtime()
             .block_on(
-                Volume::builder(pack_dir.to_str().unwrap())
+                Volume::builder(volume_dir.to_str().unwrap())
                     .unwrap()
                     .create(123),
             )
             .unwrap();
-        let mount = spawn_mount(&actual_dir, volume);
-        let test_res: Vec<_> = ops.iter().map(|op| apply(&actual_dir, op)).collect();
+        let first_version = volume.metadata().version();
 
-        // we're only testing commit here, so don't spit out any complicated comparison output.
-        // fuzz_empty does that.
-        assert_eq!(reference_res, test_res, "pre-commit results differ");
+        let mount = spawn_mount(&mount_dir, volume);
+        let pre_commit_entries: Vec<FuzzEntry> = arbitrary_vec(u)?;
+        for entry in &pre_commit_entries {
+            apply_entry(&expected_dir, entry).unwrap();
+            apply_entry(&mount_dir, entry).unwrap();
+        }
 
-        // now do a bunch of FuzzOps but don't call commit before packing it. when we unpack it, we
-        // shouldn't see any of the uncommitted stuff.
-        let after_commit: Vec<FuzzOp> = arbitrary_vec(u)?;
-        let after_commit: Vec<FuzzOp> = after_commit
-            .into_iter()
-            .filter(|op| !matches!(op, FuzzOp::Commit))
-            .collect();
-        after_commit.iter().for_each(|op| {
-            let _ = apply(&expected_dir, op);
-        });
+        // commit
+        apply_op(&mount_dir, &FuzzOp::Commit).unwrap();
 
-        // pack it to the pack_dir, which shouldn't include the uncommitted stuff.
-        pack(
-            test_runtime(),
-            &expected_dir,
-            format!("file://{}", pack_dir.display()),
-            None,
-        )
-        .unwrap();
+        // write a whole bunch of stuff to the mount, then drop it without
+        // committing. we should lose all of this.
+        let lost_entries: Vec<FuzzEntry> = arbitrary_vec(u)?;
+        for entry in &lost_entries {
+            apply_entry(&mount_dir, entry).unwrap();
+        }
+        std::mem::drop(mount);
 
-        // remount the packed volume
-        drop(mount);
-
+        // reload the volume at the lastest version and assert that
+        // we have all the data from before the commit and nothing
+        // from after it.
         let volume = test_runtime()
             .block_on(
-                Volume::builder(pack_dir.to_str().unwrap())
+                Volume::builder(volume_dir.to_str().unwrap())
                     .unwrap()
                     .load(None),
             )
             .unwrap();
-        let _mount = spawn_mount(&actual_dir, volume);
+        assert_eq!(volume.metadata().version(), first_version + 1);
 
-        // walk both directories and see if we have the same files and directories
-        let mut expected = read_entries(&expected_dir);
-        let mut actual = read_entries(&actual_dir);
-        expected.sort();
-        actual.sort();
+        let mount = spawn_mount(&mount_dir, volume);
+        let expected = read_entries(&expected_dir);
+        let actual = read_entries(&mount_dir);
 
         if expected != actual {
-            let mut expected_iter = expected.iter().peekable();
-            let mut actual_iter = actual.iter().peekable();
+            let lost_entries = to_entry_map(lost_entries);
+            let expected = to_entry_map(expected);
+            let actual = to_entry_map(actual);
 
-            eprintln!("FuzzOps executed after commit but before packing: {after_commit:?}");
-            eprintln!("differences");
-            while expected_iter.peek().is_some() || actual_iter.peek().is_some() {
-                match (expected_iter.peek(), actual_iter.peek()) {
-                    (Some(&expected_entry), Some(&actual_entry)) => {
-                        match expected_entry.cmp(actual_entry) {
-                            std::cmp::Ordering::Less => {
-                                eprintln!("-  {expected_entry:?}");
-                                expected_iter.next();
-                            }
-                            std::cmp::Ordering::Greater => {
-                                eprintln!("+  {actual_entry:?}");
-                                actual_iter.next();
-                            }
-                            std::cmp::Ordering::Equal => {
-                                expected_iter.next();
-                                actual_iter.next();
-                            }
-                        }
-                    }
-                    (Some(_), None) => {
-                        expected_iter.next();
-                    }
-                    (None, Some(_)) => {
-                        actual_iter.next();
-                    }
-                    (None, None) => break,
+            for entry in pre_commit_entries {
+                let path = entry.dir();
+
+                let actual = actual.get(path);
+                let expected = expected.get(path);
+                let lost = lost_entries.get(path);
+
+                eprint!("{entry}");
+                if actual != expected {
+                    eprint!(" --> actual={actual:?} expected={expected:?} lost={lost:?} <--");
                 }
+                eprintln!()
             }
-            assert_eq!(expected, actual, "pack entries differ");
+            assert_eq!(expected, actual, "entries differ");
         }
 
+        std::mem::drop(mount);
         Ok(())
     });
+}
+
+fn to_entry_map(v: Vec<FuzzEntry>) -> BTreeMap<PathBuf, FuzzEntry> {
+    v.into_iter().map(|e| (e.dir().to_path_buf(), e)).collect()
 }
 
 fn reset_dir(p: impl AsRef<Path>) {
@@ -348,6 +328,15 @@ enum FuzzEntry {
     File(ArbPath, String),
 }
 
+impl std::fmt::Display for FuzzEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FuzzEntry::Dir(path) => write!(f, "mkdir {path}"),
+            FuzzEntry::File(path, data) => write!(f, "write  {path}, {data:#?}"),
+        }
+    }
+}
+
 impl FuzzEntry {
     fn dir(&self) -> &Path {
         match self {
@@ -392,6 +381,32 @@ fn read_entries(root: impl AsRef<Path>) -> Vec<FuzzEntry> {
     entries
 }
 
+fn apply_entry(root: impl AsRef<Path>, entry: &FuzzEntry) -> std::io::Result<()> {
+    let root = root.as_ref();
+    match entry {
+        FuzzEntry::Dir(path) => {
+            let path = root.join(path);
+            create_dir_all(path, [ErrorKind::AlreadyExists, ErrorKind::NotADirectory])
+        }
+        FuzzEntry::File(path, content) => {
+            let path = root.join(path);
+            let parent = path
+                .parent()
+                .expect("BUG: generated a fuzz entry with no parent");
+
+            // allow errors this time, just bail when we see them
+            if create_dir_all(parent, []).is_err() {
+                return Ok(());
+            }
+            match std::fs::write(path, content) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == ErrorKind::IsADirectory => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzOp {
     Mkdir(ArbPath),
@@ -428,7 +443,7 @@ macro_rules! tri {
     };
 }
 
-fn apply(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::ErrorKind> {
+fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::ErrorKind> {
     let root = root.as_ref();
 
     match op {
