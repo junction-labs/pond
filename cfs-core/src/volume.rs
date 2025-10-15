@@ -1,6 +1,6 @@
 use crate::{
     ByteRange, Error, FileAttr, Ino, Location, Result,
-    cache::{ChunkCache, ReadAheadPolicy},
+    cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, VolumeMetadata},
 };
@@ -54,118 +54,32 @@ enum FileDescriptor {
     ClearCache,
 }
 
-pub struct VolumeBuilder {
-    store: crate::storage::Storage,
-    cache_size: u64,
-    chunk_size: u64,
-    readahead: u64,
-}
-
-impl VolumeBuilder {
-    pub fn with_cache_size(mut self, size: u64) -> Self {
-        self.chunk_size = size;
-        self
-    }
-
-    pub fn with_chunk_size(mut self, size: u64) -> Self {
-        self.chunk_size = size;
-        self
-    }
-
-    pub fn with_readahead(mut self, size: u64) -> Self {
-        self.readahead = size;
-        self
-    }
-
-    pub async fn list_versions(&self) -> Result<Vec<u64>> {
-        self.store.list_versions().await
-    }
-
-    pub async fn load(self, version: Option<u64>) -> Result<Volume> {
-        let version = match version {
-            Some(version) => version,
-            None => self.store.latest_version().await?,
-        };
-        let metadata = self.store.load_version(version).await?;
-        let cache = Arc::new(ChunkCache::new(
-            self.cache_size,
-            self.chunk_size,
-            self.store.clone(),
-            ReadAheadPolicy {
-                size: self.readahead,
-            },
-        ));
-
-        let volume_version =
-            std::sync::Arc::from(format!("{:#x}", metadata.version()).into_bytes().as_slice());
-
-        Ok(Volume {
-            meta: metadata,
-            version_bytes: volume_version,
-            cache,
-            fds: Default::default(),
-            store: self.store,
-        })
-    }
-
-    pub async fn create(self, version: u64) -> Result<Volume> {
-        let meta_path = self.store.metadata(version);
-        if self.store.exists(&meta_path).await? {
-            return Err(Error::new(
-                ErrorKind::AlreadyExists,
-                format!("version already exists: {version}"),
-            ));
-        }
-
-        let metadata = VolumeMetadata::empty();
-        let cache = Arc::new(ChunkCache::new(
-            self.cache_size,
-            self.chunk_size,
-            self.store.clone(),
-            ReadAheadPolicy {
-                size: self.readahead,
-            },
-        ));
-
-        let volume_version =
-            std::sync::Arc::from(format!("{:#x}", metadata.version()).into_bytes().as_slice());
-
-        Ok(Volume {
-            meta: metadata,
-            version_bytes: volume_version,
-            cache,
-            fds: Default::default(),
-            store: self.store,
-        })
-    }
-}
-
 pub struct Volume {
     meta: VolumeMetadata,
     version_bytes: Arc<[u8]>,
-
     cache: Arc<ChunkCache>,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
 }
 
 impl Volume {
-    pub fn builder(location: impl AsRef<str>) -> Result<VolumeBuilder> {
-        let store = crate::storage::Storage::for_volume(location.as_ref())?;
+    pub(crate) fn new(
+        meta: VolumeMetadata,
+        cache: Arc<ChunkCache>,
+        store: crate::storage::Storage,
+    ) -> Self {
+        let version_bytes =
+            std::sync::Arc::from(format!("{:#x}", meta.version()).into_bytes().as_slice());
 
-        Ok(VolumeBuilder {
+        Self {
+            meta,
+            version_bytes,
+            cache,
+            fds: Default::default(),
             store,
-            // 256 MiB
-            cache_size: 256 * 1024 * 1024,
-            // 16 MiB
-            chunk_size: 16 * 1024 * 1024,
-            // 64 MiB
-            readahead: 32 * 1024 * 1024,
-        })
+        }
     }
-}
 
-impl Volume {
     pub fn metadata(&self) -> &VolumeMetadata {
         &self.meta
     }
@@ -583,6 +497,8 @@ async fn read_file_bytes(path: impl AsRef<std::path::Path>, limit: u64) -> std::
 
 #[cfg(test)]
 mod tests {
+    use crate::Client;
+
     use super::*;
     #[test]
     fn test_copy_into() {
@@ -639,11 +555,8 @@ mod tests {
         let volume_path = tempdir.path().join("store");
         std::fs::create_dir_all(&volume_path).unwrap();
 
-        let mut volume = Volume::builder(volume_path.to_str().unwrap())
-            .unwrap()
-            .create(123)
-            .await
-            .unwrap();
+        let client = Client::new(volume_path.to_str().unwrap()).unwrap();
+        let mut volume = client.create_volume(123).await.unwrap();
         let version = volume.meta.version();
 
         // clean volume -- this is not staged
@@ -680,11 +593,7 @@ mod tests {
 
         // read the new volume, assert that the committed files have the
         // right contents, and check the version is bumped as expected
-        let mut next_volume = Volume::builder(volume_path.to_str().unwrap())
-            .unwrap()
-            .load(None)
-            .await
-            .unwrap();
+        let mut next_volume = client.load_volume(None).await.unwrap();
         assert_eq!(next_volume.meta.version(), version + 1);
         assert_read(&mut next_volume, "hello.txt", "hello").await;
         assert_read(&mut next_volume, "world.txt", "world").await;

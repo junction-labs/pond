@@ -18,7 +18,7 @@ impl Storage {
     ///
     /// S3 scheme urls will use environment based credentials where possible and fall back to their
     /// default configurations.
-    pub(crate) fn for_volume(s: &str) -> Result<Self> {
+    pub(crate) fn for_location(s: &str) -> Result<Self> {
         match Url::parse(s) {
             Ok(url) => match url.scheme() {
                 "memory" => Ok(Self::new_in_memory()),

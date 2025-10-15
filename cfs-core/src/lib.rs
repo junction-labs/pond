@@ -1,10 +1,12 @@
 mod cache;
+mod client;
 mod error;
 mod location;
 mod metadata;
 mod storage;
 mod volume;
 
+pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
 pub use metadata::{Modify, VolumeMetadata};

@@ -6,7 +6,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use cfs_core::Volume;
+use cfs_core::{Client, Volume};
 use cfs_fuse::pack;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
@@ -35,9 +35,8 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     reset_dir(actual_dir);
 
     let reference_res: Vec<_> = ops.iter().map(|op| apply_op(expected_dir, op)).collect();
-    let volume = test_runtime()
-        .block_on(Volume::builder("memory://").unwrap().create(123))
-        .unwrap();
+    let client = Client::new("memory://").unwrap();
+    let volume = test_runtime().block_on(client.create_volume(123)).unwrap();
     let _mount = spawn_mount(actual_dir, volume);
 
     let test_res: Vec<_> = ops.iter().map(|op| apply_op(actual_dir, op)).collect();
@@ -119,13 +118,8 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     .unwrap();
 
     // mount the new dir as filesystem
-    let volume = test_runtime()
-        .block_on(
-            Volume::builder(pack_dir.to_str().unwrap())
-                .unwrap()
-                .load(None),
-        )
-        .unwrap();
+    let client = Client::new(pack_dir.to_str().unwrap()).unwrap();
+    let volume = test_runtime().block_on(client.load_volume(None)).unwrap();
     let _mount = spawn_mount(actual_dir, volume);
 
     // walk both directories and see if we have the same files and directories
@@ -181,15 +175,11 @@ fn test_commit(
     reset_dir(mount_dir);
     reset_dir(volume_dir);
 
+    let client = Client::new(volume_dir.to_str().unwrap()).unwrap();
+
     // create an empty volume and write a bunch of files and directories to it.
     // write the same entries to a local filesystem as a reference.
-    let volume = test_runtime()
-        .block_on(
-            Volume::builder(volume_dir.to_str().unwrap())
-                .unwrap()
-                .create(123),
-        )
-        .unwrap();
+    let volume = test_runtime().block_on(client.create_volume(123)).unwrap();
     let first_version = volume.metadata().version();
 
     let mount = spawn_mount(mount_dir, volume);
@@ -212,14 +202,7 @@ fn test_commit(
     // reload the volume at the lastest version and assert that
     // we have all the data from before the commit and nothing
     // from after it.
-    let volume = test_runtime()
-        .block_on(
-            Volume::builder(volume_dir.to_str().unwrap())
-                .unwrap()
-                .load(None),
-        )
-        .unwrap();
-
+    let volume = test_runtime().block_on(client.load_volume(None)).unwrap();
     assert_eq!(volume.metadata().version(), first_version + 1);
 
     let mount = spawn_mount(mount_dir, volume);

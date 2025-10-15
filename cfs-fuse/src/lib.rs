@@ -1,7 +1,7 @@
 mod fuse;
 
 use bytesize::ByteSize;
-use cfs_core::Ino;
+use cfs_core::{Client, Ino};
 use cfs_core::{Location, Volume};
 use clap::{Parser, Subcommand, value_parser};
 use std::num::NonZeroU64;
@@ -103,7 +103,8 @@ pub fn dump(
         }
     }
 
-    let volume = runtime.block_on(Volume::builder(volume)?.load(version.map(|v| v.get())))?;
+    let client = Client::new(volume)?;
+    let volume = runtime.block_on(client.load_volume(version.map(|v| v.get())))?;
     let metadata = volume.metadata();
 
     for (name, path, attrs) in metadata.walk(Ino::Root).unwrap() {
@@ -148,10 +149,10 @@ pub fn pack(
     to: impl AsRef<str>,
     version: Option<NonZeroU64>,
 ) -> anyhow::Result<()> {
+    let client = Client::new(to.as_ref())?;
     // default to version 1
     let version = version.map(|v| v.get()).unwrap_or(1);
-
-    let mut volume = runtime.block_on(Volume::builder(to.as_ref())?.create(version))?;
+    let mut volume = runtime.block_on(client.create_volume(version))?;
     let metadata = volume.metadata_mut();
 
     // walk the entire tree in dfs order. make sure directories are sorted by
@@ -213,8 +214,8 @@ pub fn pack(
 }
 
 pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
-    let volumes = Volume::builder(&volume)?;
-    let versions = runtime.block_on(volumes.list_versions())?;
+    let client = Client::new(volume)?;
+    let versions = runtime.block_on(client.list_versions())?;
     for version in versions {
         println!("{version}");
     }
@@ -222,12 +223,13 @@ pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<
 }
 
 pub fn mount(runtime: tokio::runtime::Runtime, args: MountArgs) -> anyhow::Result<()> {
+    let client = Client::new(args.volume)?;
     let volume = runtime.block_on(
-        Volume::builder(&args.volume)?
+        client
             .with_cache_size(args.read_behavior.chunk_size.as_u64())
             .with_chunk_size(args.read_behavior.chunk_size.as_u64())
             .with_readahead(args.read_behavior.readahead_size.as_u64())
-            .load(args.version.map(|v| v.get())),
+            .load_volume(args.version.map(|v| v.get())),
     )?;
 
     let mut session = mount_volume(
