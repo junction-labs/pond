@@ -7,13 +7,13 @@ use url::Url;
 use crate::{Error, ErrorKind, Result, VolumeMetadata};
 
 #[derive(Debug, Clone)]
-pub struct RemoteStore {
+pub struct Storage {
     pub temp_dir: Arc<TempDir>,
     pub base_path: Option<object_store::path::Path>,
-    pub client: Arc<dyn ObjectStore>,
+    pub remote: Arc<dyn ObjectStore>,
 }
 
-impl RemoteStore {
+impl Storage {
     /// Create an object_store::Client for a string.
     ///
     /// S3 scheme urls will use environment based credentials where possible and fall back to their
@@ -55,10 +55,10 @@ impl RemoteStore {
         let client = object_store::memory::InMemory::new();
         let temp_dir = tempfile::Builder::new().prefix(".cfs").tempdir().unwrap();
 
-        RemoteStore {
+        Storage {
             base_path: None,
             temp_dir: Arc::new(temp_dir),
-            client: Arc::new(client),
+            remote: Arc::new(client),
         }
     }
 
@@ -81,10 +81,10 @@ impl RemoteStore {
                 Error::new_context(ErrorKind::Other, "failed to build object store client", e)
             })?;
 
-        Ok(RemoteStore {
+        Ok(Storage {
             base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),
-            client: Arc::new(s3),
+            remote: Arc::new(s3),
         })
     }
 
@@ -100,15 +100,15 @@ impl RemoteStore {
 
         let client = LocalFileSystem::new_with_prefix(base_path).unwrap();
 
-        Ok(RemoteStore {
+        Ok(Storage {
             base_path: None,
             temp_dir: Arc::new(temp_dir),
-            client: Arc::new(client),
+            remote: Arc::new(client),
         })
     }
 }
 
-impl RemoteStore {
+impl Storage {
     pub(crate) fn tempfile(&self) -> Result<(std::path::PathBuf, tokio::fs::File)> {
         let f = tempfile::Builder::new()
             .disable_cleanup(true)
@@ -121,7 +121,7 @@ impl RemoteStore {
 
     pub(crate) async fn list_versions(&self) -> Result<Vec<u64>> {
         let res = self
-            .client
+            .remote
             .list_with_delimiter(self.base_path.as_ref())
             .await
             .map_err(|e| match e {
@@ -160,7 +160,7 @@ impl RemoteStore {
 
     pub(crate) async fn load_version(&self, version: u64) -> Result<VolumeMetadata> {
         let path = self.metadata(version);
-        let get = self.client.get(&path).and_then(|res| res.bytes());
+        let get = self.remote.get(&path).and_then(|res| res.bytes());
         let bytes = get.await.map_err(|e| {
             let kind = match e {
                 object_store::Error::NotFound { .. } => ErrorKind::NotFound,
@@ -175,7 +175,7 @@ impl RemoteStore {
     }
 
     pub(crate) async fn exists(&self, path: &object_store::path::Path) -> Result<bool> {
-        match self.client.head(path).await {
+        match self.remote.head(path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
             Err(e) => {

@@ -21,7 +21,7 @@ pub struct ChunkCache {
 }
 
 struct ChunkCacheInner {
-    store: crate::object_store::RemoteStore,
+    store: crate::storage::Storage,
     cache: foyer::Cache<Chunk, Bytes>,
     chunk_size: u64,
     readahead_policy: ReadAheadPolicy,
@@ -31,7 +31,7 @@ impl ChunkCache {
     pub fn new(
         max_cache_size: u64,
         chunk_size: u64,
-        store: crate::object_store::RemoteStore,
+        store: crate::storage::Storage,
         readahead_policy: ReadAheadPolicy,
     ) -> Self {
         let max_cache_size = (max_cache_size / chunk_size) as usize;
@@ -168,12 +168,12 @@ impl From<foyer_memory::Error> for crate::Error {
 // NOTE: keeping this outlined makes rustc happy about move and local references
 // where inlining it makes helllllllllla problems.
 async fn get_range(
-    store: crate::object_store::RemoteStore,
+    store: crate::storage::Storage,
     path: object_store::path::Path,
     range: Range<u64>,
 ) -> crate::Result<Bytes> {
     let bs = store
-        .client
+        .remote
         .get_range(&path, range)
         .await
         .map_err(|e| match e {
@@ -235,10 +235,10 @@ mod test {
     async fn storage_with_data(
         key: object_store::path::Path,
         bytes: Bytes,
-    ) -> crate::object_store::RemoteStore {
-        let storage = crate::object_store::RemoteStore::new_in_memory();
+    ) -> crate::storage::Storage {
+        let storage = crate::storage::Storage::new_in_memory();
         storage
-            .client
+            .remote
             .put(&key, PutPayload::from_bytes(bytes))
             .await
             .expect("put into inmemory store should be ok");
@@ -382,7 +382,7 @@ mod test {
 
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
-        let storage = crate::object_store::RemoteStore::new_in_memory();
+        let storage = crate::storage::Storage::new_in_memory();
         let cache = ChunkCache::new(10, 10, storage, ReadAheadPolicy { size: 123 });
         let res = cache.get_at(&"some-key".into(), 10, 37).await;
         assert!(res.is_err());

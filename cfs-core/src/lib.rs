@@ -2,7 +2,7 @@ mod cache;
 mod error;
 mod location;
 mod metadata;
-mod object_store;
+mod storage;
 mod volume;
 
 pub use error::{Error, ErrorKind, Result};

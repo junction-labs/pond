@@ -55,7 +55,7 @@ enum FileDescriptor {
 }
 
 pub struct VolumeBuilder {
-    store: crate::object_store::RemoteStore,
+    store: crate::storage::Storage,
     cache_size: u64,
     chunk_size: u64,
     readahead: u64,
@@ -146,12 +146,12 @@ pub struct Volume {
 
     cache: Arc<ChunkCache>,
     fds: BTreeMap<Fd, FileDescriptor>,
-    store: crate::object_store::RemoteStore,
+    store: crate::storage::Storage,
 }
 
 impl Volume {
     pub fn builder(location: impl AsRef<str>) -> Result<VolumeBuilder> {
-        let store = crate::object_store::RemoteStore::for_volume(location.as_ref())?;
+        let store = crate::storage::Storage::for_volume(location.as_ref())?;
 
         Ok(VolumeBuilder {
             store,
@@ -487,7 +487,7 @@ impl StagedVolume<'_> {
         let mut offset = 0;
         let mut staged = Vec::new();
         let mut writer = try_mpu!(
-            self.inner.store.client.put_multipart(&dest),
+            self.inner.store.remote.put_multipart(&dest),
             "failed to start multipart upload"
         );
 
@@ -535,7 +535,7 @@ impl StagedVolume<'_> {
         let res = self
             .inner
             .store
-            .client
+            .remote
             .put_opts(
                 &self.inner.store.metadata(version),
                 PutPayload::from_bytes(new_volume),
