@@ -308,7 +308,9 @@ impl VolumeMetadata {
         Ok(&self.data.get(&dir).unwrap().attr)
     }
 
-    /// Remove a directory. Returns an error if the
+    /// Remove a directory.
+    ///
+    /// Removal will fail if the directory is not empty.
     pub fn rmdir(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
         let _ = self.dir_entry(parent)?;
 
@@ -336,6 +338,57 @@ impl VolumeMetadata {
                 Ok(())
             }
         }
+    }
+
+    /// Rename a file or directory.
+    ///
+    /// Rename will fail if the target exists but is of a different type. Rename will also
+    /// fail if the target is a non-empty directory.
+    pub fn rename(
+        &mut self,
+        parent: Ino,
+        name: &str,
+        newparent: Ino,
+        newname: String,
+    ) -> crate::Result<()> {
+        let src = match self.lookup(parent, name)? {
+            Some(e) => e,
+            None => return Err(ErrorKind::NotFound.into()),
+        };
+        match self.lookup(newparent, &newname)? {
+            // renames only work if the two targets are of the same FileType
+            Some(dst) if dst.kind != src.kind => {
+                let kind = match dst.kind {
+                    FileType::Regular => ErrorKind::NotADirectory,
+                    FileType::Directory => ErrorKind::IsADirectory,
+                };
+                return Err(Error::new(
+                    kind,
+                    format!(
+                        "src and dst must be the same file type: {:?} -> {:?}",
+                        src.kind, dst.kind
+                    ),
+                ));
+            }
+            // not allowed to rename and overwrite a non-empty directory
+            Some(e) if e.kind == FileType::Directory => {
+                let not_empty = self.dirs.range(entry_range(e.ino)).any(|_| true);
+                if not_empty {
+                    return Err(ErrorKind::DirectoryNotEmpty.into());
+                }
+            }
+            _ => (), // ok!
+        }
+
+        // insert it under the new parent, then remove it from the old parent dir-entry
+        self.dirs.insert((newparent, newname).into(), src.ino);
+        // TODO: we shouldn't have to copy the string here, but
+        // invariance/subtyping of mut references somehow mean that the key
+        // being EntryKey<'static> implies that this needs to be owned.
+        let key = EntryKey::from((parent, name.to_string()));
+        self.dirs.remove(&key);
+
+        Ok(())
     }
 
     /// Create a file.
@@ -1168,6 +1221,77 @@ mod test {
         let potato = assert_lookup(&volume, b.ino, "potato");
         let tomato = assert_lookup(&volume, potato.ino, "tomato");
         assert!(tomato.is_directory());
+    }
+
+    #[test]
+    fn rename() {
+        let mut volume = VolumeMetadata::empty();
+
+        volume
+            .mkdir_all(Ino::Root, ["dir".to_string(), "a".to_string()])
+            .unwrap();
+
+        volume
+            .create(
+                Ino::Root,
+                "file".to_string(),
+                true,
+                Location::committed("test-key.txt"),
+                ByteRange { offset: 0, len: 64 },
+            )
+            .unwrap();
+
+        // can't rename to inodes of different types
+        assert_eq!(
+            volume
+                .rename(Ino::Root, "dir", Ino::Root, "file".to_string())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            volume
+                .rename(Ino::Root, "file", Ino::Root, "dir".to_string())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::IsADirectory
+        );
+
+        // we can't rename a dir to a non-empty dir
+        volume
+            .mkdir_all(Ino::Root, ["dir2".to_string(), "a".to_string()])
+            .unwrap();
+        assert_eq!(
+            volume
+                .rename(Ino::Root, "dir", Ino::Root, "dir2".to_string())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::DirectoryNotEmpty
+        );
+
+        // you can rename to a non-empty file though
+        volume
+            .create(
+                Ino::Root,
+                "file2".to_string(),
+                true,
+                Location::committed("test-key.txt"),
+                ByteRange { offset: 0, len: 64 },
+            )
+            .unwrap();
+        assert!(
+            volume
+                .rename(Ino::Root, "file", Ino::Root, "file2".to_string())
+                .is_ok()
+        );
+
+        // and you can rename to an existing but empty dir
+        volume.mkdir(Ino::Root, "dir3".to_string()).unwrap();
+        assert!(
+            volume
+                .rename(Ino::Root, "dir", Ino::Root, "dir3".to_string())
+                .is_ok()
+        );
     }
 
     #[test]

@@ -468,6 +468,7 @@ fn apply_entry(root: impl AsRef<Path>, entry: &FuzzEntry) -> std::io::Result<()>
 enum FuzzOp {
     Mkdir(ArbPath),
     RmDir(ArbPath),
+    Rename(ArbPath, ArbPath),
     Read(ArbPath),
     Write(ArbPath, String),
     Remove(ArbPath),
@@ -479,6 +480,7 @@ impl std::fmt::Display for FuzzOp {
         match self {
             FuzzOp::Mkdir(path) => write!(f, "mkdir  {path}"),
             FuzzOp::RmDir(path) => write!(f, "rmdir  {path}"),
+            FuzzOp::Rename(from, to) => write!(f, "rename {from} -> {to}"),
             FuzzOp::Read(path) => write!(f, "read   {path}"),
             FuzzOp::Write(path, data) => write!(f, "write  {path}, {data:#?}"),
             FuzzOp::Remove(path) => write!(f, "remove {path}"),
@@ -512,6 +514,12 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
         FuzzOp::RmDir(path) => {
             let path = root.join(path);
             tri!(std::fs::remove_dir(path));
+            Ok(OpOutput::None)
+        }
+        FuzzOp::Rename(from, to) => {
+            let from = root.join(from);
+            let to = root.join(to);
+            tri!(std::fs::rename(from, to));
             Ok(OpOutput::None)
         }
         FuzzOp::Read(path) => {

@@ -229,6 +229,17 @@ impl Volume {
         Ok(())
     }
 
+    pub fn rename(
+        &mut self,
+        parent: Ino,
+        name: &str,
+        newparent: Ino,
+        newname: String,
+    ) -> Result<()> {
+        self.meta.rename(parent, name, newparent, newname)?;
+        Ok(())
+    }
+
     pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = (&str, &FileAttr)>> {
         let iter = self.meta.readdir(ino)?;
         Ok(iter)

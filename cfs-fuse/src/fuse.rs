@@ -131,6 +131,27 @@ impl fuser::Filesystem for Cfs {
         reply.ok();
     }
 
+    fn rename(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        newparent: u64,
+        newname: &std::ffi::OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let name = fs_try!(reply, from_os_str(name));
+        let newname = fs_try!(reply, from_os_str(newname));
+
+        fs_try!(
+            reply,
+            self.volume
+                .rename(parent.into(), name, newparent.into(), newname.to_string(),)
+        );
+        reply.ok();
+    }
+
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
