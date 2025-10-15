@@ -4,7 +4,7 @@ use crate::{
     error::ErrorKind,
     metadata::{Modify, VolumeMetadata},
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -295,10 +295,10 @@ impl Volume {
                     // file locally as a staged file, which can be expensive if it's a large file.
                     let (path, file) = self.store.tempfile()?;
                     let staged = Location::Staged { path };
+                    // modify metadata next
                     self.modify(ino, Some(staged), Some(Modify::Set((0, 0).into())))?;
-
-                    let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
-                    Ok(fd)
+                    // only create the fd once the file is open and metadata is valid
+                    Ok(new_fd(&mut self.fds, ino, FileDescriptor::Staged { file }))
                 }
                 None => Err(ErrorKind::NotFound.into()),
             },
@@ -481,15 +481,17 @@ impl StagedVolume<'_> {
         );
 
         for (attr, path) in self.inner.meta.iter_staged() {
-            let data = tokio::fs::read(path)
-                .await
-                .map_err(|e| Error::new_context(e.kind().into(), "failed to read staged file", e))?
-                .into();
+            // don't actually do anything for zero sized files
+            if attr.size > 0 {
+                let data = read_file_bytes(path, attr.size).await.map_err(|e| {
+                    Error::new_context(e.kind().into(), "failed to read staged file", e)
+                })?;
 
-            try_mpu!(
-                writer.put_part(PutPayload::from_bytes(data)),
-                "failed to upload part"
-            );
+                try_mpu!(
+                    writer.put_part(PutPayload::from_bytes(data)),
+                    "failed to upload part"
+                );
+            };
 
             staged.push((attr.ino, (offset, attr.size).into()));
             offset += attr.size;
@@ -551,6 +553,21 @@ impl StagedVolume<'_> {
             }
         }
     }
+}
+
+/// Read at most `limit` bytes from the file at `path`. Reads directly into a
+/// [BytesMut] to avoid initializing an allocation.
+async fn read_file_bytes(path: impl AsRef<std::path::Path>, limit: u64) -> std::io::Result<Bytes> {
+    let mut buf = BytesMut::with_capacity(limit as usize);
+    let mut f = tokio::fs::File::open(path).await?.take(limit);
+
+    loop {
+        let n = f.read_buf(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(buf.freeze())
 }
 
 #[cfg(test)]

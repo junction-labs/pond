@@ -1,0 +1,900 @@
+   Compiling cfs-core v0.1.0 (/home/benl/src/junction/coolfs/cfs-core)
+   Compiling cfs-fuse v0.1.0 (/home/benl/src/junction/coolfs/cfs-fuse)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
+     Running unittests src/lib.rs (target/debug/deps/cfs_core-a785bb703cc6cd2b)
+
+running 15 tests
+test cache::test::fuzz_readahead_offsets ... ok
+test cache::test::fuzz_read_offsets ... ok
+test metadata::test::delete_directory ... ok
+test metadata::test::delete_special_file ... ok
+test volume::tests::test_copy_into ... ok
+test metadata::test::mkdir_all ... ok
+test metadata::test::open ... ok
+test metadata::test::modify_max ... ok
+test metadata::test::walk ... ok
+test metadata::test::modify_set ... ok
+test metadata::test::lookup ... ok
+test metadata::test::delete ... ok
+test cache::test::test_bad_get_removes_entry ... ok
+test cache::test::test_readahead ... ok
+test volume::tests::commit ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/cfs_fuse-4cc4c6d690069ecb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/cfs_fuse-4180952b192b09b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fuzz.rs (target/debug/deps/fuzz-06cbbf3b816a8ecc)
+
+running 3 tests
+test fuzz_empty_volume ... ok
+test fuzz_pack ... ok
+test fuzz_commit ... FAILED
+
+failures:
+
+---- fuzz_commit stdout ----
+[cfs-core/src/volume.rs:396:9] &self.meta = VolumeMetadata {
+    version: 48879,
+    next_ino: Regular(
+        38,
+    ),
+    locations: [
+        Staged {
+            path: "/home/benl/src/junction/coolfs/target/cfs/integration/fuzz_commit/volume/.cfsTuFKnG/.tmpwbku1C",
+        },
+        Staged {
+            path: "/home/benl/src/junction/coolfs/target/cfs/integration/fuzz_commit/volume/.cfsTuFKnG/.tmpvcfjCE",
+        },
+        Staged {
+            path: "/home/benl/src/junction/coolfs/target/cfs/integration/fuzz_commit/volume/.cfsTuFKnG/.tmpRbhZyM",
+        },
+        Staged {
+            path: "/home/benl/src/junction/coolfs/target/cfs/integration/fuzz_commit/volume/.cfsTuFKnG/.tmpGEF3A7",
+        },
+    ],
+    data: {
+        Root: Entry {
+            name: "/",
+            attr: FileAttr {
+                ino: Root,
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Reserved(
+            2,
+        ): Entry {
+            name: ".version",
+            attr: FileAttr {
+                ino: Reserved(
+                    2,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Reserved(
+            3,
+        ): Entry {
+            name: ".commit",
+            attr: FileAttr {
+                ino: Reserved(
+                    3,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Reserved(
+            4,
+        ): Entry {
+            name: ".clearcache",
+            attr: FileAttr {
+                ino: Reserved(
+                    4,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Regular(
+            32,
+        ): Entry {
+            name: "ccc",
+            attr: FileAttr {
+                ino: Regular(
+                    32,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: File {
+                location_idx: 0,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            33,
+        ): Entry {
+            name: "bbb",
+            attr: FileAttr {
+                ino: Regular(
+                    33,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Regular(
+            34,
+        ): Entry {
+            name: "ccc",
+            attr: FileAttr {
+                ino: Regular(
+                    34,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                33,
+            ),
+            data: File {
+                location_idx: 1,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            35,
+        ): Entry {
+            name: "bbb",
+            attr: FileAttr {
+                ino: Regular(
+                    35,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                33,
+            ),
+            data: File {
+                location_idx: 2,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            36,
+        ): Entry {
+            name: "aaa",
+            attr: FileAttr {
+                ino: Regular(
+                    36,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Regular(
+            37,
+        ): Entry {
+            name: "aaa",
+            attr: FileAttr {
+                ino: Regular(
+                    37,
+                ),
+                size: 1,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                36,
+            ),
+            data: File {
+                location_idx: 3,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 1,
+                },
+            },
+        },
+    },
+    dirs: {
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".clearcache",
+            },
+        ): Reserved(
+            4,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".commit",
+            },
+        ): Reserved(
+            3,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".version",
+            },
+        ): Reserved(
+            2,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "aaa",
+            },
+        ): Regular(
+            36,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "bbb",
+            },
+        ): Regular(
+            33,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "ccc",
+            },
+        ): Regular(
+            32,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    33,
+                ),
+                name: "bbb",
+            },
+        ): Regular(
+            35,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    33,
+                ),
+                name: "ccc",
+            },
+        ): Regular(
+            34,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    36,
+                ),
+                name: "aaa",
+            },
+        ): Regular(
+            37,
+        ),
+    },
+}
+[cfs-core/src/volume.rs:482:13] attr = FileAttr {
+    ino: Regular(
+        32,
+    ),
+    size: 0,
+    mtime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    ctime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    kind: Regular,
+}
+[cfs-core/src/volume.rs:556:5] buf.capacity() = 0
+[cfs-core/src/volume.rs:557:5] buf.has_remaining_mut() = true
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    1,
+)
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    0,
+)
+[cfs-core/src/volume.rs:483:24] read_bytes(path, attr.size as usize).await = Ok(
+    b";",
+)
+[cfs-core/src/volume.rs:482:13] attr = FileAttr {
+    ino: Regular(
+        34,
+    ),
+    size: 0,
+    mtime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    ctime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    kind: Regular,
+}
+[cfs-core/src/volume.rs:556:5] buf.capacity() = 0
+[cfs-core/src/volume.rs:557:5] buf.has_remaining_mut() = true
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    0,
+)
+[cfs-core/src/volume.rs:483:24] read_bytes(path, attr.size as usize).await = Ok(
+    b"",
+)
+[cfs-core/src/volume.rs:482:13] attr = FileAttr {
+    ino: Regular(
+        35,
+    ),
+    size: 0,
+    mtime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    ctime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    kind: Regular,
+}
+[cfs-core/src/volume.rs:556:5] buf.capacity() = 0
+[cfs-core/src/volume.rs:557:5] buf.has_remaining_mut() = true
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    0,
+)
+[cfs-core/src/volume.rs:483:24] read_bytes(path, attr.size as usize).await = Ok(
+    b"",
+)
+[cfs-core/src/volume.rs:482:13] attr = FileAttr {
+    ino: Regular(
+        37,
+    ),
+    size: 1,
+    mtime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    ctime: SystemTime {
+        tv_sec: 0,
+        tv_nsec: 0,
+    },
+    kind: Regular,
+}
+[cfs-core/src/volume.rs:556:5] buf.capacity() = 1
+[cfs-core/src/volume.rs:557:5] buf.has_remaining_mut() = true
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    1,
+)
+[cfs-core/src/volume.rs:561:17] f.read_buf(&mut buf).await = Ok(
+    0,
+)
+[cfs-core/src/volume.rs:483:24] read_bytes(path, attr.size as usize).await = Ok(
+    b"1",
+)
+[cfs-core/src/volume.rs:399:9] &ranges = [
+    (
+        Regular(
+            32,
+        ),
+        ByteRange {
+            offset: 0,
+            len: 0,
+        },
+    ),
+    (
+        Regular(
+            34,
+        ),
+        ByteRange {
+            offset: 0,
+            len: 0,
+        },
+    ),
+    (
+        Regular(
+            35,
+        ),
+        ByteRange {
+            offset: 0,
+            len: 0,
+        },
+    ),
+    (
+        Regular(
+            37,
+        ),
+        ByteRange {
+            offset: 0,
+            len: 1,
+        },
+    ),
+]
+[cfs-fuse/tests/fuzz.rs:182:9] volume.metadata() = VolumeMetadata {
+    version: 48880,
+    next_ino: Regular(
+        38,
+    ),
+    locations: [
+        Committed {
+            key: Path {
+                raw: "4ff90c5c61847681.data",
+            },
+        },
+    ],
+    data: {
+        Root: Entry {
+            name: "/",
+            attr: FileAttr {
+                ino: Root,
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Reserved(
+            2,
+        ): Entry {
+            name: ".version",
+            attr: FileAttr {
+                ino: Reserved(
+                    2,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Reserved(
+            3,
+        ): Entry {
+            name: ".commit",
+            attr: FileAttr {
+                ino: Reserved(
+                    3,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Reserved(
+            4,
+        ): Entry {
+            name: ".clearcache",
+            attr: FileAttr {
+                ino: Reserved(
+                    4,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: Dynamic,
+        },
+        Regular(
+            32,
+        ): Entry {
+            name: "ccc",
+            attr: FileAttr {
+                ino: Regular(
+                    32,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Root,
+            data: File {
+                location_idx: 0,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            33,
+        ): Entry {
+            name: "bbb",
+            attr: FileAttr {
+                ino: Regular(
+                    33,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Regular(
+            34,
+        ): Entry {
+            name: "ccc",
+            attr: FileAttr {
+                ino: Regular(
+                    34,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                33,
+            ),
+            data: File {
+                location_idx: 0,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            35,
+        ): Entry {
+            name: "bbb",
+            attr: FileAttr {
+                ino: Regular(
+                    35,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                33,
+            ),
+            data: File {
+                location_idx: 0,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 0,
+                },
+            },
+        },
+        Regular(
+            36,
+        ): Entry {
+            name: "aaa",
+            attr: FileAttr {
+                ino: Regular(
+                    36,
+                ),
+                size: 0,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Directory,
+            },
+            parent: Root,
+            data: Directory,
+        },
+        Regular(
+            37,
+        ): Entry {
+            name: "aaa",
+            attr: FileAttr {
+                ino: Regular(
+                    37,
+                ),
+                size: 1,
+                mtime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                ctime: SystemTime {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                kind: Regular,
+            },
+            parent: Regular(
+                36,
+            ),
+            data: File {
+                location_idx: 0,
+                byte_range: ByteRange {
+                    offset: 0,
+                    len: 1,
+                },
+            },
+        },
+    },
+    dirs: {
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".clearcache",
+            },
+        ): Reserved(
+            4,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".commit",
+            },
+        ): Reserved(
+            3,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: ".version",
+            },
+        ): Reserved(
+            2,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "aaa",
+            },
+        ): Regular(
+            36,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "bbb",
+            },
+        ): Regular(
+            33,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Root,
+                name: "ccc",
+            },
+        ): Regular(
+            32,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    33,
+                ),
+                name: "bbb",
+            },
+        ): Regular(
+            35,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    33,
+                ),
+                name: "ccc",
+            },
+        ): Regular(
+            34,
+        ),
+        EntryKey(
+            EntryKeyRef {
+                ino: Regular(
+                    36,
+                ),
+                name: "aaa",
+            },
+        ): Regular(
+            37,
+        ),
+    },
+}
+write  ccc, ":"
+write  bbb/ccc, ""
+write  ccc, "u"
+write  bbb/bbb, ""
+mkdir ccc/ccc
+write  ccc, ";"
+write  aaa/aaa, "1" --> actual=Some(File(ArbPath("aaa/aaa"), ";")) expected=Some(File(ArbPath("aaa/aaa"), "1")) before_commit=Some(File(ArbPath("aaa/aaa"), "1")) lost=None <--
+write  ccc, ""
+mkdir ccc
+write  ccc/bbb/aaa, ""
+
+thread 'fuzz_commit' panicked at cfs-fuse/tests/fuzz.rs:211:13:
+assertion `left == right` failed: entries differ
+  left: {"aaa": Dir(ArbPath("aaa")), "aaa/aaa": File(ArbPath("aaa/aaa"), "1"), "bbb": Dir(ArbPath("bbb")), "bbb/bbb": File(ArbPath("bbb/bbb"), ""), "bbb/ccc": File(ArbPath("bbb/ccc"), ""), "ccc": File(ArbPath("ccc"), "")}
+ right: {"aaa": Dir(ArbPath("aaa")), "aaa/aaa": File(ArbPath("aaa/aaa"), ";"), "bbb": Dir(ArbPath("bbb")), "bbb/bbb": File(ArbPath("bbb/bbb"), ""), "bbb/ccc": File(ArbPath("bbb/ccc"), ""), "ccc": File(ArbPath("ccc"), "")}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+arbtest failed!
+    Seed: [1m0x7e725d5a00000060[0m
+
+
+
+
+failures:
+    fuzz_commit
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p cfs-fuse --test fuzz`

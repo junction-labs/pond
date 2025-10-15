@@ -155,6 +155,7 @@ fn fuzz_commit() {
             apply_entry(&expected_dir, entry).unwrap();
             apply_entry(&mount_dir, entry).unwrap();
         }
+        let before_commit = read_entries(&mount_dir);
 
         // commit
         apply_op(&mount_dir, &FuzzOp::Commit).unwrap();
@@ -177,6 +178,8 @@ fn fuzz_commit() {
                     .load(None),
             )
             .unwrap();
+
+        dbg!(volume.metadata());
         assert_eq!(volume.metadata().version(), first_version + 1);
 
         let mount = spawn_mount(&mount_dir, volume);
@@ -184,9 +187,10 @@ fn fuzz_commit() {
         let actual = read_entries(&mount_dir);
 
         if expected != actual {
-            let lost_entries = to_entry_map(lost_entries);
             let expected = to_entry_map(expected);
             let actual = to_entry_map(actual);
+            let before_commit = to_entry_map(before_commit);
+            let lost_entries = to_entry_map(lost_entries);
 
             for entry in pre_commit_entries {
                 let path = entry.dir();
@@ -194,10 +198,13 @@ fn fuzz_commit() {
                 let actual = actual.get(path);
                 let expected = expected.get(path);
                 let lost = lost_entries.get(path);
+                let before_commit = before_commit.get(path);
 
                 eprint!("{entry}");
                 if actual != expected {
-                    eprint!(" --> actual={actual:?} expected={expected:?} lost={lost:?} <--");
+                    eprint!(
+                        " --> actual={actual:?} expected={expected:?} before_commit={before_commit:?} lost={lost:?} <--"
+                    );
                 }
                 eprintln!()
             }
