@@ -12,7 +12,7 @@ pub struct ReadAheadPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Chunk {
-    path: object_store::path::Path,
+    path: Arc<object_store::path::Path>,
     offset: u64,
 }
 
@@ -56,7 +56,7 @@ impl ChunkCache {
 
     pub async fn get_at(
         &self,
-        path: &object_store::path::Path,
+        path: Arc<object_store::path::Path>,
         offset: u64,
         len: u64,
     ) -> crate::Result<Vec<Bytes>> {
@@ -133,7 +133,7 @@ impl ChunkCacheInner {
     /// if they have not.
     async fn fetch_aligned(
         &self,
-        path: object_store::path::Path,
+        path: Arc<object_store::path::Path>,
         offset: u64,
     ) -> crate::Result<Bytes> {
         assert!(offset.is_multiple_of(self.chunk_size));
@@ -152,7 +152,7 @@ impl ChunkCacheInner {
     }
 
     #[cfg(test)]
-    fn is_cached(&self, path: object_store::path::Path, offset: u64) -> bool {
+    fn is_cached(&self, path: Arc<object_store::path::Path>, offset: u64) -> bool {
         let offset = (offset / self.chunk_size) * self.chunk_size;
         let chunk = Chunk { path, offset };
         self.cache.contains(&chunk)
@@ -169,7 +169,7 @@ impl From<foyer_memory::Error> for crate::Error {
 // where inlining it makes helllllllllla problems.
 async fn get_range(
     store: crate::storage::Storage,
-    path: object_store::path::Path,
+    path: Arc<object_store::path::Path>,
     range: Range<u64>,
 ) -> crate::Result<Bytes> {
     let bs = store
@@ -233,7 +233,7 @@ mod test {
     use object_store::{ObjectStore, PutPayload};
 
     async fn storage_with_data(
-        key: object_store::path::Path,
+        key: &object_store::path::Path,
         bytes: Bytes,
     ) -> crate::storage::Storage {
         let storage = crate::storage::Storage::new_in_memory();
@@ -347,8 +347,8 @@ mod test {
 
     #[tokio::test]
     async fn test_readahead() {
-        let key = object_store::path::Path::from("some-key");
-        let storage = storage_with_data(key.clone(), Bytes::from(vec![0u8; 1 << 10])).await;
+        let key = Arc::new(object_store::path::Path::from("some-key"));
+        let storage = storage_with_data(&key, Bytes::from(vec![0u8; 1 << 10])).await;
 
         // volume store fetches/caches 10 byte chunks with a readahead size of
         // 40 bytes (4 chunks)
@@ -362,7 +362,7 @@ mod test {
             // and find the last byte
                 + (chunk_size - 1);
 
-        let _ = cache.get_at(&key, 123, 234).await.unwrap();
+        let _ = cache.get_at(key.clone(), 123, 234).await.unwrap();
 
         // every byte in the readahead-window is cached
         for offset in read_offset..=last_cached_byte {
@@ -382,10 +382,11 @@ mod test {
 
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
+        let key: Arc<object_store::path::Path> = Arc::new("some-key".into());
         let storage = crate::storage::Storage::new_in_memory();
         let cache = ChunkCache::new(10, 10, storage, ReadAheadPolicy { size: 123 });
-        let res = cache.get_at(&"some-key".into(), 10, 37).await;
+        let res = cache.get_at(key.clone(), 10, 37).await;
         assert!(res.is_err());
-        assert!(!cache.inner.is_cached("some-key".into(), 10));
+        assert!(!cache.inner.is_cached(key, 10));
     }
 }

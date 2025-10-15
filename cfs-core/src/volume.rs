@@ -279,7 +279,10 @@ impl Volume {
                 // on the object store's API being kind enough to return partial ranges.
                 let read_len = std::cmp::min(range.len, buf.len() as u64);
                 let blob_offset = range.offset + offset;
-                let bytes: Vec<Bytes> = self.cache.get_at(key, blob_offset, read_len).await?;
+                let bytes: Vec<Bytes> = self
+                    .cache
+                    .get_at(key.clone(), blob_offset, read_len)
+                    .await?;
                 Ok(copy_into(buf, &bytes))
             }
             Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
