@@ -1,11 +1,7 @@
-use cfs_core::{ByteRange, ErrorKind, Fd, Volume};
-use cfs_core::{Ino, Modify};
+use cfs_core::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
-
-// TODO: write a conversion from VolumeERror to libc error codes
-// TODO: write a try! macro that gets rid of most of the let-else spam in here.
 
 pub struct Cfs {
     volume: Volume,

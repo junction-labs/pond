@@ -15,6 +15,7 @@ thiserror.workspace = true
 tokio = {workspace = true, features = ["fs"]}
 tempfile.workspace = true
 url.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

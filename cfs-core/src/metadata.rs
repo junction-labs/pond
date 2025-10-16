@@ -116,7 +116,7 @@ impl Version {
 /// be serialized while they're being staged.
 // # TODO: should we guarantee inodes are stable in the docs?
 #[derive(Debug)]
-pub struct VolumeMetadata {
+pub(crate) struct VolumeMetadata {
     version: Version,
 
     // the next available ino. must start at Ino::Root.add(1) for an empty
@@ -210,7 +210,7 @@ pub enum Modify {
 #[allow(unused)]
 impl VolumeMetadata {
     /// Create a new empty volume.
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self::new(Version::empty())
     }
 
@@ -288,7 +288,7 @@ impl VolumeMetadata {
     }
 
     /// Returns the current version of the volume.
-    pub fn version(&self) -> &Version {
+    pub(crate) fn version(&self) -> &Version {
         &self.version
     }
 
@@ -298,7 +298,7 @@ impl VolumeMetadata {
 
     /// Check whether this volume is being staged. Staged volumes contain
     /// unstable data references and can't be serialized.
-    pub fn is_staged(&self) -> bool {
+    pub(crate) fn is_staged(&self) -> bool {
         self.locations
             .iter()
             .any(|l| matches!(l, Location::Staged { .. }))
@@ -308,7 +308,7 @@ impl VolumeMetadata {
     ///
     /// Returns an error if the parent directory does not exist, or if it
     /// already contains a file or directory with that name.
-    pub fn mkdir(&mut self, parent: Ino, name: String) -> crate::Result<&FileAttr> {
+    pub(crate) fn mkdir(&mut self, parent: Ino, name: String) -> crate::Result<&FileAttr> {
         // validate that it's okay to create the directory before any state is
         // modified - don't want to undo anything if we can help it
         //
@@ -345,7 +345,7 @@ impl VolumeMetadata {
     ///
     /// Creation will fail if a file with the same name as an intermediate directory
     /// already exists or if the passed path was empty.
-    pub fn mkdir_all(
+    pub(crate) fn mkdir_all(
         &mut self,
         parent: Ino,
         dir_names: impl IntoIterator<Item = String>,
@@ -384,7 +384,7 @@ impl VolumeMetadata {
     /// Remove a directory.
     ///
     /// Removal will fail if the directory is not empty.
-    pub fn rmdir(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
+    pub(crate) fn rmdir(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
         let _ = self.dir_entry(parent)?;
 
         // TODO: we shouldn't have to copy the string here, but
@@ -417,7 +417,7 @@ impl VolumeMetadata {
     ///
     /// Rename will fail if the target exists but is of a different type. Rename will also
     /// fail if the target is a non-empty directory.
-    pub fn rename(
+    pub(crate) fn rename(
         &mut self,
         parent: Ino,
         name: &str,
@@ -470,7 +470,7 @@ impl VolumeMetadata {
     /// otherwise any existing file will be overwritten. Creation will always
     /// fail if the parent directory does not exist or a directory with the same
     /// name already exists.
-    pub fn create(
+    pub(crate) fn create(
         &mut self,
         parent: Ino,
         name: String,
@@ -522,7 +522,7 @@ impl VolumeMetadata {
     }
 
     /// Remove a file from a volume.
-    pub fn delete(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
+    pub(crate) fn delete(&mut self, parent: Ino, name: &str) -> crate::Result<()> {
         let _ = self.dir_entry(parent)?;
 
         // TODO: we shouldn't have to copy the string here, but
@@ -557,7 +557,7 @@ impl VolumeMetadata {
     }
 
     /// Lookup a directory entry by name.
-    pub fn lookup(&self, parent: Ino, name: &str) -> crate::Result<Option<&FileAttr>> {
+    pub(crate) fn lookup(&self, parent: Ino, name: &str) -> crate::Result<Option<&FileAttr>> {
         let _ = self.dir_entry(parent)?;
 
         Ok(self.lookup_unchecked(parent, name))
@@ -586,11 +586,11 @@ impl VolumeMetadata {
     }
 
     /// Obtain information about a file based only on its `ino`.
-    pub fn getattr(&self, ino: Ino) -> Option<&FileAttr> {
+    pub(crate) fn getattr(&self, ino: Ino) -> Option<&FileAttr> {
         self.data.get(&ino).map(|dent| &dent.attr)
     }
 
-    pub fn setattr(
+    pub(crate) fn setattr(
         &mut self,
         ino: Ino,
         mtime: Option<SystemTime>,
@@ -610,7 +610,7 @@ impl VolumeMetadata {
     ///
     /// This changes the physical location for all files in the volume that
     /// refer to this blob. To relocate an individual file, see `modify`.
-    pub fn relocate(&mut self, from: &Location, to: Location) -> crate::Result<()> {
+    pub(crate) fn relocate(&mut self, from: &Location, to: Location) -> crate::Result<()> {
         let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
             return Err(ErrorKind::NotFound.into());
         };
@@ -621,7 +621,7 @@ impl VolumeMetadata {
     /// Clean up all staged locations, replacing all internal state to instead point to dest.
     ///
     /// This attempts to keep Volume in a consistent state at every step of modification.
-    pub fn clean_staged_locations(&mut self, dest: Location) {
+    pub(crate) fn clean_staged_locations(&mut self, dest: Location) {
         // find the first staged location within self.locations and use that as the final spot
         // for dest.
         let Some((idx, location)) = self
@@ -662,7 +662,7 @@ impl VolumeMetadata {
     ///
     /// This method changes the location of a file, it's range of bytes within that
     /// location, or both.
-    pub fn modify(
+    pub(crate) fn modify(
         &mut self,
         ino: Ino,
         location: Option<Location>,
@@ -702,7 +702,7 @@ impl VolumeMetadata {
     /// `(filename, attr)` pairs.
     ///
     /// Iterator order is not guaranteed to be stable.
-    pub fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
+    pub(crate) fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
         let _ = self.dir_entry(ino)?;
 
         Ok(ReadDir {
@@ -718,7 +718,7 @@ impl VolumeMetadata {
     /// `filename` and `attrs` are the same values that would be yielded from
     /// calling `readdir` on a directory and `ancestors` is a `Vec` of ancestor
     /// directory names.
-    pub fn walk<'a>(&'a self, ino: Ino) -> crate::Result<WalkIter<'a>> {
+    pub(crate) fn walk<'a>(&'a self, ino: Ino) -> crate::Result<WalkIter<'a>> {
         let root_dir = self.dir_entry(ino)?;
         let root_iter = ReadDir {
             range: self.dirs.range(entry_range(ino)),
@@ -735,7 +735,7 @@ impl VolumeMetadata {
     /// order.
     ///
     /// Returns an iterator over `(FileAttr, PathBuf)` tuples.
-    pub fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, &PathBuf)> {
+    pub(crate) fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, &PathBuf)> {
         self.data
             .iter()
             .filter_map(|(ino, entry)| match self.location(*ino) {
@@ -757,7 +757,7 @@ impl VolumeMetadata {
     ///
     /// Attempting to get the physical location of a directory or a symlink
     /// returns an error.
-    pub fn location(&self, ino: Ino) -> Option<(&Location, &ByteRange)> {
+    pub(crate) fn location(&self, ino: Ino) -> Option<(&Location, &ByteRange)> {
         self.data.get(&ino).and_then(|entry| match &entry.data {
             // files need to map to blob list
             EntryData::File {
@@ -775,7 +775,7 @@ impl VolumeMetadata {
     /// Serialize committed data in this volume to bytes.
     ///
     /// Note: uncommitted changes will be dropped. Commit if you want them persisted!
-    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+    pub(crate) fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         let mut fbb = FlatBufferBuilder::new();
 
         let locations = {
@@ -811,7 +811,7 @@ impl VolumeMetadata {
 
     /// Read a serialized volume. Returns an error if the volume is invalid or
     /// inconsistent.
-    pub fn from_bytes(bs: &[u8]) -> crate::Result<Self> {
+    pub(crate) fn from_bytes(bs: &[u8]) -> crate::Result<Self> {
         let fb_volume = fb::root_as_volume(bs)
             .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid bytes"))?;
 
@@ -858,7 +858,7 @@ fn entry_range(ino: Ino) -> std::ops::Range<EntryKey<'static>> {
 }
 
 /// The iterator returned from [readdir][Volume::readdir].
-pub struct ReadDir<'a> {
+pub(crate) struct ReadDir<'a> {
     data: &'a BTreeMap<Ino, Entry>,
     range: btree_map::Range<'a, EntryKey<'static>, Ino>,
 }
@@ -878,7 +878,7 @@ impl<'a> Iterator for ReadDir<'a> {
 }
 
 /// The iterator returned from [walk][Volume::walk].
-pub struct WalkIter<'a> {
+pub(crate) struct WalkIter<'a> {
     volume: &'a VolumeMetadata,
 
     // a stack of entry iterators
@@ -1081,7 +1081,7 @@ mod test {
 
     use super::*;
 
-    pub fn readdir_nospecial(
+    fn readdir_nospecial(
         v: &VolumeMetadata,
         ino: Ino,
     ) -> crate::Result<impl Iterator<Item = (&str, &FileAttr)>> {

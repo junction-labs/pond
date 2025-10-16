@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    Result, Volume, VolumeMetadata,
+    Result, Volume,
     cache::{ChunkCache, ReadAheadPolicy},
-    metadata::Version,
+    metadata::{Version, VolumeMetadata},
 };
 
 pub struct Client {
@@ -48,7 +48,7 @@ impl Client {
     }
 
     pub async fn exists(&self, version: &Version) -> Result<bool> {
-        self.store.exists(&self.store.metadata(version)).await
+        self.store.exists(version).await
     }
 
     pub async fn load_volume(&self, version: &Option<Version>) -> Result<Volume> {
@@ -69,7 +69,7 @@ impl Client {
         Ok(Volume::new(metadata, cache, self.store.clone()))
     }
 
-    /// Create an empty volume
+    /// Create a new volume.
     pub async fn create_volume(&self) -> Result<Volume> {
         let metadata = VolumeMetadata::empty();
         let cache = Arc::new(ChunkCache::new(

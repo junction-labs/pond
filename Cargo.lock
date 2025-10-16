@@ -301,6 +301,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+ "walkdir",
 ]
 
 [[package]]
@@ -310,19 +311,13 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "arbtest",
- "bytes",
  "bytesize",
  "cfs-core",
  "clap",
  "fuser",
  "libc",
- "object_store",
- "rand 0.9.2",
- "tempfile",
  "tokio",
- "tracing",
  "tracing-subscriber",
- "url",
  "walkdir",
 ]
 

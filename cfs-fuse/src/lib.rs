@@ -1,12 +1,12 @@
 mod fuse;
 
 use bytesize::ByteSize;
-use cfs_core::{Client, Ino, Version};
-use cfs_core::{Location, Volume};
+use cfs_core::{Client, Version, Volume};
 use clap::{Parser, Subcommand, value_parser};
-use std::path::Path;
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use crate::fuse::Cfs;
 
@@ -95,51 +95,10 @@ pub fn dump(
     volume: String,
     version: Option<String>,
 ) -> anyhow::Result<()> {
-    fn location_path(l: &Location) -> String {
-        match l {
-            Location::Staged { .. } => format!("**{l}"),
-            _ => format!("{l}"),
-        }
-    }
-
     let version = version.map(|v| v.parse()).transpose()?;
     let client = Client::new(volume)?;
     let volume = runtime.block_on(client.load_volume(&version))?;
-    let metadata = volume.metadata();
-
-    for (name, path, attrs) in metadata.walk(Ino::Root).unwrap() {
-        if path.is_empty() && !attrs.ino.is_regular() {
-            continue;
-        }
-
-        let kind;
-        let location;
-        let offset;
-        let len;
-
-        let path = {
-            let mut full_path = path;
-            full_path.push(name);
-            full_path.join("/")
-        };
-        match attrs.kind {
-            cfs_core::FileType::Regular => {
-                kind = "f";
-                let (l, b) = metadata.location(attrs.ino).unwrap();
-                location = location_path(l);
-                offset = b.offset;
-                len = b.len;
-            }
-            cfs_core::FileType::Directory => {
-                kind = "d";
-                location = "".to_string();
-                offset = 0;
-                len = 0;
-            }
-        }
-        println!("{kind:4} {location:40} {offset:12} {len:8} {path:40}");
-    }
-
+    volume.dump()?;
     Ok(())
 }
 
@@ -150,71 +109,13 @@ pub fn pack(
     version: impl AsRef<str>,
 ) -> anyhow::Result<()> {
     let client = Client::new(to.as_ref())?;
-    // default to version 1
     let version = Version::from_str(version.as_ref())?;
 
-    if runtime.block_on(client.exists(&version))? {
-        anyhow::bail!("version {version} already exists");
-    }
-    let mut volume = runtime.block_on(client.create_volume())?;
-    let metadata = volume.metadata_mut();
-
-    // walk the entire tree in dfs order. make sure directories are sorted by
-    // filename so that doing things like cat some/dir/* will traverse the
-    // directory in the order we've packed it.
-    let walk_root: &Path = dir.as_ref();
-    let walker = walkdir::WalkDir::new(walk_root)
-        .min_depth(1)
-        .sort_by_file_name();
-
-    for entry in walker {
-        let entry = entry?;
-        let path = entry.path().strip_prefix(walk_root).unwrap();
-
-        // for a directory, just mkdir_all on the volume
-        if entry.file_type().is_dir() {
-            let dirs: Vec<_> = path
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().to_string())
-                .collect();
-            metadata.mkdir_all(Ino::Root, dirs)?;
-        }
-        // for a file:
-        //
-        // - write the content into the blob as bytes
-        // - try to open the file (right now with mkdir_all, but it should maybe
-        //   be lookup_all if we know this is a dfs?)
-        // - write the file into the volume
-        //
-        // error handling here is interesting: how do we deal with a failure
-        // writing the blob? how do we deal with a failure updating the volume?
-        // both seem like they're unrecoverable.
-        if entry.file_type().is_file() {
-            let name = entry.file_name();
-            let dir = path.ancestors().nth(1).unwrap();
-            let dir_ino = if !dir.to_string_lossy().is_empty() {
-                let dirs = dir
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().to_string());
-                metadata.mkdir_all(Ino::Root, dirs).unwrap().ino
-            } else {
-                Ino::Root
-            };
-
-            let len = entry.metadata().unwrap().len();
-            metadata.create(
-                dir_ino,
-                name.to_string_lossy().to_string(),
-                true,
-                Location::staged(entry.path()),
-                cfs_core::ByteRange { offset: 0, len },
-            )?;
-        }
-    }
-
-    runtime.block_on(volume.commit(version))?;
-
-    Ok(())
+    runtime.block_on(async {
+        let mut volume = client.create_volume().await?;
+        volume.pack(dir, version).await?;
+        Ok(())
+    })
 }
 
 pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {

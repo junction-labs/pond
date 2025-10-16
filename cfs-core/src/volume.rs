@@ -1,12 +1,12 @@
 use crate::{
-    ByteRange, Error, FileAttr, Ino, Location, Result,
+    ByteRange, Error, FileAttr, FileType, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
 };
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutOptions, PutPayload};
-use std::{collections::BTreeMap, io::SeekFrom, sync::Arc, time::SystemTime};
+use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
@@ -75,12 +75,16 @@ impl Volume {
         }
     }
 
-    pub fn metadata(&self) -> &VolumeMetadata {
+    pub(crate) fn metadata(&self) -> &VolumeMetadata {
         &self.meta
     }
 
-    pub fn metadata_mut(&mut self) -> &mut VolumeMetadata {
+    pub(crate) fn metadata_mut(&mut self) -> &mut VolumeMetadata {
         &mut self.meta
+    }
+
+    pub fn version(&self) -> &Version {
+        self.metadata().version()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -344,6 +348,117 @@ fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize>
     let amt = std::cmp::min(version.len(), buf.len());
     buf[..amt].copy_from_slice(&version[..amt]);
     Ok(amt)
+}
+
+impl Volume {
+    pub fn dump(&self) -> Result<()> {
+        fn location_path(l: &Location) -> String {
+            match l {
+                Location::Staged { .. } => format!("**{l}"),
+                _ => format!("{l}"),
+            }
+        }
+
+        for (name, path, attrs) in self.metadata().walk(Ino::Root).unwrap() {
+            if path.is_empty() && !attrs.ino.is_regular() {
+                continue;
+            }
+
+            let kind;
+            let location;
+            let offset;
+            let len;
+
+            let path = {
+                let mut full_path = path;
+                full_path.push(name);
+                full_path.join("/")
+            };
+            match attrs.kind {
+                FileType::Regular => {
+                    kind = "f";
+                    let (l, b) = self.metadata().location(attrs.ino).unwrap();
+                    location = location_path(l);
+                    offset = b.offset;
+                    len = b.len;
+                }
+                FileType::Directory => {
+                    kind = "d";
+                    location = "".to_string();
+                    offset = 0;
+                    len = 0;
+                }
+            }
+            println!("{kind:4} {location:40} {offset:12} {len:8} {path:40}");
+        }
+
+        Ok(())
+    }
+
+    /// Pack a local directory into a CFS volume.
+    pub async fn pack(&mut self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
+        if self.store.exists(&version).await? {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("version {} already exists", &version),
+            ));
+        }
+        // walk the entire tree in dfs order. make sure directories are sorted by
+        // filename so that doing things like cat some/dir/* will traverse the
+        // directory in the order we've packed it.
+        let walk_root: &Path = dir.as_ref();
+        let walker = walkdir::WalkDir::new(walk_root)
+            .min_depth(1)
+            .sort_by_file_name();
+
+        for entry in walker {
+            let entry = entry
+                .map_err(|e| Error::new_context(ErrorKind::InvalidData, "failed to walk dir", e))?;
+            let path = entry.path().strip_prefix(walk_root).unwrap();
+
+            // for a directory, just mkdir_all on the volume
+            if entry.file_type().is_dir() {
+                let dirs: Vec<_> = path
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect();
+                self.metadata_mut().mkdir_all(Ino::Root, dirs)?;
+            }
+            // for a file:
+            //
+            // - write the content into the blob as bytes
+            // - try to open the file (right now with mkdir_all, but it should maybe
+            //   be lookup_all if we know this is a dfs?)
+            // - write the file into the volume
+            //
+            // error handling here is interesting: how do we deal with a failure
+            // writing the blob? how do we deal with a failure updating the volume?
+            // both seem like they're unrecoverable.
+            if entry.file_type().is_file() {
+                let name = entry.file_name();
+                let dir = path.ancestors().nth(1).unwrap();
+                let dir_ino = if !dir.to_string_lossy().is_empty() {
+                    let dirs = dir
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string());
+                    self.metadata_mut().mkdir_all(Ino::Root, dirs).unwrap().ino
+                } else {
+                    Ino::Root
+                };
+
+                let len = entry.metadata().unwrap().len();
+                self.metadata_mut().create(
+                    dir_ino,
+                    name.to_string_lossy().to_string(),
+                    true,
+                    Location::staged(entry.path()),
+                    ByteRange { offset: 0, len },
+                )?;
+            }
+        }
+
+        self.commit(version).await
+    }
 }
 
 async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(

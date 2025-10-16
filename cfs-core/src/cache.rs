@@ -4,10 +4,10 @@ use std::{ops::Range, sync::Arc};
 use crate::{Error, error::ErrorKind};
 
 #[derive(Debug, Clone, Default)]
-pub struct ReadAheadPolicy {
+pub(crate) struct ReadAheadPolicy {
     /// Size of read-ahead in bytes. if you read a byte at index i, we will
     /// pre-fetch the bytes within interval [i, i + size) in the background.
-    pub size: u64,
+    pub(crate) size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -16,7 +16,7 @@ struct Chunk {
     offset: u64,
 }
 
-pub struct ChunkCache {
+pub(crate) struct ChunkCache {
     inner: Arc<ChunkCacheInner>,
 }
 
@@ -28,7 +28,7 @@ struct ChunkCacheInner {
 }
 
 impl ChunkCache {
-    pub fn new(
+    pub(crate) fn new(
         max_cache_size: u64,
         chunk_size: u64,
         store: crate::storage::Storage,
@@ -50,11 +50,11 @@ impl ChunkCache {
         }
     }
 
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.inner.cache.clear()
     }
 
-    pub async fn get_at(
+    pub(crate) async fn get_at(
         &self,
         path: Arc<object_store::path::Path>,
         offset: u64,

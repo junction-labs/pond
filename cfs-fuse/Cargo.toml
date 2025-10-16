@@ -7,22 +7,16 @@ homepage.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 bytesize.workspace = true
 clap = { workspace = true, features = ["derive"] }
 fuser = { workspace = true, default_features = false, features = [] }
 libc.workspace = true
-object_store = { workspace = true, features = ["aws"] }
-tempfile.workspace = true
 tokio = {workspace = true, features = ["rt-multi-thread", "io-util", "net"]}
-tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"]}
-url.workspace = true
-walkdir.workspace = true
 
 cfs-core.workspace = true
 
 [dev-dependencies]
 arbitrary.workspace = true
 arbtest.workspace = true
-rand.workspace = true
+walkdir.workspace = true

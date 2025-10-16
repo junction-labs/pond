@@ -4,7 +4,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
 
-use crate::{Error, ErrorKind, Result, VolumeMetadata, metadata::Version};
+use crate::{
+    Error, ErrorKind, Result,
+    metadata::{Version, VolumeMetadata},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Storage {
@@ -174,7 +177,8 @@ impl Storage {
         VolumeMetadata::from_bytes(&bytes)
     }
 
-    pub(crate) async fn exists(&self, path: &object_store::path::Path) -> Result<bool> {
+    pub(crate) async fn exists(&self, version: &Version) -> Result<bool> {
+        let path = &self.metadata(version);
         match self.remote.head(path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
