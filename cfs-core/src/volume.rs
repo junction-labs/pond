@@ -327,6 +327,13 @@ impl Volume {
     }
 
     pub async fn commit(&mut self, version: Version) -> Result<()> {
+        if self.store.exists(&version).await? {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("version {} already exists", &version),
+            ));
+        }
+
         let mut staged = StagedVolume { inner: self };
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
