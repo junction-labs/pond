@@ -29,8 +29,11 @@ impl Fd {
         Self { ino, fh }
     }
 
-    fn add_fh(&self, rhs: u64) -> u64 {
-        self.fh.checked_add(rhs).expect("BUG: fd overflow")
+    fn add_fh(&self, rhs: u64) -> Result<u64> {
+        self.fh.checked_add(rhs).ok_or(Error::new(
+            ErrorKind::Other,
+            "fh value overflow, unable to read/write additional files",
+        ))
     }
 }
 
@@ -168,7 +171,7 @@ impl Volume {
             ByteRange::empty(),
         )?;
 
-        let fd = new_fd(&mut self.fds, attr.ino, FileDescriptor::Staged { file });
+        let fd = new_fd(&mut self.fds, attr.ino, FileDescriptor::Staged { file })?;
         Ok((attr, fd))
     }
 
@@ -184,14 +187,8 @@ impl Volume {
     /// Opening a Fd with write permissions will always truncate the file.
     pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::COMMIT => {
-                let fd = new_fd(&mut self.fds, ino, FileDescriptor::Commit);
-                Ok(fd)
-            }
-            Ino::CLEAR_CACHE => {
-                let fd = new_fd(&mut self.fds, ino, FileDescriptor::ClearCache);
-                Ok(fd)
-            }
+            Ino::COMMIT => new_fd(&mut self.fds, ino, FileDescriptor::Commit),
+            Ino::CLEAR_CACHE => new_fd(&mut self.fds, ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -204,8 +201,7 @@ impl Volume {
                             Error::new_context(e.kind().into(), "failed to open staged file", e)
                         })?;
 
-                    let fd = new_fd(&mut self.fds, ino, FileDescriptor::Staged { file });
-                    Ok(fd)
+                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
                 Some((Location::Committed { .. }, ..)) => {
                     // truncate the file (by assigning it a brand new staged file) if it's
@@ -216,7 +212,7 @@ impl Volume {
                     // modify metadata next
                     self.modify(ino, Some(staged), Some(Modify::Set((0, 0).into())))?;
                     // only create the fd once the file is open and metadata is valid
-                    Ok(new_fd(&mut self.fds, ino, FileDescriptor::Staged { file }))
+                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
                 None => Err(ErrorKind::NotFound.into()),
             },
@@ -225,26 +221,23 @@ impl Volume {
 
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::VERSION => {
-                let fd = new_fd(&mut self.fds, ino, FileDescriptor::Version);
-                Ok(fd)
-            }
+            Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
                     let file = tokio::fs::File::open(path).await.map_err(|e| {
                         Error::new_context(e.kind().into(), "failed to open staged file", e)
                     })?;
-                    Ok(new_fd(&mut self.fds, ino, FileDescriptor::Staged { file }))
+                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
-                Some((Location::Committed { key }, range)) => Ok(new_fd(
+                Some((Location::Committed { key }, range)) => new_fd(
                     &mut self.fds,
                     ino,
                     FileDescriptor::Committed {
                         key: key.clone(),
                         range: *range,
                     },
-                )),
+                ),
                 None => Err(ErrorKind::NotFound.into()),
             },
         }
@@ -366,8 +359,10 @@ impl Volume {
             }
         }
 
-        for (name, path, attrs) in self.metadata().walk(Ino::Root).unwrap() {
-            if path.is_empty() && !attrs.ino.is_regular() {
+        for entry in self.metadata().walk(Ino::Root)? {
+            let (name, path, attr) = entry?;
+
+            if path.is_empty() && !attr.ino.is_regular() {
                 continue;
             }
 
@@ -381,10 +376,13 @@ impl Volume {
                 full_path.push(name);
                 full_path.join("/")
             };
-            match attrs.kind {
+            match attr.kind {
                 FileType::Regular => {
                     kind = "f";
-                    let (l, b) = self.metadata().location(attrs.ino).unwrap();
+                    let (l, b) = self
+                        .metadata()
+                        .location(attr.ino)
+                        .expect("BUG: could not lookup location for ino we just walked");
                     location = location_path(l);
                     offset = b.offset;
                     len = b.len;
@@ -421,7 +419,10 @@ impl Volume {
         for entry in walker {
             let entry = entry
                 .map_err(|e| Error::new_context(ErrorKind::InvalidData, "failed to walk dir", e))?;
-            let path = entry.path().strip_prefix(walk_root).unwrap();
+            let path = entry
+                .path()
+                .strip_prefix(walk_root)
+                .map_err(|e| Error::new_context(ErrorKind::InvalidData, "prefix not found", e))?;
 
             // for a directory, just mkdir_all on the volume
             if entry.file_type().is_dir() {
@@ -443,17 +444,29 @@ impl Volume {
             // both seem like they're unrecoverable.
             if entry.file_type().is_file() {
                 let name = entry.file_name();
-                let dir = path.ancestors().nth(1).unwrap();
+                let dir = path.parent().ok_or(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("could not find parent of {}", path.to_string_lossy()),
+                ))?;
                 let dir_ino = if !dir.to_string_lossy().is_empty() {
                     let dirs = dir
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy().to_string());
-                    self.metadata_mut().mkdir_all(Ino::Root, dirs).unwrap().ino
+                    self.metadata_mut().mkdir_all(Ino::Root, dirs)?.ino
                 } else {
                     Ino::Root
                 };
 
-                let len = entry.metadata().unwrap().len();
+                let len = entry
+                    .metadata()
+                    .map_err(|e| {
+                        let kind = e
+                            .io_error()
+                            .map(|e| e.kind().into())
+                            .unwrap_or(ErrorKind::Other);
+                        Error::new_context(kind, "could not access direntry metadata", e)
+                    })?
+                    .len();
                 self.metadata_mut().create(
                     dir_ino,
                     name.to_string_lossy().to_string(),
@@ -502,11 +515,16 @@ fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
 // FIXME: this needs to allocate and check for remaining fds instead of just
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
-fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor) -> Fd {
-    let next_fh = fd_set.keys().last().cloned().unwrap_or_default().add_fh(1);
+fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor) -> Result<Fd> {
+    let next_fh = fd_set
+        .keys()
+        .last()
+        .cloned()
+        .unwrap_or_default()
+        .add_fh(1)?;
     let fd = Fd { ino, fh: next_fh };
     fd_set.insert(fd, d);
-    fd
+    Ok(fd)
 }
 
 macro_rules! try_mpu {

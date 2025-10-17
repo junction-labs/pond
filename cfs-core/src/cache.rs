@@ -236,7 +236,7 @@ mod test {
         key: &object_store::path::Path,
         bytes: Bytes,
     ) -> crate::storage::Storage {
-        let storage = crate::storage::Storage::new_in_memory();
+        let storage = crate::storage::Storage::new_in_memory().unwrap();
         storage
             .remote
             .put(key, PutPayload::from_bytes(bytes))
@@ -383,7 +383,7 @@ mod test {
     #[tokio::test]
     async fn test_bad_get_removes_entry() {
         let key: Arc<object_store::path::Path> = Arc::new("some-key".into());
-        let storage = crate::storage::Storage::new_in_memory();
+        let storage = crate::storage::Storage::new_in_memory().unwrap();
         let cache = ChunkCache::new(10, 10, storage, ReadAheadPolicy { size: 123 });
         let res = cache.get_at(key.clone(), 10, 37).await;
         assert!(res.is_err());

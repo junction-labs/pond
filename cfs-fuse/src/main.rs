@@ -1,15 +1,16 @@
+#![deny(clippy::unwrap_used)]
+
 use clap::Parser;
 
 use cfs_fuse::*;
 
-fn main() {
+fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()
-        .unwrap();
+        .build()?;
 
     let res = match args.cmd {
         Cmd::Dump { volume, version } => dump(runtime, volume, version),
@@ -22,4 +23,6 @@ fn main() {
         eprintln!("{e:?}");
         std::process::exit(-1);
     }
+
+    Ok(())
 }

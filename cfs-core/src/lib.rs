@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+
 mod cache;
 mod client;
 mod error;
@@ -73,11 +75,14 @@ impl Ino {
         }
     }
 
-    fn add(&self, n: u64) -> Ino {
+    fn add(&self, n: u64) -> Result<Ino> {
         self.as_u64()
             .checked_add(n)
-            .expect("BUG: ino overflowed u64")
-            .into()
+            .map(|i| i.into())
+            .ok_or(Error::new(
+                ErrorKind::Other,
+                "ino value overflow, unable to create new files",
+            ))
     }
 
     #[inline]

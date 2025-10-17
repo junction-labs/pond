@@ -22,7 +22,7 @@ use std::{
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 #[path = "./metadata.fbs.rs"]
-#[allow(warnings)]
+#[allow(warnings, clippy::unwrap_used)]
 #[rustfmt::skip]
 mod fb;
 
@@ -319,7 +319,7 @@ impl VolumeMetadata {
         }
 
         // start modifying things
-        let ino = self.next_ino();
+        let ino = self.next_ino()?;
         let slot = match self.data.entry(ino) {
             btree_map::Entry::Vacant(slot) => slot,
             btree_map::Entry::Occupied(slot) => unreachable!("BUG: inode reused"),
@@ -367,7 +367,7 @@ impl VolumeMetadata {
                 Ok(attr) => attr.ino,
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     self.lookup_unchecked(dir, &dir_name)
-                        .expect("BUG: lookup failed after exists error")
+                        .expect("BUG: lookup failed after exists")
                         .ino
                 }
                 Err(e) => return Err(e),
@@ -378,7 +378,12 @@ impl VolumeMetadata {
         if depth == 0 {
             return Err(Error::new(ErrorKind::InvalidData, "empty path"));
         }
-        Ok(&self.data.get(&dir).unwrap().attr)
+
+        Ok(self
+            .data
+            .get(&dir)
+            .map(|e| &e.attr)
+            .expect("BUG: lookup failed after mkdir"))
     }
 
     /// Remove a directory.
@@ -401,7 +406,7 @@ impl VolumeMetadata {
         match data_entry.get().data {
             EntryData::Dynamic | EntryData::File { .. } => Err(ErrorKind::NotADirectory.into()),
             EntryData::Directory => {
-                let not_empty = self.dirs.range(entry_range(ino)).any(|_| true);
+                let not_empty = self.dirs.range(entry_range(ino)?).any(|_| true);
                 if not_empty {
                     return Err(ErrorKind::DirectoryNotEmpty.into());
                 }
@@ -445,7 +450,7 @@ impl VolumeMetadata {
             }
             // not allowed to rename and overwrite a non-empty directory
             Some(e) if e.kind == FileType::Directory => {
-                let not_empty = self.dirs.range(entry_range(e.ino)).any(|_| true);
+                let not_empty = self.dirs.range(entry_range(e.ino)?).any(|_| true);
                 if not_empty {
                     return Err(ErrorKind::DirectoryNotEmpty.into());
                 }
@@ -489,7 +494,7 @@ impl VolumeMetadata {
         }
 
         // verification is okay, start modifying things
-        let ino = self.next_ino();
+        let ino = self.next_ino()?;
         let slot = self.data.entry(ino);
 
         let location_idx = insert_unique(&mut self.locations, location);
@@ -550,10 +555,10 @@ impl VolumeMetadata {
         }
     }
 
-    fn next_ino(&mut self) -> Ino {
+    fn next_ino(&mut self) -> crate::Result<Ino> {
         let ino = self.next_ino;
-        self.next_ino = self.next_ino.add(1);
-        ino
+        self.next_ino = self.next_ino.add(1)?;
+        Ok(ino)
     }
 
     /// Lookup a directory entry by name.
@@ -706,7 +711,7 @@ impl VolumeMetadata {
         let _ = self.dir_entry(ino)?;
 
         Ok(ReadDir {
-            range: self.dirs.range(entry_range(ino)),
+            range: self.dirs.range(entry_range(ino)?),
             data: &self.data,
         })
     }
@@ -721,7 +726,7 @@ impl VolumeMetadata {
     pub(crate) fn walk<'a>(&'a self, ino: Ino) -> crate::Result<WalkIter<'a>> {
         let root_dir = self.dir_entry(ino)?;
         let root_iter = ReadDir {
-            range: self.dirs.range(entry_range(ino)),
+            range: self.dirs.range(entry_range(ino)?),
             data: &self.data,
         };
         Ok(WalkIter {
@@ -791,7 +796,7 @@ impl VolumeMetadata {
                 if !ino.is_regular() {
                     continue;
                 }
-                dir_entries.push(to_fb_entry(&mut fbb, entry));
+                dir_entries.push(to_fb_entry(&mut fbb, entry)?);
             }
             fbb.create_vector(&dir_entries)
         };
@@ -834,7 +839,7 @@ impl VolumeMetadata {
             volume.dirs.insert(dir_key, entry.attr.ino);
             volume.data.insert(entry.attr.ino, entry);
         }
-        volume.next_ino = max_ino.add(1);
+        volume.next_ino = max_ino.add(1)?;
 
         Ok(volume)
     }
@@ -851,10 +856,10 @@ fn insert_unique<T: std::cmp::PartialEq>(xs: &mut Vec<T>, x: T) -> usize {
     }
 }
 
-fn entry_range(ino: Ino) -> std::ops::Range<EntryKey<'static>> {
+fn entry_range(ino: Ino) -> crate::Result<std::ops::Range<EntryKey<'static>>> {
     let start: EntryKey = (ino, "").into();
-    let end: EntryKey = (ino.add(1), "").into();
-    start..end
+    let end: EntryKey = (ino.add(1)?, "").into();
+    Ok(start..end)
 }
 
 /// The iterator returned from [readdir][Volume::readdir].
@@ -892,15 +897,18 @@ impl<'a> Iterator for WalkIter<'a> {
     // TODO: it's a big gnarly to be cloning and returning the ancestors path
     // every time but the lifetime on returning a slice referencing self
     // is a pain to express.
-    type Item = (&'a str, Vec<&'a str>, &'a FileAttr);
+    type Item = crate::Result<(&'a str, Vec<&'a str>, &'a FileAttr)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.readdirs.is_empty() {
-            let next = self.readdirs.last_mut().unwrap().next();
+            let next = self.readdirs.last_mut()?.next();
             match next {
                 Some((name, attr)) => {
                     let ancestors = if attr.is_directory() {
-                        let next = self.volume.readdir(attr.ino).unwrap();
+                        let next = match self.volume.readdir(attr.ino) {
+                            Ok(next) => next,
+                            Err(e) => return Some(Err(e)),
+                        };
                         let ancestors = self.ancestors.clone();
                         self.readdirs.push(next);
                         self.ancestors.push(name);
@@ -908,7 +916,7 @@ impl<'a> Iterator for WalkIter<'a> {
                     } else {
                         self.ancestors.clone()
                     };
-                    return Some((name, ancestors, attr));
+                    return Some(Ok((name, ancestors, attr)));
                 }
                 None => {
                     self.readdirs.pop();
@@ -921,14 +929,17 @@ impl<'a> Iterator for WalkIter<'a> {
     }
 }
 
-fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<fb::Entry<'a>> {
+fn to_fb_entry<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    entry: &Entry,
+) -> crate::Result<WIPOffset<fb::Entry<'a>>> {
     let attrs = fb::FileAttrs::create(
         fbb,
         &fb::FileAttrsArgs {
             ino: entry.attr.ino.into(),
             size: entry.attr.size,
-            mtime: Some(&entry.attr.mtime.into()),
-            ctime: Some(&entry.attr.ctime.into()),
+            mtime: Some(&entry.attr.mtime.try_into()?),
+            ctime: Some(&entry.attr.ctime.try_into()?),
             kind: entry.attr.kind.into(),
         },
     );
@@ -950,7 +961,7 @@ fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<
     };
 
     let name = fbb.create_string(&entry.name);
-    fb::Entry::create(
+    Ok(fb::Entry::create(
         fbb,
         &fb::EntryArgs {
             name: Some(name),
@@ -958,7 +969,7 @@ fn to_fb_entry<'a>(fbb: &mut FlatBufferBuilder<'a>, entry: &Entry) -> WIPOffset<
             attrs: Some(attrs),
             location_ref,
         },
-    )
+    ))
 }
 
 fn from_fb_entry(fb_entry: &fb::Entry) -> crate::Result<Entry> {
@@ -1008,12 +1019,21 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> crate::Result<Entry> {
     })
 }
 
-impl From<SystemTime> for fb::Timespec {
-    fn from(time: SystemTime) -> Self {
-        let since_epoch = time
-            .duration_since(UNIX_EPOCH)
-            .expect("time before unix epoch");
-        fb::Timespec::new(since_epoch.as_secs(), since_epoch.subsec_nanos())
+impl TryFrom<SystemTime> for fb::Timespec {
+    type Error = crate::Error;
+
+    fn try_from(time: SystemTime) -> Result<Self, Self::Error> {
+        let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|e| {
+            Error::new_context(
+                ErrorKind::InvalidData,
+                format!("bad timestamp: {:?}", time),
+                e,
+            )
+        })?;
+        Ok(fb::Timespec::new(
+            since_epoch.as_secs(),
+            since_epoch.subsec_nanos(),
+        ))
     }
 }
 
@@ -1088,7 +1108,7 @@ mod test {
         let _ = v.dir_entry(ino)?;
 
         let iter = ReadDir {
-            range: v.dirs.range(entry_range(ino)),
+            range: v.dirs.range(entry_range(ino)?),
             data: &v.data,
         }
         .filter(|(_, attr)| attr.ino.is_regular());
@@ -1374,7 +1394,8 @@ mod test {
             volume
                 .walk(Ino::Root)
                 .unwrap()
-                .filter_map(|(name, mut dirs, attr)| {
+                .filter_map(|entry| {
+                    let (name, mut dirs, attr) = entry.unwrap();
                     // skip any file at the root of the directory with size
                     // zero. those are special files
                     if dirs.is_empty() && attr.is_file() && attr.size == 0 {

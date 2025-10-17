@@ -24,7 +24,7 @@ impl Storage {
     pub(crate) fn for_location(s: &str) -> Result<Self> {
         match Url::parse(s) {
             Ok(url) => match url.scheme() {
-                "memory" => Ok(Self::new_in_memory()),
+                "memory" => Ok(Self::new_in_memory()?),
                 "s3" => Self::new_s3(&url),
                 "file" => {
                     if !url.authority().is_empty() {
@@ -54,15 +54,18 @@ impl Storage {
         }
     }
 
-    pub(crate) fn new_in_memory() -> Self {
+    pub(crate) fn new_in_memory() -> Result<Self> {
         let client = object_store::memory::InMemory::new();
-        let temp_dir = tempfile::Builder::new().prefix(".cfs").tempdir().unwrap();
+        let temp_dir = tempfile::Builder::new()
+            .prefix(".cfs")
+            .tempdir()
+            .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempdir", e))?;
 
-        Storage {
+        Ok(Storage {
             base_path: None,
             temp_dir: Arc::new(temp_dir),
             remote: Arc::new(client),
-        }
+        })
     }
 
     pub(crate) fn new_s3(url: &Url) -> Result<Self> {
@@ -101,7 +104,13 @@ impl Storage {
             .tempdir_in(base_path)
             .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempdir", e))?;
 
-        let client = LocalFileSystem::new_with_prefix(base_path).unwrap();
+        let client = LocalFileSystem::new_with_prefix(base_path).map_err(|e| {
+            Error::new_context(
+                ErrorKind::Other,
+                "failed to build LocalFileSystem object store client",
+                e,
+            )
+        })?;
 
         Ok(Storage {
             base_path: None,
