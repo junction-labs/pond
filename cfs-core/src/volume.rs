@@ -502,30 +502,43 @@ fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor
     fd
 }
 
+macro_rules! try_mpu {
+    ($mpu:expr, $context:literal) => {
+        $mpu.await.map_err(|e| {
+            let kind = match &e {
+                object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
+                object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
+                object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
+                _ => ErrorKind::Other,
+            };
+            Error::new_context(kind, $context, e)
+        })?
+    };
+}
+
+macro_rules! try_io {
+    ($io: expr, $context: literal) => {
+        $io.await
+            .map_err(|e| Error::new_context(e.kind().into(), $context, e))?
+    };
+}
+
 struct StagedVolume<'a> {
     inner: &'a mut Volume,
 }
 
 impl StagedVolume<'_> {
+    /// The size of each part within the multipart upload (excluding the last which is allowed to
+    /// be smaller). Aligned to 32MiB to help with alignment when reading from object storage.
+    const MPU_UPLOAD_SIZE: usize = 32 * 1024 * 1024;
+    const READ_BUF_SIZE: usize = 8 * 1024;
+
     /// Upload all staged files into a single blob under base.
     ///
     /// Returns the location of the newly uploaded blob and a vector that maps each newly written
-    /// Ino to its ByteRange within the new blob.
+    /// Ino to its ByteRange within the new blob. Files are uploaded to the blob using multipart
+    /// uploads.
     async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
-        macro_rules! try_mpu {
-            ($mpu:expr, $context:literal) => {
-                $mpu.await.map_err(|e| {
-                    let kind = match &e {
-                        object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                        object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
-                        object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                        _ => ErrorKind::Other,
-                    };
-                    Error::new_context(kind, $context, e)
-                })?
-            };
-        }
-
         let dest = self.inner.store.new_data();
 
         let mut offset = 0;
@@ -535,22 +548,64 @@ impl StagedVolume<'_> {
             "failed to start multipart upload"
         );
 
+        let mut buf = BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE);
+        let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
         for (attr, path) in self.inner.meta.iter_staged() {
-            // don't actually do anything for zero sized files
+            // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let data = read_file_bytes(path, attr.size).await.map_err(|e| {
-                    Error::new_context(e.kind().into(), "failed to read staged file", e)
-                })?;
+                let file = try_io!(tokio::fs::File::open(path), "failed to open staged file");
+                let mut reader = tokio::io::BufReader::new(file).take(attr.size);
 
-                try_mpu!(
-                    writer.put_part(PutPayload::from_bytes(data)),
-                    "failed to upload part"
-                );
-            };
+                loop {
+                    // to avoid going over Self::MPU_UPLOAD_SIZE, limit how many bytes we read
+                    // once we're close to the limit. this helps us push up perfectly aligned parts
+                    // for the multipart upload.
+                    let limit = Self::READ_BUF_SIZE.min(buf.capacity());
+                    let n = try_io!(
+                        reader.read(&mut read_buf[..limit]),
+                        "failed to read staged file"
+                    );
+
+                    if n == 0 {
+                        break;
+                    }
+
+                    buf.extend_from_slice(&read_buf[..n]);
+
+                    // we've hit our target upload size, so beam it up.
+                    if buf.len() >= Self::MPU_UPLOAD_SIZE {
+                        let frozen = buf.freeze();
+                        try_mpu!(
+                            writer.put_part(PutPayload::from_bytes(frozen.clone())),
+                            "failed to upload part"
+                        );
+                        buf = match frozen.try_into_mut() {
+                            // we're able to get the original buffer back, clear and reuse it
+                            // to avoid reallocating
+                            Ok(mut buf) => {
+                                buf.clear();
+                                buf
+                            }
+                            // we can't get the original buffer back which a reference is still
+                            // alive out there.
+                            Err(_) => BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE),
+                        };
+                    }
+                }
+            }
 
             staged.push((attr.ino, (offset, attr.size).into()));
             offset += attr.size;
         }
+
+        // last part within an multi-part upload can be less than 5MiB
+        if !buf.is_empty() {
+            try_mpu!(
+                writer.put_part(PutPayload::from_bytes(buf.into())),
+                "failed to upload part"
+            );
+        }
+
         try_mpu!(writer.complete(), "failed to complete upload");
 
         Ok((Location::committed(dest), staged))
@@ -608,21 +663,6 @@ impl StagedVolume<'_> {
             }
         }
     }
-}
-
-/// Read at most `limit` bytes from the file at `path`. Reads directly into a
-/// [BytesMut] to avoid initializing an allocation.
-async fn read_file_bytes(path: impl AsRef<std::path::Path>, limit: u64) -> std::io::Result<Bytes> {
-    let mut buf = BytesMut::with_capacity(limit as usize);
-    let mut f = tokio::fs::File::open(path).await?.take(limit);
-
-    loop {
-        let n = f.read_buf(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-    }
-    Ok(buf.freeze())
 }
 
 #[cfg(test)]
