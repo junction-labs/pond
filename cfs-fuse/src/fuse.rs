@@ -2,15 +2,30 @@ use cfs_core::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
+use std::u64;
 
 pub struct Cfs {
     volume: Volume,
     runtime: tokio::runtime::Runtime,
+    uid: u32,
+    gid: u32,
 }
 
 impl Cfs {
-    pub(crate) fn new(runtime: tokio::runtime::Runtime, volume: Volume) -> Self {
-        Self { volume, runtime }
+    pub(crate) fn new(
+        runtime: tokio::runtime::Runtime,
+        volume: Volume,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Self {
+        let uid = uid.unwrap_or_else(|| getuid());
+        let gid = gid.unwrap_or_else(|| getgid());
+        Self {
+            volume,
+            runtime,
+            uid,
+            gid,
+        }
     }
 }
 
@@ -65,7 +80,11 @@ impl fuser::Filesystem for Cfs {
     ) {
         let name = fs_try!(reply, from_os_str(name));
         match fs_try!(reply, self.volume.lookup(parent.into(), name)) {
-            Some(attr) => reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0),
+            Some(attr) => reply.entry(
+                &Duration::new(0, 0),
+                &fuse_attr(self.uid, self.gid, attr),
+                0,
+            ),
             None => reply.error(libc::ENOENT),
         }
     }
@@ -78,7 +97,7 @@ impl fuser::Filesystem for Cfs {
         reply: fuser::ReplyAttr,
     ) {
         let attr = fs_try!(reply, self.volume.getattr(ino.into()));
-        reply.attr(&Duration::new(0, 0), &fuse_attr(attr));
+        reply.attr(&Duration::new(0, 0), &fuse_attr(self.uid, self.gid, attr));
     }
 
     fn readdir(
@@ -112,7 +131,11 @@ impl fuser::Filesystem for Cfs {
     ) {
         let name = fs_try!(reply, from_os_str(name));
         let attr = fs_try!(reply, self.volume.mkdir(parent.into(), name.to_string()));
-        reply.entry(&Duration::new(0, 0), &fuse_attr(attr), 0);
+        reply.entry(
+            &Duration::new(0, 0),
+            &fuse_attr(self.uid, self.gid, attr),
+            0,
+        );
     }
 
     fn rmdir(
@@ -175,7 +198,13 @@ impl fuser::Filesystem for Cfs {
             reply,
             self.volume.create(parent.into(), name.to_string(), excl)
         );
-        reply.created(&Duration::new(0, 0), &fuse_attr(attr), 0, fd.into(), 0);
+        reply.created(
+            &Duration::new(0, 0),
+            &fuse_attr(self.uid, self.gid, attr),
+            0,
+            fd.into(),
+            0,
+        );
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
@@ -302,7 +331,7 @@ impl fuser::Filesystem for Cfs {
         };
 
         let attr = fs_try!(reply, self.volume.getattr(ino));
-        reply.attr(&Duration::new(0, 0), &fuse_attr(attr));
+        reply.attr(&Duration::new(0, 0), &fuse_attr(self.uid, self.gid, attr));
     }
 
     fn release(
@@ -333,23 +362,33 @@ impl fuser::Filesystem for Cfs {
     }
 }
 
-fn fuse_attr(attr: &cfs_core::FileAttr) -> fuser::FileAttr {
+fn fuse_attr(uid: u32, gid: u32, attr: &cfs_core::FileAttr) -> fuser::FileAttr {
+    // directories get rwxr-xr-x and files get rw-r--r--
+    let perm = if attr.is_directory() { 0o744 } else { 0o644 };
+    // root gets 2 links and everything else just has one. it doesn't really
+    // seem to matter for most tools - we don't do hardlinks and we track
+    // directory entry counts another way.
+    let nlink = if attr.ino.is_root() { 2 } else { 1 };
     fuser::FileAttr {
         ino: attr.ino.into(),
         size: attr.size,
-        blocks: 0, // FIXME
         atime: attr.mtime,
         mtime: attr.mtime,
         ctime: attr.ctime,
         crtime: attr.ctime,
         kind: fuse_kind(attr.kind),
-        perm: 0o644,
-        nlink: 2,   // FIXME
-        uid: 0,     // FIXME
-        gid: 0,     // FIXME
-        rdev: 0,    // ignored
-        blksize: 0, // ignored
-        flags: 0,   // ignored
+        perm,
+        nlink,
+        uid,
+        gid,
+        // ignored fields below
+        blocks: 0,
+        rdev: 0,
+        blksize: 0,
+        // flags are macos only. if we do macos support it may be worth
+        // setting UF_HIDDEN on special files to keep them from showing up
+        // in Finder.
+        flags: 0,
     }
 }
 
@@ -385,4 +424,14 @@ fn oflags_read_write(flags: i32) -> Option<OpenMode> {
         libc::O_RDWR => Some(OpenMode::ReadWrite),
         _ => None,
     }
+}
+
+// getuid is always successful
+fn getuid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+// getgid is always successful
+fn getgid() -> u32 {
+    unsafe { libc::getgid() }
 }

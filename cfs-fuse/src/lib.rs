@@ -156,7 +156,7 @@ pub fn mount_volume(
     allow_other: bool,
     auto_unmount: bool,
 ) -> anyhow::Result<fuser::Session<Cfs>> {
-    let cfs = Cfs::new(runtime, volume);
+    let cfs = Cfs::new(runtime, volume, None, None);
     let mut opts = vec![
         fuser::MountOption::FSName("cfs".to_string()),
         fuser::MountOption::Subtype("cool".to_string()),

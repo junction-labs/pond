@@ -85,8 +85,9 @@ impl Ino {
             ))
     }
 
+    #[cold]
     #[inline]
-    fn is_root(&self) -> bool {
+    pub fn is_root(&self) -> bool {
         matches!(self, Ino::Root)
     }
 
