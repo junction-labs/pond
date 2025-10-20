@@ -82,7 +82,7 @@ internal format, and save it.
 
 ```
 mkdir -p /tmp/hello-pond
-pond pack pond/pond /tmp/hello-pond v1
+pond pack pond /tmp/hello-pond v1
 ```
 
 You can examine the contents of the local volume with the `pond` CLI to
@@ -90,16 +90,34 @@ see what just got packed.
 
 ```
 $ pond list /tmp/hello-pond
+v1
 $ pond dump /tmp/hello-pond
+f    ./d47f401a6f82c8ef.data                             0      153 Cargo.lock
+f    ./d47f401a6f82c8ef.data                           153      498 Cargo.toml
+...
 ```
 
 Now you can mount the volume we just created as a local filesystem:
 
 ```
-mkdir /tmp/pond
-pond mount /tmp/hello-pond /tmp/pond
-ls /tmp/pond/
-grep "mount the volume" /tmp/pond-example/README.md
+$ mkdir /tmp/pond
+$pond mount /tmp/hello-pond /tmp/pond
+```
+
+And then use it like a filesystem from another terminal:
+
+```
+$ $ ls /tmp/pond
+Cargo.lock  Cargo.toml  fbs/  src/
+$ grep -r pond /tmp/pond
+grep: /tmp/pond/.clearcache: Operation not permitted
+grep: /tmp/pond/.commit: Operation not permitted
+/tmp/pond/Cargo.lock:name = "pond-core"
+/tmp/pond/Cargo.toml:name = "pond"
+/tmp/pond/src/metadata.rs:/// `VolumeMetadata` holds all of file and directory metadata for a pond
+/tmp/pond/src/storage.rs:            .prefix(".pond")
+/tmp/pond/src/storage.rs:            .prefix(".pond")
+/tmp/pond/src/storage.rs:            .prefix(".pond")
 ```
 
 To update the volume, write data into a file just you normally would. Once
@@ -108,8 +126,8 @@ for the commit into the special `/tmp/pond.commit` file. The commit label
 can be any utf-8 string that's 64 characters or less:
 
 ```
-echo "hi pond" > /tmp/pond/hi.txt
-echo "v2" > /tmp/pond/.commit
+$ echo "hi pond" > /tmp/pond/hi.txt
+$ echo "v2" > /tmp/pond/.commit
 ```
 
 You should now see two versions of the example volume saved in object
