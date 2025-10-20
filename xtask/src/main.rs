@@ -10,11 +10,14 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run a stricter version of clippy for CI.
+    /// Run a strict version of clippy for CI.
     CiClippy,
 
     /// Generate sources from flatbuffers.
     Generate,
+
+    /// Check to see if the repository is dirty.
+    CheckUncommitted,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -25,11 +28,10 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.cmd {
-        Cmd::CiClippy => ci_clippy(&sh)?,
-        Cmd::Generate => generate_srcs(&sh, "cfs-core")?,
+        Cmd::CiClippy => ci_clippy(&sh),
+        Cmd::Generate => generate_srcs(&sh, "cfs-core"),
+        Cmd::CheckUncommitted => check_uncommitted(&sh),
     }
-
-    Ok(())
 }
 
 fn project_root() -> PathBuf {
@@ -65,5 +67,14 @@ fn ci_clippy(sh: &Shell) -> anyhow::Result<()> {
     ];
 
     cmd!(sh, "cargo clippy {cargo_flags...} -- {clippy_flags...}").run()?;
+    Ok(())
+}
+
+fn check_uncommitted(sh: &Shell) -> anyhow::Result<()> {
+    let changed = cmd!(sh, "git status --porcelain").read()?;
+    if !changed.is_empty() {
+        anyhow::bail!("found uncomitted changes: \n\n{changed}");
+    }
+
     Ok(())
 }
