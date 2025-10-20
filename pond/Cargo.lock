@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cfs-core"
+name = "pond-core"
 version = "0.1.0"

@@ -1,5 +1,5 @@
 [package]
-name = "cfs-fuse"
+name = "pond-fs"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -13,7 +13,7 @@ libc.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-cfs-core.workspace = true
+pond.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 fuser = { workspace = true, default_features = false, features = ["libfuse"] }

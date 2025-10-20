@@ -96,9 +96,9 @@ impl Version {
     }
 }
 
-/// `VolumeMetadata` holds all of file and directory metadata for a coolfs
+/// `VolumeMetadata` holds all of file and directory metadata for a pond
 /// volume. Metadata is extremely low-level, and working with a it requires
-/// knowledge of the internals of CFS. This should never be the first thing
+/// knowledge of the internals of Pond. This should never be the first thing
 /// you reach for.
 ///
 /// # Staging

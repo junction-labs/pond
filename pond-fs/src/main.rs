@@ -2,7 +2,7 @@
 
 use clap::Parser;
 
-use cfs_fuse::*;
+use pond_fs::*;
 
 fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
@@ -34,11 +34,11 @@ fn main() -> std::io::Result<()> {
 
 fn version() -> anyhow::Result<()> {
     let pkg_version = option_env!("CARGO_PKG_VERSION").unwrap_or("dev");
-    let git_sha = option_env!("CFS_GIT_SHA");
+    let git_sha = option_env!("POND_GIT_SHA");
 
     match git_sha {
-        Some(sha) => println!("cfs {pkg_version} ({sha})"),
-        None => println!("cfs {pkg_version}"),
+        Some(sha) => println!("pond {pkg_version} ({sha})"),
+        None => println!("pond {pkg_version}"),
     }
 
     Ok(())

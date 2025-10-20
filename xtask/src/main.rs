@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
 
     match args.cmd {
         Cmd::CiClippy => ci_clippy(&sh),
-        Cmd::Generate => generate_srcs(&sh, "cfs-core"),
+        Cmd::Generate => generate_srcs(&sh, "pond"),
         Cmd::CheckUncommitted => check_uncommitted(&sh),
     }
 }

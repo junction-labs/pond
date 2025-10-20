@@ -51,7 +51,7 @@ Install Pond from source by cloning the git repo and running `cargo install`:
 
 ```
 https://github.com/junction-labs/pond.git
-cargo install --path ./pond/pond-fuse
+cargo install --path ./pond/pond-fs
 ```
 
 Verify that Pond is installed:
@@ -73,7 +73,7 @@ First, install Pond from source:
 
 ```
 https://github.com/junction-labs/pond.git
-cargo install --path ./pond/pond-fuse
+cargo install --path ./pond/pond-fs
 ```
 
 Once you've got Pond installed, you can create and save a volume from any
@@ -82,7 +82,7 @@ internal format, and save it.
 
 ```
 mkdir -p /tmp/hello-pond
-pond pack pond/pond-core /tmp/hello-pond v1
+pond pack pond/pond /tmp/hello-pond v1
 ```
 
 You can examine the contents of the local volume with the `pond` CLI to

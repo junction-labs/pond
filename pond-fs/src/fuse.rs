@@ -1,16 +1,16 @@
-use cfs_core::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
+use pond::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
 
-pub struct Cfs {
+pub struct Pond {
     volume: Volume,
     runtime: tokio::runtime::Runtime,
     uid: u32,
     gid: u32,
 }
 
-impl Cfs {
+impl Pond {
     pub(crate) fn new(
         runtime: tokio::runtime::Runtime,
         volume: Volume,
@@ -32,19 +32,19 @@ trait AsErrno {
     fn as_errno(&self) -> libc::c_int;
 }
 
-impl AsErrno for cfs_core::ErrorKind {
+impl AsErrno for pond::ErrorKind {
     fn as_errno(&self) -> libc::c_int {
         match self {
-            cfs_core::ErrorKind::IsADirectory => libc::EISDIR,
-            cfs_core::ErrorKind::NotADirectory => libc::ENOTDIR,
-            cfs_core::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
-            cfs_core::ErrorKind::AlreadyExists => libc::EEXIST,
-            cfs_core::ErrorKind::NotFound => libc::ENOENT,
-            cfs_core::ErrorKind::PermissionDenied => libc::EPERM,
-            cfs_core::ErrorKind::InvalidData => libc::EINVAL,
-            cfs_core::ErrorKind::TimedOut => libc::ETIMEDOUT,
-            cfs_core::ErrorKind::Unsupported => libc::ENOTSUP,
-            cfs_core::ErrorKind::Other | _ => libc::EIO,
+            pond::ErrorKind::IsADirectory => libc::EISDIR,
+            pond::ErrorKind::NotADirectory => libc::ENOTDIR,
+            pond::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
+            pond::ErrorKind::AlreadyExists => libc::EEXIST,
+            pond::ErrorKind::NotFound => libc::ENOENT,
+            pond::ErrorKind::PermissionDenied => libc::EPERM,
+            pond::ErrorKind::InvalidData => libc::EINVAL,
+            pond::ErrorKind::TimedOut => libc::ETIMEDOUT,
+            pond::ErrorKind::Unsupported => libc::ENOTSUP,
+            pond::ErrorKind::Other | _ => libc::EIO,
         }
     }
 }
@@ -54,7 +54,7 @@ macro_rules! fs_try {
         match $e {
             Ok(v) => v,
             Err(err) => {
-                let err: cfs_core::Error = err.into();
+                let err: pond::Error = err.into();
                 $reply.error(err.kind().as_errno());
                 return;
             }
@@ -62,11 +62,11 @@ macro_rules! fs_try {
     };
 }
 
-fn from_os_str(s: &OsStr) -> cfs_core::Result<&str> {
+fn from_os_str(s: &OsStr) -> pond::Result<&str> {
     s.to_str().ok_or_else(|| ErrorKind::InvalidData.into())
 }
 
-impl fuser::Filesystem for Cfs {
+impl fuser::Filesystem for Pond {
     // TODO: set up uid/gid with init
     // TODO: set capabilities with init
 
@@ -361,7 +361,7 @@ impl fuser::Filesystem for Cfs {
     }
 }
 
-fn fuse_attr(uid: u32, gid: u32, attr: &cfs_core::FileAttr) -> fuser::FileAttr {
+fn fuse_attr(uid: u32, gid: u32, attr: &pond::FileAttr) -> fuser::FileAttr {
     // directories get rwxr-xr-x and files get rw-r--r--
     let perm = if attr.is_directory() { 0o744 } else { 0o644 };
     // root gets 2 links and everything else just has one. it doesn't really
@@ -391,10 +391,10 @@ fn fuse_attr(uid: u32, gid: u32, attr: &cfs_core::FileAttr) -> fuser::FileAttr {
     }
 }
 
-fn fuse_kind(kind: cfs_core::FileType) -> fuser::FileType {
+fn fuse_kind(kind: pond::FileType) -> fuser::FileType {
     match kind {
-        cfs_core::FileType::Regular => fuser::FileType::RegularFile,
-        cfs_core::FileType::Directory => fuser::FileType::Directory,
+        pond::FileType::Regular => fuser::FileType::RegularFile,
+        pond::FileType::Directory => fuser::FileType::Directory,
     }
 }
 

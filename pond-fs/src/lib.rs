@@ -1,14 +1,14 @@
 mod fuse;
 
 use bytesize::ByteSize;
-use cfs_core::{Client, Error, ErrorKind, Version, Volume};
 use clap::{Parser, Subcommand, value_parser};
+use pond::{Client, Error, ErrorKind, Version, Volume};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
 
-use crate::fuse::Cfs;
+use crate::fuse::Pond;
 
 #[derive(Parser)]
 pub struct Args {
@@ -26,7 +26,7 @@ pub enum Cmd {
     /// Print version info.
     Version,
 
-    /// *Experimental* - Dump the metadata for a CFS volume.
+    /// *Experimental* - Dump the metadata for a Pond volume.
     Dump {
         /// An existing volume path.
         volume: String,
@@ -37,7 +37,7 @@ pub enum Cmd {
         version: Option<String>,
     },
 
-    /// *Experimental* - Pack a local directory into a CFS volume.
+    /// *Experimental* - Pack a local directory into a Pond volume.
     Pack {
         /// An existing directory to pack into a volume.
         dir: String,
@@ -53,7 +53,7 @@ pub enum Cmd {
     /// List all versions in the volume.
     List { volume: String },
 
-    /// Run a cfs FUSE mount.
+    /// Run a pond FUSE mount.
     Mount(MountArgs),
 }
 
@@ -168,11 +168,11 @@ pub fn mount_volume(
     runtime: tokio::runtime::Runtime,
     allow_other: bool,
     auto_unmount: bool,
-) -> anyhow::Result<fuser::Session<Cfs>> {
-    let cfs = Cfs::new(runtime, volume, None, None);
+) -> anyhow::Result<fuser::Session<Pond>> {
+    let pond = Pond::new(runtime, volume, None, None);
     let mut opts = vec![
-        fuser::MountOption::FSName("cfs".to_string()),
-        fuser::MountOption::Subtype("cool".to_string()),
+        fuser::MountOption::FSName("pond".to_string()),
+        fuser::MountOption::Subtype("pond".to_string()),
         fuser::MountOption::NoDev,
         fuser::MountOption::NoAtime,
     ];
@@ -186,5 +186,5 @@ pub fn mount_volume(
         opts.push(fuser::MountOption::AutoUnmount);
     }
 
-    Ok(fuser::Session::new(cfs, mountpoint, &opts)?)
+    Ok(fuser::Session::new(pond, mountpoint, &opts)?)
 }

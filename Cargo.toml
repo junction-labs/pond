@@ -3,15 +3,15 @@
 resolver = "2"
 
 members = [
-    "cfs-core",
-    "cfs-fuse",
+    "pond",
+    "pond-fs",
     "xtask",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-repository = "https://github.com/junctionlabs/coolfs"
+repository = "https://github.com/junctionlabs/pond"
 homepage = "https://junctionlabs.io"
 
 [workspace.dependencies]
@@ -37,5 +37,5 @@ tracing-subscriber = "0.3"
 url = "2.5.7"
 walkdir = "2"
 
-cfs-core = { version = "0.1.0", path = "./cfs-core", default-features = false }
-cfs-client = { version = "0.1.0", path = "./cfs-client", default-features = false }
+pond = { version = "0.1.0", path = "./pond", default-features = false }
+pond-client = { version = "0.1.0", path = "./pond-client", default-features = false }

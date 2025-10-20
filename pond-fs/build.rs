@@ -15,7 +15,7 @@ fn git_rev_hash() {
                 println!("cargo:warning=empty output from `git rev-parse`");
                 return;
             }
-            println!("cargo:rustc-env=CFS_GIT_SHA={git_sha}");
+            println!("cargo:rustc-env=POND_GIT_SHA={git_sha}");
         }
         Err(e) => println!("cargo:warning=failed to run `git rev-parse`: {e}"),
     }

@@ -400,7 +400,7 @@ impl Volume {
         Ok(())
     }
 
-    /// Pack a local directory into a CFS volume.
+    /// Pack a local directory into a Pond volume.
     pub async fn pack(&mut self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
         if self.store.exists(&version).await? {
             return Err(Error::new(

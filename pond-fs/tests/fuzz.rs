@@ -6,8 +6,8 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use cfs_core::{Client, Version, Volume};
-use cfs_fuse::pack;
+use pond::{Client, Version, Volume};
+use pond_fs::pack;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
 // known-bad seeds or anything like that.
@@ -16,7 +16,7 @@ use cfs_fuse::pack;
 /// comparing them to the local filesystem.
 #[test]
 fn fuzz_empty_volume() {
-    let fuzz_dir = project_root().join("target/cfs/integration/fuzz_empty");
+    let fuzz_dir = project_root().join("target/pond/integration/fuzz_empty");
     std::fs::create_dir_all(&fuzz_dir).unwrap();
 
     let expected_dir = fuzz_dir.join("expected");
@@ -69,7 +69,7 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
 
 #[test]
 fn fuzz_pack() {
-    let fuzz_dir = project_root().join("target/cfs/integration/fuzz_pack");
+    let fuzz_dir = project_root().join("target/pond/integration/fuzz_pack");
     let pack_dir = fuzz_dir.join("volume");
     let expected_dir = fuzz_dir.join("expected");
     let actual_dir = fuzz_dir.join("actual");
@@ -141,7 +141,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
 
 #[test]
 fn fuzz_commit() {
-    let fuzz_dir = project_root().join("target/cfs/integration/fuzz_commit");
+    let fuzz_dir = project_root().join("target/pond/integration/fuzz_commit");
     let expected_dir = fuzz_dir.join("expected");
     let mount_dir = fuzz_dir.join("mount");
     let volume_dir = fuzz_dir.join("volume");
@@ -299,7 +299,7 @@ impl Drop for AutoUnmount {
 
 // spawn a new mount on a background thread
 fn spawn_mount(mountpoint: impl AsRef<Path>, volume: Volume) -> AutoUnmount {
-    let session = cfs_fuse::mount_volume(
+    let session = pond_fs::mount_volume(
         mountpoint,
         volume,
         test_runtime(),

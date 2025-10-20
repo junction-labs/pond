@@ -57,7 +57,7 @@ impl Storage {
     pub(crate) fn new_in_memory() -> Result<Self> {
         let client = object_store::memory::InMemory::new();
         let temp_dir = tempfile::Builder::new()
-            .prefix(".cfs")
+            .prefix(".pond")
             .tempdir()
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
@@ -81,7 +81,7 @@ impl Storage {
         })?;
 
         let temp_dir = tempfile::Builder::new()
-            .prefix(".cfs")
+            .prefix(".pond")
             .tempdir()
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
@@ -109,7 +109,7 @@ impl Storage {
         // to the local filesystem client
         let base_path = base_path.as_ref();
         let temp_dir = tempfile::Builder::new()
-            .prefix(".cfs")
+            .prefix(".pond")
             .tempdir_in(base_path)
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
