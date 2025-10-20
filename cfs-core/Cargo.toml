@@ -12,7 +12,7 @@ futures.workspace = true
 object_store.workspace = true
 rand.workspace = true
 thiserror.workspace = true
-tokio = {workspace = true, features = ["fs"]}
+tokio = { workspace = true, features = ["fs"] }
 tempfile.workspace = true
 url.workspace = true
 walkdir.workspace = true

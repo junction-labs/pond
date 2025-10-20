@@ -198,7 +198,7 @@ impl Volume {
                         .open(path)
                         .await
                         .map_err(|e| {
-                            Error::new_context(e.kind().into(), "failed to open staged file", e)
+                            Error::with_source(e.kind().into(), "failed to open staged file", e)
                         })?;
 
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
@@ -226,7 +226,7 @@ impl Volume {
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
                     let file = tokio::fs::File::open(path).await.map_err(|e| {
-                        Error::new_context(e.kind().into(), "failed to open staged file", e)
+                        Error::with_source(e.kind().into(), "failed to open staged file", e)
                     })?;
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
@@ -264,7 +264,7 @@ impl Volume {
             }
             Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
                 .await
-                .map_err(|e| Error::new_context(e.kind().into(), "failed to read staged file", e)),
+                .map_err(|e| Error::with_source(e.kind().into(), "failed to read staged file", e)),
             None => Err(ErrorKind::NotFound.into()),
         }
     }
@@ -301,7 +301,7 @@ impl Volume {
             Some(FileDescriptor::Staged { file, .. }) => {
                 let n = write_at(file, offset, data).await.map_err(|e| {
                     let kind = e.kind().into();
-                    Error::new_context(kind, "failed to write staged file", e)
+                    Error::with_source(kind, "failed to write staged file", e)
                 })?;
                 self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
                 Ok(n)
@@ -382,7 +382,7 @@ impl Volume {
                     let (l, b) = self
                         .metadata()
                         .location(attr.ino)
-                        .expect("BUG: could not lookup location for ino we just walked");
+                        .expect("BUG: failed to lookup location for ino we just walked");
                     location = location_path(l);
                     offset = b.offset;
                     len = b.len;
@@ -418,11 +418,11 @@ impl Volume {
 
         for entry in walker {
             let entry = entry
-                .map_err(|e| Error::new_context(ErrorKind::InvalidData, "failed to walk dir", e))?;
+                .map_err(|e| Error::with_source(ErrorKind::InvalidData, "failed to walk dir", e))?;
             let path = entry
                 .path()
                 .strip_prefix(walk_root)
-                .map_err(|e| Error::new_context(ErrorKind::InvalidData, "prefix not found", e))?;
+                .map_err(|e| Error::with_source(ErrorKind::InvalidData, "prefix not found", e))?;
 
             // for a directory, just mkdir_all on the volume
             if entry.file_type().is_dir() {
@@ -446,7 +446,7 @@ impl Volume {
                 let name = entry.file_name();
                 let dir = path.parent().ok_or(Error::new(
                     ErrorKind::InvalidData,
-                    format!("could not find parent of {}", path.to_string_lossy()),
+                    format!("failed to find parent of {}", path.to_string_lossy()),
                 ))?;
                 let dir_ino = if !dir.to_string_lossy().is_empty() {
                     let dirs = dir
@@ -464,7 +464,14 @@ impl Volume {
                             .io_error()
                             .map(|e| e.kind().into())
                             .unwrap_or(ErrorKind::Other);
-                        Error::new_context(kind, "could not access direntry metadata", e)
+                        Error::with_source(
+                            kind,
+                            format!(
+                                "failed to access direntry metadata for {}",
+                                entry.path().to_string_lossy()
+                            ),
+                            e,
+                        )
                     })?
                     .len();
                 self.metadata_mut().create(
@@ -536,7 +543,7 @@ macro_rules! try_mpu {
                 object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
                 _ => ErrorKind::Other,
             };
-            Error::new_context(kind, $context, e)
+            Error::with_source(kind, $context, e)
         })?
     };
 }
@@ -544,7 +551,7 @@ macro_rules! try_mpu {
 macro_rules! try_io {
     ($io: expr, $context: literal) => {
         $io.await
-            .map_err(|e| Error::new_context(e.kind().into(), $context, e))?
+            .map_err(|e| Error::with_source(e.kind().into(), $context, e))?
     };
 }
 
@@ -680,9 +687,9 @@ impl StagedVolume<'_> {
                     object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
                     _ => ErrorKind::Other,
                 };
-                Err(Error::new_context(
+                Err(Error::with_source(
                     kind,
-                    "uploading volume metadata failed",
+                    "failed to upload volume metadata",
                     e,
                 ))
             }
@@ -751,7 +758,7 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let client = Client::new(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume().await.unwrap();
+        let mut volume = client.create_volume().await;
 
         // clean volume -- this is not staged
         assert!(!volume.meta.is_staged());

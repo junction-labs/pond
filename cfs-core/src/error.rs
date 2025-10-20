@@ -5,34 +5,34 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum ErrorKind {
-    #[error("is a directory")]
+    #[error("Is a directory")]
     IsADirectory,
 
-    #[error("not a directory")]
+    #[error("Not a directory")]
     NotADirectory,
 
-    #[error("directory not empty")]
+    #[error("Directory not empty")]
     DirectoryNotEmpty,
 
-    #[error("already exists")]
+    #[error("Already exists")]
     AlreadyExists,
 
-    #[error("not found")]
+    #[error("Not found")]
     NotFound,
 
-    #[error("permission denied")]
+    #[error("Permission denied")]
     PermissionDenied,
 
-    #[error("invalid data")]
+    #[error("Invalid data")]
     InvalidData,
 
-    #[error("timed out")]
+    #[error("Timed out")]
     TimedOut,
 
-    #[error("unsupported operation")]
+    #[error("Unsupported operation")]
     Unsupported,
 
-    #[error("something went wrong")]
+    #[error("Something went wrong")]
     Other,
 }
 
@@ -43,13 +43,13 @@ pub struct Error {
     context: Option<Cow<'static, str>>,
 
     #[source]
-    data: Option<Box<dyn std::error::Error + Send + Sync>>,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.context {
-            Some(context) => write!(f, "{context}: {kind}", kind = self.kind),
+            Some(context) => write!(f, "{kind}: {context}", kind = self.kind),
             None => write!(f, "{}", self.kind),
         }
     }
@@ -60,35 +60,35 @@ impl From<ErrorKind> for Error {
         Self {
             kind,
             context: None,
-            data: None,
+            source: None,
         }
     }
 }
 
 impl Error {
-    pub fn new<E>(kind: ErrorKind, error: E) -> Self
+    pub fn new<I>(kind: ErrorKind, context: I) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
-        let data = Some(error.into());
-        Self {
-            kind,
-            context: None,
-            data,
-        }
-    }
-
-    pub fn new_context<E, I>(kind: ErrorKind, context: I, error: E) -> Self
-    where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
         I: Into<Cow<'static, str>>,
     {
-        let data = Some(error.into());
         let context = Some(context.into());
         Self {
             kind,
             context,
-            data,
+            source: None,
+        }
+    }
+
+    pub fn with_source<E, I>(kind: ErrorKind, context: I, source: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+        I: Into<Cow<'static, str>>,
+    {
+        let context = Some(context.into());
+        let source = Some(source.into());
+        Self {
+            kind,
+            context,
+            source,
         }
     }
 

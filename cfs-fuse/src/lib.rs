@@ -1,7 +1,7 @@
 mod fuse;
 
 use bytesize::ByteSize;
-use cfs_core::{Client, Version, Volume};
+use cfs_core::{Client, Error, ErrorKind, Version, Volume};
 use clap::{Parser, Subcommand, value_parser};
 use std::{
     path::{Path, PathBuf},
@@ -14,6 +14,11 @@ use crate::fuse::Cfs;
 pub struct Args {
     #[command(subcommand)]
     pub cmd: Cmd,
+
+    /// Include source error information in error output. For a fully detailed backtrace, set
+    /// RUST_BACKTRACE=1.
+    #[clap(long, default_value_t = false)]
+    pub backtrace: bool,
 }
 
 #[derive(Subcommand)]
@@ -26,7 +31,7 @@ pub enum Cmd {
         /// An existing volume path.
         volume: String,
 
-        /// The version of the volume. Defaults to the latest version of the
+        /// The version of the volume. Defaults to the lexographically greatest version in the
         /// volume.
         #[clap(long)]
         version: Option<String>,
@@ -68,8 +73,8 @@ pub struct MountArgs {
     /// The directory to mount at. Must already exist.
     pub mountpoint: PathBuf,
 
-    /// Specific version of the volume to mount. Defaults to the latest version
-    /// of the volume.
+    /// Specific version of the volume to mount. Defaults to the lexographically greatest version in
+    /// the volume.
     #[clap(long)]
     pub version: Option<String>,
 
@@ -115,7 +120,7 @@ pub fn pack(
     let version = Version::from_str(version.as_ref())?;
 
     runtime.block_on(async {
-        let mut volume = client.create_volume().await?;
+        let mut volume = client.create_volume().await;
         volume.pack(dir, version).await?;
         Ok(())
     })
@@ -124,6 +129,11 @@ pub fn pack(
 pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
     let client = Client::new(volume)?;
     let versions = runtime.block_on(client.list_versions())?;
+
+    if versions.is_empty() {
+        return Err(Error::new(ErrorKind::NotFound, "empty volume").into());
+    }
+
     for version in versions {
         println!("{version}");
     }

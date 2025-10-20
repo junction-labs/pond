@@ -70,7 +70,7 @@ impl Client {
     }
 
     /// Create a new volume.
-    pub async fn create_volume(&self) -> Result<Volume> {
+    pub async fn create_volume(&self) -> Volume {
         let metadata = VolumeMetadata::empty();
         let cache = Arc::new(ChunkCache::new(
             self.cache_size,
@@ -81,6 +81,6 @@ impl Client {
             },
         ));
 
-        Ok(Volume::new(metadata, cache, self.store.clone()))
+        Volume::new(metadata, cache, self.store.clone())
     }
 }

@@ -817,8 +817,9 @@ impl VolumeMetadata {
     /// Read a serialized volume. Returns an error if the volume is invalid or
     /// inconsistent.
     pub(crate) fn from_bytes(bs: &[u8]) -> crate::Result<Self> {
-        let fb_volume = fb::root_as_volume(bs)
-            .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid bytes"))?;
+        let fb_volume = fb::root_as_volume(bs).map_err(|e| {
+            Error::with_source(ErrorKind::InvalidData, "failed to parse volume metadata", e)
+        })?;
 
         let locations: Vec<_> = fb_volume.locations().iter().map(from_fb_location).collect();
 
@@ -1024,7 +1025,7 @@ impl TryFrom<SystemTime> for fb::Timespec {
 
     fn try_from(time: SystemTime) -> Result<Self, Self::Error> {
         let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|e| {
-            Error::new_context(
+            Error::with_source(
                 ErrorKind::InvalidData,
                 format!("bad timestamp: {:?}", time),
                 e,

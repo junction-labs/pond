@@ -10,8 +10,8 @@ anyhow.workspace = true
 bytesize.workspace = true
 clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
-tokio = {workspace = true, features = ["rt-multi-thread", "io-util", "net"]}
-tracing-subscriber = { workspace = true, features = ["env-filter"]}
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 cfs-core.workspace = true
 

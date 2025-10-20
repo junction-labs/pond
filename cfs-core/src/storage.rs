@@ -46,9 +46,9 @@ impl Storage {
             // hope the whole thing is path.
             Err(url::ParseError::RelativeUrlWithoutBase) => Self::new_filesystem(s),
             // not a valid location string
-            Err(e) => Err(Error::new_context(
+            Err(e) => Err(Error::with_source(
                 ErrorKind::InvalidData,
-                "failed to parse as url",
+                format!("failed to parse {s} as url"),
                 e,
             )),
         }
@@ -59,7 +59,7 @@ impl Storage {
         let temp_dir = tempfile::Builder::new()
             .prefix(".cfs")
             .tempdir()
-            .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempdir", e))?;
+            .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
         Ok(Storage {
             base_path: None,
@@ -70,21 +70,30 @@ impl Storage {
 
     pub(crate) fn new_s3(url: &Url) -> Result<Self> {
         let Some(bucket) = url.host_str() else {
-            return Err(Error::new(ErrorKind::InvalidData, "missing bucket"));
+            return Err(Error::new(ErrorKind::InvalidData, "missing s3 bucket"));
         };
-        let base_path = object_store::path::Path::parse(url.path())
-            .map_err(|e| Error::new_context(ErrorKind::InvalidData, "failed to parse url", e))?;
+        let base_path = object_store::path::Path::parse(url.path()).map_err(|e| {
+            Error::with_source(
+                ErrorKind::InvalidData,
+                format!("failed to parse {url} as a object_store path"),
+                e,
+            )
+        })?;
 
         let temp_dir = tempfile::Builder::new()
             .prefix(".cfs")
             .tempdir()
-            .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempdir", e))?;
+            .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
         let s3 = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
             .build()
             .map_err(|e| {
-                Error::new_context(ErrorKind::Other, "failed to build object store client", e)
+                Error::with_source(
+                    ErrorKind::Other,
+                    "failed to build s3 object store client",
+                    e,
+                )
             })?;
 
         Ok(Storage {
@@ -102,12 +111,12 @@ impl Storage {
         let temp_dir = tempfile::Builder::new()
             .prefix(".cfs")
             .tempdir_in(base_path)
-            .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempdir", e))?;
+            .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
         let client = LocalFileSystem::new_with_prefix(base_path).map_err(|e| {
-            Error::new_context(
+            Error::with_source(
                 ErrorKind::Other,
-                "failed to build LocalFileSystem object store client",
+                "failed to build local filesystem object store client",
                 e,
             )
         })?;
@@ -125,7 +134,7 @@ impl Storage {
         let f = tempfile::Builder::new()
             .disable_cleanup(true)
             .tempfile_in(&*self.temp_dir)
-            .map_err(|e| Error::new_context(e.kind().into(), "failed to create tempfile", e))?;
+            .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempfile", e))?;
 
         let (f, path) = f.into_parts();
         Ok((path.to_path_buf(), tokio::fs::File::from_std(f)))
@@ -137,13 +146,15 @@ impl Storage {
             .list_with_delimiter(self.base_path.as_ref())
             .await
             .map_err(|e| match e {
-                object_store::Error::NotFound { .. } => {
-                    Error::new_context(ErrorKind::NotFound, "no such volume", e)
+                object_store::Error::NotFound { path, source } => Error::with_source(
+                    ErrorKind::NotFound,
+                    format!("no such volume at {path}"),
+                    source,
+                ),
+                object_store::Error::InvalidPath { source } => {
+                    Error::with_source(ErrorKind::InvalidData, "invalid volume path", source)
                 }
-                object_store::Error::InvalidPath { .. } => {
-                    Error::new_context(ErrorKind::InvalidData, "invalid volume path", e)
-                }
-                _ => Error::new_context(ErrorKind::Other, "failed to list versions", e),
+                _ => Error::with_source(ErrorKind::Other, "failed to list versions", e),
             })?;
 
         let mut versions = vec![];
@@ -166,7 +177,7 @@ impl Storage {
         let version = versions
             .into_iter()
             .max()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "no metadata found"))?;
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "no versions found"))?;
         Ok(version)
     }
 
@@ -181,7 +192,11 @@ impl Storage {
                 | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
                 _ => ErrorKind::Other,
             };
-            Error::new_context(kind, "error loading volume metdata", e)
+            Error::with_source(
+                kind,
+                format!("failed to read volume metadata for version={version}"),
+                e,
+            )
         })?;
         VolumeMetadata::from_bytes(&bytes)
     }
@@ -198,7 +213,11 @@ impl Storage {
                     | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
                     _ => ErrorKind::Other,
                 };
-                Err(Error::new_context(error_kind, "failed to head path", e))
+                Err(Error::with_source(
+                    error_kind,
+                    format!("failed to head {path} for version={version}"),
+                    e,
+                ))
             }
         }
     }

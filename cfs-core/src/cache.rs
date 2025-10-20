@@ -61,9 +61,7 @@ impl ChunkCache {
         len: u64,
     ) -> crate::Result<Vec<Bytes>> {
         let mut chunks = vec![];
-        let read_offsets: Vec<_> = read_offsets(offset, len, self.inner.chunk_size)
-            .ok_or(Error::new(ErrorKind::InvalidData, "overflow"))?
-            .collect();
+        let read_offsets: Vec<_> = read_offsets(offset, len, self.inner.chunk_size)?.collect();
 
         for offset in &read_offsets {
             let cache = self.inner.clone();
@@ -81,8 +79,7 @@ impl ChunkCache {
             len,
             self.inner.readahead_policy.size,
             self.inner.chunk_size,
-        )
-        .ok_or(Error::new(ErrorKind::InvalidData, "overflow"))?;
+        )?;
         for offset in readahead_offsets {
             let cache = self.inner.clone();
             let path = path.clone();
@@ -177,28 +174,41 @@ async fn get_range(
         .get_range(&path, range)
         .await
         .map_err(|e| match e {
-            object_store::Error::NotFound { path, .. } => Error::new(ErrorKind::NotFound, path),
+            object_store::Error::NotFound { path, source } => {
+                Error::with_source(ErrorKind::NotFound, path, source)
+            }
             object_store::Error::InvalidPath { source } => {
-                Error::new(ErrorKind::InvalidData, source)
+                Error::with_source(ErrorKind::InvalidData, "invalid path", source)
             }
             object_store::Error::PermissionDenied { path, source }
-            | object_store::Error::Unauthenticated { path, source } => Error::new(
-                ErrorKind::PermissionDenied,
-                format!("permission denied: {path}: {source}"),
-            ),
-            err => Error::new_context(ErrorKind::Other, "get_range failed", err),
+            | object_store::Error::Unauthenticated { path, source } => {
+                Error::with_source(ErrorKind::PermissionDenied, path, source)
+            }
+            err => Error::with_source(ErrorKind::Other, "get_range failed", err),
         })?;
     Ok(bs)
 }
 
 #[inline]
-fn next_chunk(offset: u64, chunk_size: u64) -> Option<u64> {
-    ((offset / chunk_size) * chunk_size).checked_add(chunk_size)
+fn next_chunk(offset: u64, chunk_size: u64) -> crate::Result<u64> {
+    ((offset / chunk_size) * chunk_size)
+        .checked_add(chunk_size)
+        .ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "u64 overflow when computing next chunk offset",
+        ))
 }
 
-fn read_offsets(offset: u64, len: u64, chunk_size: u64) -> Option<impl Iterator<Item = u64>> {
+fn read_offsets(
+    offset: u64,
+    len: u64,
+    chunk_size: u64,
+) -> crate::Result<impl Iterator<Item = u64>> {
     // safety: if offset + len doesn't overflow, subtracting 1 is safe.
-    let last_byte = offset.checked_add(len)? - 1;
+    let last_byte = offset.checked_add(len).ok_or(Error::new(
+        ErrorKind::InvalidData,
+        "u64 overflow when computing read offsets",
+    ))? - 1;
 
     // safety: the divide-then-multiply is safe here since the divided values
     // are always less than last_byte, and by definiton the start of the chunk
@@ -208,9 +218,12 @@ fn read_offsets(offset: u64, len: u64, chunk_size: u64) -> Option<impl Iterator<
 
     // refuse to cause overflow later by checking to see if end_chunk +
     // chunk_size would overflow
-    end_chunk.checked_add(chunk_size)?;
+    end_chunk.checked_add(chunk_size).ok_or(Error::new(
+        ErrorKind::InvalidData,
+        "u64 overflow when computing end of chunk range",
+    ))?;
 
-    Some((start_chunk..=end_chunk).step_by(chunk_size as usize))
+    Ok((start_chunk..=end_chunk).step_by(chunk_size as usize))
 }
 
 fn readahead_offsets(
@@ -218,8 +231,12 @@ fn readahead_offsets(
     len: u64,
     readahead: u64,
     chunk_size: u64,
-) -> Option<impl Iterator<Item = u64>> {
-    let readahead_start = next_chunk(offset.checked_add(len)?, chunk_size)?;
+) -> crate::Result<impl Iterator<Item = u64>> {
+    let adjust_offset = offset.checked_add(len).ok_or(Error::new(
+        ErrorKind::InvalidData,
+        "u64 overflow when computing readahead offset",
+    ))?;
+    let readahead_start = next_chunk(adjust_offset, chunk_size)?;
     read_offsets(readahead_start, readahead, chunk_size)
 }
 
@@ -259,7 +276,7 @@ mod test {
                 // spurious test failures since read_chunks returning Some(_)
                 // guarantees us that computing the end of the last chunk does
                 // not overflow.
-                Some(offsets) => {
+                Ok(offsets) => {
                     let offsets: Vec<_> = offsets.collect();
                     assert!(!offsets.is_empty());
 
@@ -280,7 +297,7 @@ mod test {
                     }
                 }
                 // we overflowed! make sure it's reasonable
-                None => assert!(
+                Err(_) => assert!(
                     offset
                         .checked_add(len)
                         .and_then(|n| n.checked_add(chunk_size))
@@ -308,7 +325,7 @@ mod test {
 
             match (read_offsets, readahead_offsets) {
                 // we can actually validate things
-                (Some(read_offsets), Some(readahead_offsets)) => {
+                (Ok(read_offsets), Ok(readahead_offsets)) => {
                     let read_offsets: Vec<_> = read_offsets.collect();
                     let readahead_offsets: Vec<_> = readahead_offsets.collect();
 
@@ -328,7 +345,7 @@ mod test {
                     assert!(readahead_len <= (readahead / chunk_size) * chunk_size + chunk_size);
                 }
                 // validate that overflow should be happening
-                (None, None) | (Some(_), None) => assert!(
+                (Err(_), Err(_)) | (Ok(_), Err(_)) => assert!(
                     offset
                         .checked_add(len)
                         .and_then(|n| n.checked_add(readahead))
@@ -338,7 +355,7 @@ mod test {
                     "should only overflow if offset + len + readahead + chunk_size overflows",
                 ),
                 // uhhhhhhhhhhh
-                (None, Some(_)) => panic!("read overflowed but readahead did not. this is a bug"),
+                (Err(_), Ok(_)) => panic!("read overflowed but readahead did not. this is a bug"),
             }
 
             Ok(())

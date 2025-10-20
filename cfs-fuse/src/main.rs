@@ -21,7 +21,11 @@ fn main() -> std::io::Result<()> {
     };
 
     if let Err(e) = res {
-        eprintln!("{e:?}");
+        if args.backtrace {
+            eprintln!("{e:?}");
+        } else {
+            eprintln!("{e}");
+        }
         std::process::exit(-1);
     }
 

@@ -35,7 +35,7 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     reset_dir(actual_dir);
 
     let client = Client::new("memory://").unwrap();
-    let volume = test_runtime().block_on(client.create_volume()).unwrap();
+    let volume = test_runtime().block_on(client.create_volume());
     let _mount = spawn_mount(actual_dir, volume);
 
     // apply but ignore errors when trying to commit with the same
@@ -189,7 +189,7 @@ fn test_commit(
 
     // create an empty volume and write a bunch of files and directories to it.
     // write the same entries to a local filesystem as a reference.
-    let volume = test_runtime().block_on(client.create_volume()).unwrap();
+    let volume = test_runtime().block_on(client.create_volume());
 
     let mount = spawn_mount(mount_dir, volume);
     for entry in &pre_commit_entries {
