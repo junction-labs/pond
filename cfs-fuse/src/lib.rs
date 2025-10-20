@@ -18,6 +18,9 @@ pub struct Args {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Print version info.
+    Version,
+
     /// *Experimental* - Dump the metadata for a CFS volume.
     Dump {
         /// An existing volume path.
