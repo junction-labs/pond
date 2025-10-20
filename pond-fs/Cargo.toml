@@ -5,6 +5,10 @@ edition.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[bin]]
+name = "pond"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 bytesize.workspace = true
