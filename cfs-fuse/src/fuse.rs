@@ -2,7 +2,6 @@ use cfs_core::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
-use std::u64;
 
 pub struct Cfs {
     volume: Volume,
@@ -18,8 +17,8 @@ impl Cfs {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Self {
-        let uid = uid.unwrap_or_else(|| getuid());
-        let gid = gid.unwrap_or_else(|| getgid());
+        let uid = uid.unwrap_or_else(getuid);
+        let gid = gid.unwrap_or_else(getgid);
         Self {
             volume,
             runtime,
