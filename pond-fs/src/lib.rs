@@ -6,6 +6,7 @@ use pond::{Client, Version, Volume};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use crate::fuse::Pond;
@@ -89,6 +90,10 @@ pub struct MountArgs {
     #[clap(long, default_value_t = true)]
     pub auto_unmount: std::primitive::bool,
 
+    /// The timeout in seconds for which name lookups and file/directory attributes will be cached.
+    #[clap(long, default_value = "1.0", value_name = "SECONDS", value_parser = parse_duration_secs)]
+    pub kernel_cache_timeout: Duration,
+
     /// The URL of the volume to mount.
     pub volume: String,
 
@@ -119,6 +124,11 @@ pub struct ReadBehaviorArgs {
     /// pre-fetch the bytes up to `readahead_size` in parallel.
     #[clap(long, default_value = "32MiB", value_parser = value_parser!(ByteSize))]
     readahead_size: ByteSize,
+}
+
+fn parse_duration_secs(s: &str) -> anyhow::Result<Duration> {
+    let secs: f64 = s.parse()?;
+    Ok(Duration::from_secs_f64(secs))
 }
 
 pub fn list(
@@ -181,6 +191,7 @@ pub fn mount(runtime: tokio::runtime::Runtime, args: MountArgs) -> anyhow::Resul
         runtime,
         args.allow_other,
         args.auto_unmount,
+        args.kernel_cache_timeout,
     )?;
     session.run()?;
     Ok(())
@@ -192,8 +203,9 @@ pub fn mount_volume(
     runtime: tokio::runtime::Runtime,
     allow_other: bool,
     auto_unmount: bool,
+    kernel_cache_timeout: Duration,
 ) -> anyhow::Result<fuser::Session<Pond>> {
-    let pond = Pond::new(runtime, volume, None, None);
+    let pond = Pond::new(runtime, volume, None, None, kernel_cache_timeout);
     let mut opts = vec![
         fuser::MountOption::FSName("pond".to_string()),
         fuser::MountOption::Subtype("pond".to_string()),

@@ -8,6 +8,7 @@ pub struct Pond {
     runtime: tokio::runtime::Runtime,
     uid: u32,
     gid: u32,
+    kernel_cache_timeout: Duration,
 }
 
 impl Pond {
@@ -16,6 +17,7 @@ impl Pond {
         volume: Volume,
         uid: Option<u32>,
         gid: Option<u32>,
+        kernel_cache_timeout: Duration,
     ) -> Self {
         let uid = uid.unwrap_or_else(getuid);
         let gid = gid.unwrap_or_else(getgid);
@@ -24,6 +26,7 @@ impl Pond {
             runtime,
             uid,
             gid,
+            kernel_cache_timeout,
         }
     }
 }
@@ -80,7 +83,7 @@ impl fuser::Filesystem for Pond {
         let name = fs_try!(reply, from_os_str(name));
         match fs_try!(reply, self.volume.lookup(parent.into(), name)) {
             Some(attr) => reply.entry(
-                &Duration::new(0, 0),
+                &self.kernel_cache_timeout,
                 &fuse_attr(self.uid, self.gid, attr),
                 0,
             ),
@@ -96,7 +99,10 @@ impl fuser::Filesystem for Pond {
         reply: fuser::ReplyAttr,
     ) {
         let attr = fs_try!(reply, self.volume.getattr(ino.into()));
-        reply.attr(&Duration::new(0, 0), &fuse_attr(self.uid, self.gid, attr));
+        reply.attr(
+            &self.kernel_cache_timeout,
+            &fuse_attr(self.uid, self.gid, attr),
+        );
     }
 
     fn readdir(
@@ -131,7 +137,7 @@ impl fuser::Filesystem for Pond {
         let name = fs_try!(reply, from_os_str(name));
         let attr = fs_try!(reply, self.volume.mkdir(parent.into(), name.to_string()));
         reply.entry(
-            &Duration::new(0, 0),
+            &self.kernel_cache_timeout,
             &fuse_attr(self.uid, self.gid, attr),
             0,
         );
@@ -198,7 +204,7 @@ impl fuser::Filesystem for Pond {
             self.volume.create(parent.into(), name.to_string(), excl)
         );
         reply.created(
-            &Duration::new(0, 0),
+            &self.kernel_cache_timeout,
             &fuse_attr(self.uid, self.gid, attr),
             0,
             fd.into(),
@@ -330,7 +336,10 @@ impl fuser::Filesystem for Pond {
         };
 
         let attr = fs_try!(reply, self.volume.getattr(ino));
-        reply.attr(&Duration::new(0, 0), &fuse_attr(self.uid, self.gid, attr));
+        reply.attr(
+            &self.kernel_cache_timeout,
+            &fuse_attr(self.uid, self.gid, attr),
+        );
     }
 
     fn release(
