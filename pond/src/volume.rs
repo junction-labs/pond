@@ -351,6 +351,10 @@ fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize>
 }
 
 impl Volume {
+    pub fn walk(&self) -> Result<impl Iterator<Item = Result<DirEntry<'_>>>> {
+        self.meta.walk(Ino::Root)
+    }
+
     pub fn dump(&self) -> Result<()> {
         fn location_path(l: &Location) -> String {
             match l {
