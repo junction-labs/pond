@@ -22,14 +22,23 @@ fn main() -> std::io::Result<()> {
 
     if let Err(e) = res {
         if args.backtrace {
-            eprintln!("{e:?}");
+            // the entire error chain
+            eprintln!("{:?}", e);
         } else {
-            eprintln!("{e}");
+            eprintln!("{}", fmt_root_cause(e));
         }
         std::process::exit(-1);
     }
 
     Ok(())
+}
+
+fn fmt_root_cause(err: anyhow::Error) -> String {
+    if err.source().is_none() {
+        err.to_string()
+    } else {
+        format!("{}\n{}", err, err.root_cause())
+    }
 }
 
 fn version() -> anyhow::Result<()> {

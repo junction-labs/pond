@@ -15,7 +15,7 @@ pub struct Args {
     #[command(subcommand)]
     pub cmd: Cmd,
 
-    /// Include source error information in error output. For a fully detailed backtrace, set
+    /// Include the full error chain for CLI error output. For a fully detailed backtrace, set
     /// RUST_BACKTRACE=1.
     #[clap(long, default_value_t = false)]
     pub backtrace: bool,
