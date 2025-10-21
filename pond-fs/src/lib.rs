@@ -2,7 +2,7 @@ mod fuse;
 
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand, value_parser};
-use pond::{Client, Error, ErrorKind, Version, Volume};
+use pond::{Client, Version, Volume};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
@@ -150,16 +150,17 @@ pub fn create(
 }
 
 pub fn versions(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
-    let client = Client::new(volume)?;
+    let client = Client::new(&volume)?;
     let versions = runtime.block_on(client.list_versions())?;
 
     if versions.is_empty() {
-        return Err(Error::new(ErrorKind::NotFound, "empty volume").into());
+        eprintln!("No versions found under '{volume}'. Is this actually a volume?");
+    } else {
+        for version in versions {
+            println!("{version}");
+        }
     }
 
-    for version in versions {
-        println!("{version}");
-    }
     Ok(())
 }
 
