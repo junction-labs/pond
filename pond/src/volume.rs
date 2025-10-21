@@ -231,7 +231,7 @@ impl Volume {
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
                 Some((Location::Committed { key }, range)) => {
-                    let key = Arc::new(self.store.child_path(&key));
+                    let key = Arc::new(self.store.child_path(key));
                     new_fd(
                         &mut self.fds,
                         ino,
