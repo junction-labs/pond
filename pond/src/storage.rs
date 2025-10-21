@@ -107,22 +107,38 @@ impl Storage {
         // use the URL path as the base path for the tempdir and the client, but
         // don't actually save it as base_path - we want paths relative
         // to the local filesystem client
-        let base_path = base_path.as_ref();
+        let base_path = match std::fs::canonicalize(base_path) {
+            Ok(path) => path,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::new(ErrorKind::NotFound, "base path does not exist"));
+            }
+            Err(e) => {
+                return Err(Error::with_source(
+                    e.kind().into(),
+                    "failed to set up base path",
+                    e,
+                ));
+            }
+        };
+
         let temp_dir = tempfile::Builder::new()
             .prefix(".pond")
-            .tempdir_in(base_path)
+            .tempdir_in(&base_path)
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
-        let client = LocalFileSystem::new_with_prefix(base_path).map_err(|e| {
-            Error::with_source(
-                ErrorKind::Other,
-                "failed to build local filesystem object store client",
-                e,
-            )
-        })?;
+        let client = LocalFileSystem::new();
+        let base_path = match base_path.to_str() {
+            Some(p) => object_store::path::Path::from(p),
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "base path must be valid utf-8",
+                ));
+            }
+        };
 
         Ok(Storage {
-            base_path: None,
+            base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),
             remote: Arc::new(client),
         })

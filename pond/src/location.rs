@@ -10,7 +10,7 @@ impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Location::Staged { path } => write!(f, "{}", path.display()),
-            Location::Committed { key } => write!(f, "./{key}"),
+            Location::Committed { key } => write!(f, "{key}"),
         }
     }
 }
