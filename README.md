@@ -82,16 +82,16 @@ internal format, and save it.
 
 ```
 mkdir -p /tmp/hello-pond
-pond pack pond /tmp/hello-pond v1
+pond create pond /tmp/hello-pond v1
 ```
 
 You can examine the contents of the local volume with the `pond` CLI to
 see what just got packed.
 
 ```
-$ pond list /tmp/hello-pond
+$ pond versions /tmp/hello-pond
 v1
-$ pond dump /tmp/hello-pond
+$ pond list /tmp/hello-pond
 f    ./d47f401a6f82c8ef.data                             0      153 Cargo.lock
 f    ./d47f401a6f82c8ef.data                           153      498 Cargo.toml
 ...
@@ -135,7 +135,7 @@ storage. If you mount that version somewhere else, you'll be able to
 see the file we just wrote:
 
 ```
-$ pond list /tmp/hello-pond
+$ pond versions /tmp/hello-pond
 v1
 v2
 

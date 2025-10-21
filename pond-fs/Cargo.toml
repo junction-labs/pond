@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 bytesize.workspace = true
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "string"] }
 libc.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

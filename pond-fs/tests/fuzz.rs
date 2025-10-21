@@ -7,7 +7,7 @@ use std::{
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
 use pond::{Client, Version, Volume};
-use pond_fs::pack;
+use pond_fs::create;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
 // known-bad seeds or anything like that.
@@ -119,7 +119,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     }
 
     // pack it to the pack_dir
-    pack(
+    create(
         test_runtime(),
         expected_dir,
         format!("file://{}", pack_dir.display()),

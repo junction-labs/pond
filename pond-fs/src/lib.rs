@@ -11,6 +11,7 @@ use std::{
 use crate::fuse::Pond;
 
 #[derive(Parser)]
+#[clap(version = version())]
 pub struct Args {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -21,40 +22,52 @@ pub struct Args {
     pub backtrace: bool,
 }
 
+fn version() -> String {
+    let pkg_version = option_env!("CARGO_PKG_VERSION").unwrap_or("dev");
+    let git_sha = option_env!("POND_GIT_SHA");
+    match git_sha {
+        Some(sha) => format!("pond {pkg_version} ({sha})"),
+        None => format!("pond {pkg_version}"),
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Print version info.
-    Version,
+    /// Mount a volume as a local filesystem.
+    Mount(MountArgs),
 
-    /// *Experimental* - Dump the metadata for a Pond volume.
-    Dump {
-        /// An existing volume path.
+    /// List the available versions of a volume.
+    Versions {
+        /// The URL of the volume.
+        volume: String,
+    },
+
+    /// List the contents of a volume.
+    List {
+        /// The URL of the volume.
         volume: String,
 
-        /// The version of the volume. Defaults to the lexographically greatest version in the
-        /// volume.
+        /// The version of the volume. Defaults to the lexographically greatest
+        /// version in the volume.
         #[clap(long)]
         version: Option<String>,
     },
 
-    /// *Experimental* - Pack a local directory into a Pond volume.
-    Pack {
-        /// An existing directory to pack into a volume.
+    /// Create a new volume from a local directory.
+    ///
+    /// Creates a new volume by copying files and directories from a local path
+    /// into object storage. Regular files and directories will be copied, any
+    /// symlinks will be ignored and not treated as directories.
+    Create {
+        /// The local directory to create the volume from.
         dir: String,
 
-        /// A directory path or S3 prefix to put the volume in.
-        to: String,
+        /// The URL of the new volume. Must be a valid object storage URL.
+        volume: String,
 
-        /// The version of the volume. Defaults to version 1, assuming this is a
-        /// new volume.
+        /// The version to create the volume with.
         version: String,
     },
-
-    /// List all versions in the volume.
-    List { volume: String },
-
-    /// Run a pond FUSE mount.
-    Mount(MountArgs),
 }
 
 #[derive(Parser)]
@@ -62,19 +75,28 @@ pub struct MountArgs {
     #[clap(short, long, default_value_t = false)]
     pub debug: bool,
 
+    /// All all other users of the system to access the filesystem.
+    ///
+    /// By convention, this is disabled by default in FUSE implementations. See
+    /// the libfuse wiki for an explanation of why.
+    ///
+    /// https://github.com/libfuse/libfuse/wiki/FAQ#why-dont-other-users-have-access-to-the-mounted-filesystem
     #[clap(long)]
     pub allow_other: bool,
 
+    /// Automatically unmount the filesystem if this process exits for any
+    /// reason.
     #[clap(long, default_value_t = true)]
     pub auto_unmount: std::primitive::bool,
 
+    /// The URL of the volume to mount.
     pub volume: String,
 
-    /// The directory to mount at. Must already exist.
+    /// The local directory to mount the volume at. Must already exist.
     pub mountpoint: PathBuf,
 
-    /// Specific version of the volume to mount. Defaults to the lexographically greatest version in
-    /// the volume.
+    /// The version of the volume to mount. Defaults to the lexographically
+    /// greatest version in the volume if not specified.
     #[clap(long)]
     pub version: Option<String>,
 
@@ -88,17 +110,18 @@ pub struct ReadBehaviorArgs {
     #[clap(long, default_value = "10GiB", value_parser = value_parser!(ByteSize))]
     max_cache_size: ByteSize,
 
-    /// The size of the chunk we fetch from object storage in a single request. It's also the size
-    /// of the buffers we store within a single cache entry.
+    /// The size of the chunk we fetch from object storage in a single request.
+    /// It's also the size of the buffers we store within a single cache entry.
     #[clap(long, default_value = "8MiB", value_parser = value_parser!(ByteSize))]
     chunk_size: ByteSize,
 
-    /// Size of readahead. If you're reading a file at byte 0, we will pre-fetch the bytes up to `readahead_size` in parallel.
+    /// Size of readahead. If you're reading a file at byte 0, Pond will
+    /// pre-fetch the bytes up to `readahead_size` in parallel.
     #[clap(long, default_value = "32MiB", value_parser = value_parser!(ByteSize))]
     readahead_size: ByteSize,
 }
 
-pub fn dump(
+pub fn list(
     runtime: tokio::runtime::Runtime,
     volume: String,
     version: Option<String>,
@@ -110,7 +133,7 @@ pub fn dump(
     Ok(())
 }
 
-pub fn pack(
+pub fn create(
     runtime: tokio::runtime::Runtime,
     dir: impl AsRef<Path>,
     to: impl AsRef<str>,
@@ -126,7 +149,7 @@ pub fn pack(
     })
 }
 
-pub fn list(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
+pub fn versions(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
     let client = Client::new(volume)?;
     let versions = runtime.block_on(client.list_versions())?;
 
