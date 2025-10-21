@@ -54,20 +54,19 @@ fn project_root() -> PathBuf {
 }
 
 fn ci_clippy(sh: &Shell) -> anyhow::Result<()> {
-    let cargo_flags = ["--tests", "--no-deps"];
-    let clippy_flags = [
-        // deny all warnings
-        "-D",
+    let deny_lints = [
         "warnings",
-        // don't allow dbg
-        "-D",
         "clippy::dbg_macro",
-        // don't allow printing either
-        "-D",
         "clippy::print_stdout",
-        "-D",
         "clippy::print_stderr",
+        "clippy::todo",
     ];
+    let cargo_flags = ["--tests", "--no-deps"];
+
+    let mut clippy_flags = vec![];
+    for deny_lint in deny_lints {
+        clippy_flags.extend_from_slice(&["-D", deny_lint]);
+    }
 
     cmd!(sh, "cargo clippy {cargo_flags...} -- {clippy_flags...}").run()?;
     Ok(())

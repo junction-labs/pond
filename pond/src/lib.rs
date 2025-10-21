@@ -142,6 +142,51 @@ impl FileAttr {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DirEntry<'a> {
+    name: &'a str,
+    parents: Vec<&'a str>,
+    attr: &'a FileAttr,
+    locations: &'a [Location],
+    data: &'a metadata::EntryData,
+}
+
+impl<'a> DirEntry<'a> {
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    pub fn attr(&self) -> &FileAttr {
+        self.attr
+    }
+
+    pub fn location(&self) -> Option<(&Location, ByteRange)> {
+        match self.data {
+            metadata::EntryData::File {
+                location_idx,
+                byte_range,
+            } => {
+                let location = &self.locations[*location_idx];
+                Some((location, *byte_range))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn path(&self) -> String {
+        let mut path = self.parents.clone();
+        path.push(self.name);
+        path.join("/")
+    }
+
+    pub fn is_regular(&self) -> bool {
+        matches!(
+            self.data,
+            metadata::EntryData::Directory | metadata::EntryData::File { .. }
+        )
+    }
+}
+
 // TODO: add checksums/etags here?
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

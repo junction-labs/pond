@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, Error, FileAttr, FileType, Ino, Location, Result,
+    ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -150,7 +150,7 @@ impl Volume {
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = (&str, &FileAttr)>> {
+    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = DirEntry<'_>>> {
         let iter = self.meta.readdir(ino)?;
         Ok(iter)
     }
@@ -351,57 +351,8 @@ fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize>
 }
 
 impl Volume {
-    pub fn dump(&self) -> Result<()> {
-        macro_rules! write_stdout {
-            ($($args:tt)*) => {{
-                    use std::io::Write as _;
-                    if let Err(_) = writeln!(std::io::stdout(), $($args)*) {
-                        return Ok(())
-                    };
-            }}
-        }
-
-        fn location_path(l: &Location) -> String {
-            match l {
-                Location::Staged { .. } => format!("**{l}"),
-                _ => format!("{l}"),
-            }
-        }
-
-        write_stdout!("version {}", self.version());
-
-        for entry in self.metadata().walk(Ino::Root)? {
-            let (name, path, attr) = entry?;
-
-            if path.is_empty() && !attr.ino.is_regular() {
-                continue;
-            }
-
-            let path = {
-                let mut full_path = path;
-                full_path.push(name);
-                full_path.join("/")
-            };
-
-            match attr.kind {
-                FileType::Regular => {
-                    let (l, b) = self
-                        .metadata()
-                        .location(attr.ino)
-                        .expect("BUG: failed to lookup location for ino we just walked");
-                    let location = location_path(l);
-                    let offset = b.offset;
-                    let len = b.len;
-                    write_stdout!("{len:>16} {path} -> {location} @ {offset}");
-                }
-                FileType::Directory => {
-                    let len = 0;
-                    write_stdout!("{len:>16} {path:40}");
-                }
-            }
-        }
-
-        Ok(())
+    pub fn walk(&self, ino: Ino) -> Result<impl Iterator<Item = Result<DirEntry<'_>>>> {
+        self.meta.walk(ino)
     }
 
     /// Pack a local directory into a Pond volume.
