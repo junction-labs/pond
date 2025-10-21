@@ -359,6 +359,8 @@ impl Volume {
             }
         }
 
+        println!("version {}", self.version());
+
         for entry in self.metadata().walk(Ino::Root)? {
             let (name, path, attr) = entry?;
 
@@ -366,35 +368,28 @@ impl Volume {
                 continue;
             }
 
-            let kind;
-            let location;
-            let offset;
-            let len;
-
             let path = {
                 let mut full_path = path;
                 full_path.push(name);
                 full_path.join("/")
             };
+
             match attr.kind {
                 FileType::Regular => {
-                    kind = "f";
                     let (l, b) = self
                         .metadata()
                         .location(attr.ino)
                         .expect("BUG: failed to lookup location for ino we just walked");
-                    location = location_path(l);
-                    offset = b.offset;
-                    len = b.len;
+                    let location = location_path(l);
+                    let offset = b.offset;
+                    let len = b.len;
+                    println!("{len:>16} {path} -> {location} @ {offset}");
                 }
                 FileType::Directory => {
-                    kind = "d";
-                    location = "".to_string();
-                    offset = 0;
-                    len = 0;
+                    let len = 0;
+                    println!("{len:>16} {path:40}");
                 }
             }
-            println!("{kind:4} {location:40} {offset:12} {len:8} {path:40}");
         }
 
         Ok(())
