@@ -61,7 +61,7 @@ pond version
 ```
 
 
-## Getting Started
+## Getting Started Locally
 
 To try out Pond, install it from source on a Linux machine. If you're using
 object storage, we recommend running Pond inside your cloud account, so you're
@@ -152,6 +152,13 @@ $ pond mount /tmp/hello-pond /tmp/pond --version v1
 $ cat /tmp/pond/hi.txt
 cat: hi.txt: No such file or directory
 ```
+
+## Getting started in AWS
+
+Using Pond in AWS is just as easy as using it on your laptop. If you're on a VM
+with instance credentials, Pond will automatically detect them. To explicitly
+set your credentials, use the [standard AWS SDK environment
+variables](https://docs.aws.amazon.com/sdkref/latest/guide/environment-variables.html).
 
 ## Roadmap
 
