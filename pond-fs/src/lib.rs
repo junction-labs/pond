@@ -10,7 +10,7 @@ use nix::{
     sys::{signal::Signal, wait::waitpid},
     unistd::ForkResult,
 };
-use pond::{Client, Version, Volume};
+use pond::{Client, FileType, Ino, Version, Volume};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -205,7 +205,41 @@ pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
     let version = version.map(|v| v.parse()).transpose()?;
     let client = Client::new(volume)?;
     let volume = runtime.block_on(client.load_volume(&version))?;
-    volume.dump()?;
+
+    macro_rules! write_stdout {
+        ($($args:tt)*) => {
+            if let Err(_e) = write!(std::io::stdout(), $($args,)*) {
+                return Ok(())
+            }
+        };
+    }
+
+    for entry in volume.walk(Ino::Root)? {
+        let entry = entry?;
+
+        // don't list/dump special files
+        if !entry.is_regular() {
+            continue;
+        }
+
+        match entry.attr().kind {
+            FileType::Regular => {
+                let path = entry.path();
+                let (location, byte_range) = entry
+                    .location()
+                    .unwrap_or_else(|| panic!("BUG: missing location for regular file: {path}"));
+                let offset = byte_range.offset;
+                let len = byte_range.len;
+                write_stdout!("{len:>16} {path} -> {location} @ {offset}");
+            }
+            FileType::Directory => {
+                let len = 0;
+                let path = entry.path();
+                write_stdout!("{len:>16} {path:40}");
+            }
+        }
+    }
+
     Ok(())
 }
 

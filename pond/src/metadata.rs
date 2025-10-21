@@ -1,11 +1,13 @@
 use std::{
     borrow::{Borrow, Cow},
-    collections::{BTreeMap, btree_map},
+    collections::{BTreeMap, VecDeque, btree_map},
     fmt::Debug,
     path::PathBuf,
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use crate::{ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
 // TODO: we duplicate file/dir names as strings in data values and entry keys.
 // have to figure out how to intern somewhere if we want to stop, and probably
@@ -26,7 +28,6 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 #[rustfmt::skip]
 mod fb;
 
-use crate::{ByteRange, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
 /// An arbitrary sequence of bytes that identifies a version of a volume.
 ///
@@ -154,7 +155,7 @@ impl Entry {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum EntryData {
+pub(crate) enum EntryData {
     Directory,
     File {
         location_idx: usize,
@@ -708,31 +709,60 @@ impl VolumeMetadata {
     ///
     /// Iterator order is not guaranteed to be stable.
     pub(crate) fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
-        let _ = self.dir_entry(ino)?;
-
+        let parents = self.dir_path(ino)?;
         Ok(ReadDir {
-            range: self.dirs.range(entry_range(ino)?),
             data: &self.data,
+            locations: &self.locations,
+            range: self.dirs.range(entry_range(ino)?),
+            parents,
         })
+    }
+
+    fn readdir_iter<'a, 'b: 'a>(
+        &'a self,
+        ino: Ino,
+        parents: Vec<&'b str>,
+    ) -> crate::Result<ReadDir<'a>> {
+        Ok(ReadDir {
+            data: &self.data,
+            locations: &self.locations,
+            range: self.dirs.range(entry_range(ino)?),
+            parents,
+        })
+    }
+
+    fn dir_path(&'_ self, ino: Ino) -> crate::Result<Vec<&'_ str>> {
+        let mut parents = VecDeque::new();
+        let mut current_ino = ino;
+        loop {
+            if current_ino == Ino::Root {
+                break;
+            }
+
+            let entry = self.dir_entry(current_ino)?;
+            parents.push_front(entry.name.as_ref());
+            current_ino = entry.parent;
+        }
+
+        Ok(parents.into())
     }
 
     /// Walk a subtree starting from a directory. Walks are done in depth-first
     /// order, but order of items in a directory is not guaranteed to be stable.
-    ///
-    /// Returns an iterator over `(filename, ancestors, attrs)` tuples, where
-    /// `filename` and `attrs` are the same values that would be yielded from
-    /// calling `readdir` on a directory and `ancestors` is a `Vec` of ancestor
-    /// directory names.
     pub(crate) fn walk<'a>(&'a self, ino: Ino) -> crate::Result<WalkIter<'a>> {
+        let parents = self.dir_path(ino)?;
         let root_dir = self.dir_entry(ino)?;
         let root_iter = ReadDir {
-            range: self.dirs.range(entry_range(ino)?),
             data: &self.data,
+            locations: &self.locations,
+            range: self.dirs.range(entry_range(ino)?),
+            parents: parents.clone(),
         };
+
         Ok(WalkIter {
             volume: self,
             readdirs: vec![root_iter],
-            ancestors: Vec::new(),
+            parents,
         })
     }
 
@@ -866,19 +896,28 @@ fn entry_range(ino: Ino) -> crate::Result<std::ops::Range<EntryKey<'static>>> {
 /// The iterator returned from [readdir][Volume::readdir].
 pub(crate) struct ReadDir<'a> {
     data: &'a BTreeMap<Ino, Entry>,
+    locations: &'a [Location],
     range: btree_map::Range<'a, EntryKey<'static>, Ino>,
+    parents: Vec<&'a str>,
 }
 
 impl<'a> Iterator for ReadDir<'a> {
-    type Item = (&'a str, &'a FileAttr);
+    type Item = DirEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|(EntryKey(k), ino)| {
+        self.range.next().map(|(EntryKey(_), ino)| {
             let dent = self
                 .data
                 .get(ino)
                 .unwrap_or_else(|| panic!("BUG: invalid dirent: ino={ino:?}"));
-            (k.name.as_ref(), &dent.attr)
+
+            DirEntry {
+                name: &dent.name,
+                parents: self.parents.clone(),
+                attr: &dent.attr,
+                locations: self.locations,
+                data: &dent.data,
+            }
         })
     }
 }
@@ -891,37 +930,35 @@ pub(crate) struct WalkIter<'a> {
     readdirs: Vec<ReadDir<'a>>,
 
     // the names of all the directories opened to get here
-    ancestors: Vec<&'a str>,
+    parents: Vec<&'a str>,
 }
 
 impl<'a> Iterator for WalkIter<'a> {
     // TODO: it's a big gnarly to be cloning and returning the ancestors path
     // every time but the lifetime on returning a slice referencing self
     // is a pain to express.
-    type Item = crate::Result<(&'a str, Vec<&'a str>, &'a FileAttr)>;
+    type Item = crate::Result<DirEntry<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.readdirs.is_empty() {
             let next = self.readdirs.last_mut()?.next();
             match next {
-                Some((name, attr)) => {
-                    let ancestors = if attr.is_directory() {
-                        let next = match self.volume.readdir(attr.ino) {
+                Some(dent) => {
+                    if dent.attr.is_directory() {
+                        let mut parents = self.parents.clone();
+                        parents.push(dent.name);
+                        let next = match self.volume.readdir_iter(dent.attr.ino, parents) {
                             Ok(next) => next,
                             Err(e) => return Some(Err(e)),
                         };
-                        let ancestors = self.ancestors.clone();
                         self.readdirs.push(next);
-                        self.ancestors.push(name);
-                        ancestors
-                    } else {
-                        self.ancestors.clone()
+                        self.parents.push(dent.name);
                     };
-                    return Some(Ok((name, ancestors, attr)));
+                    return Some(Ok(dent));
                 }
                 None => {
                     self.readdirs.pop();
-                    self.ancestors.pop();
+                    self.parents.pop();
                 }
             }
         }
@@ -1104,16 +1141,8 @@ mod test {
     fn readdir_nospecial(
         v: &VolumeMetadata,
         ino: Ino,
-    ) -> crate::Result<impl Iterator<Item = (&str, &FileAttr)>> {
-        let _ = v.dir_entry(ino)?;
-
-        let iter = ReadDir {
-            range: v.dirs.range(entry_range(ino)?),
-            data: &v.data,
-        }
-        .filter(|(_, attr)| attr.ino.is_regular());
-
-        Ok(iter)
+    ) -> crate::Result<impl Iterator<Item = DirEntry<'_>>> {
+        Ok(v.readdir(ino)?.filter(|e| e.attr.ino.is_regular()))
     }
 
     #[test]
@@ -1201,15 +1230,11 @@ mod test {
         // should just contain the directory, not the initial file
         let names: Vec<_> = readdir_nospecial(&volume, Ino::Root)
             .unwrap()
-            .map(|(name, _)| name)
+            .map(|e| e.name)
             .collect();
         assert_eq!(vec!["a"], names);
         // should be empty
-        let names: Vec<_> = volume
-            .readdir(a.ino)
-            .unwrap()
-            .map(|(name, _)| name)
-            .collect();
+        let names: Vec<_> = volume.readdir(a.ino).unwrap().map(|e| e.name).collect();
         assert!(names.is_empty());
     }
 
@@ -1239,6 +1264,29 @@ mod test {
     }
 
     #[test]
+    fn dir_path() {
+        let mut volume = VolumeMetadata::empty();
+        let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
+        let b = volume.mkdir(a.ino, "b".to_string()).unwrap().clone();
+        let c = volume.mkdir(b.ino, "c".to_string()).unwrap().clone();
+        let d = volume
+            .create(
+                c.ino,
+                "hi.txt".to_string(),
+                true,
+                Location::staged("whatever"),
+                ByteRange::empty(),
+            )
+            .unwrap()
+            .clone();
+
+        assert_eq!(volume.dir_path(a.ino).unwrap(), vec!["a"]);
+        assert_eq!(volume.dir_path(b.ino).unwrap(), vec!["a", "b"]);
+        assert_eq!(volume.dir_path(c.ino).unwrap(), vec!["a", "b", "c"]);
+        assert!(volume.dir_path(d.ino).is_err());
+    }
+
+    #[test]
     fn lookup() {
         let mut volume = VolumeMetadata::empty();
         let a = volume.mkdir(Ino::Root, "a".to_string()).unwrap().clone();
@@ -1256,27 +1304,28 @@ mod test {
             .unwrap();
 
         // the root directory has some special files. ignore them.
-        assert!(
-            volume
-                .readdir(Ino::Root)
+        assert_eq!(
+            readdir_nospecial(&volume, Ino::Root)
                 .unwrap()
-                .any(|(name, attr)| name == "a" && attr.is_directory())
+                .map(|e| e.path())
+                .collect::<Vec<_>>(),
+            vec!["a"]
         );
         assert_eq!(
             volume
                 .readdir(a.ino)
                 .unwrap()
-                .map(|(n, _attr)| n)
+                .map(|e| e.path())
                 .collect::<Vec<_>>(),
-            vec!["b"],
+            vec!["a/b"],
         );
         assert_eq!(
             volume
                 .readdir(b.ino)
                 .unwrap()
-                .map(|(n, _attr)| n)
+                .map(|e| e.path())
                 .collect::<Vec<_>>(),
-            vec!["c"],
+            vec!["a/b/c"],
         );
 
         assert_read_test_txt(&volume);
@@ -1395,14 +1444,13 @@ mod test {
                 .walk(Ino::Root)
                 .unwrap()
                 .filter_map(|entry| {
-                    let (name, mut dirs, attr) = entry.unwrap();
+                    let entry = entry.unwrap();
                     // skip any file at the root of the directory with size
                     // zero. those are special files
-                    if dirs.is_empty() && attr.is_file() && attr.size == 0 {
+                    if !entry.attr.ino.is_regular() {
                         None
                     } else {
-                        dirs.push(name);
-                        Some(dirs.join("/"))
+                        Some(entry.path())
                     }
                 })
                 .collect()
