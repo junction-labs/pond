@@ -120,10 +120,10 @@ grep: /tmp/pond/.commit: Operation not permitted
 /tmp/pond/src/storage.rs:            .prefix(".pond")
 ```
 
-To update the volume, write data into a file just you normally would. Once
-you're ready to save your changes, commit a new version by writing a name
-for the commit into the special `/tmp/pond.commit` file. The commit label
-can be any utf-8 string that's 64 characters or less:
+To update the volume, write data into a file just as you normally would. Once
+you're ready to save your changes, commit a new version by writing a name for
+the commit into the special `/tmp/pond.commit` file. The commit label can be any
+utf-8 string that's 64 characters or less:
 
 ```
 $ echo "hi pond" > /tmp/pond/hi.txt
