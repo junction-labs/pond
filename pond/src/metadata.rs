@@ -1092,8 +1092,7 @@ fn to_fb_location<'a>(
 }
 
 fn from_fb_location(fb_location: fb::Location) -> Location {
-    let key = object_store::path::Path::from(fb_location.key().to_string());
-    Location::committed(key)
+    Location::committed(fb_location.key())
 }
 
 #[cfg(test)]

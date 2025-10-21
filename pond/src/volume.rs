@@ -230,14 +230,14 @@ impl Volume {
                     })?;
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
-                Some((Location::Committed { key }, range)) => new_fd(
-                    &mut self.fds,
-                    ino,
-                    FileDescriptor::Committed {
-                        key: key.clone(),
-                        range: *range,
-                    },
-                ),
+                Some((Location::Committed { key }, range)) => {
+                    let key = Arc::new(self.store.child_path(&key));
+                    new_fd(
+                        &mut self.fds,
+                        ino,
+                        FileDescriptor::Committed { key, range: *range },
+                    )
+                }
                 None => Err(ErrorKind::NotFound.into()),
             },
         }
@@ -571,7 +571,7 @@ impl StagedVolume<'_> {
     /// Ino to its ByteRange within the new blob. Files are uploaded to the blob using multipart
     /// uploads.
     async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
-        let dest = self.inner.store.new_data();
+        let (dest_name, dest) = self.inner.store.new_data_file();
 
         let mut offset = 0;
         let mut staged = Vec::new();
@@ -640,7 +640,7 @@ impl StagedVolume<'_> {
 
         try_mpu!(writer.complete(), "failed to complete upload");
 
-        Ok((Location::committed(dest), staged))
+        Ok((Location::committed(dest_name), staged))
     }
 
     /// Relocate all staged files to dest.
@@ -659,7 +659,7 @@ impl StagedVolume<'_> {
 
     /// Mint and upload a new version of Volume.
     async fn persist(self, version: Version) -> Result<()> {
-        let meta_path = self.inner.store.metadata(&version);
+        let meta_path = self.inner.store.metadata_path(&version);
         self.inner.meta.set_version(version);
 
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);

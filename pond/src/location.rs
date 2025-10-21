@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
     Staged { path: std::path::PathBuf },
-    Committed { key: Arc<object_store::path::Path> },
+    Committed { key: Arc<str> },
 }
 
 impl std::fmt::Display for Location {
@@ -20,10 +20,12 @@ impl Location {
         matches!(self, Location::Staged { .. })
     }
 
-    pub(crate) fn committed(key: impl AsRef<str>) -> Self {
-        Location::Committed {
-            key: Arc::new(object_store::path::Path::from(key.as_ref())),
-        }
+    pub(crate) fn committed<'a>(key: impl Into<Cow<'a, str>>) -> Self {
+        let key = match key.into() {
+            Cow::Borrowed(str) => Arc::from(str),
+            Cow::Owned(string) => Arc::from(string.into_boxed_str()),
+        };
+        Location::Committed { key }
     }
 
     pub(crate) fn staged(path: impl AsRef<std::path::Path>) -> Self {

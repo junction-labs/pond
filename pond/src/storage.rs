@@ -198,7 +198,7 @@ impl Storage {
     }
 
     pub(crate) async fn load_version(&self, version: &Version) -> Result<VolumeMetadata> {
-        let path = self.metadata(version);
+        let path = self.metadata_path(version);
         let get = self.remote.get(&path).and_then(|res| res.bytes());
         let bytes = get.await.map_err(|e| {
             let kind = match e {
@@ -218,7 +218,7 @@ impl Storage {
     }
 
     pub(crate) async fn exists(&self, version: &Version) -> Result<bool> {
-        let path = &self.metadata(version);
+        let path = &self.metadata_path(version);
         match self.remote.head(path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -238,20 +238,23 @@ impl Storage {
         }
     }
 
-    pub(crate) fn metadata(&self, version: &Version) -> object_store::path::Path {
-        let part = format!("{version}.volume");
+    pub(crate) fn child_path(&self, name: &str) -> object_store::path::Path {
         match &self.base_path {
-            Some(p) => p.child(part),
-            None => object_store::path::Path::from(part),
+            // FIXME: lol, lmao, etc.
+            Some(base) => base.child(name),
+            None => object_store::path::Path::from(name),
         }
     }
 
-    pub(crate) fn new_data(&self) -> object_store::path::Path {
+    pub(crate) fn metadata_path(&self, version: &Version) -> object_store::path::Path {
+        let part = format!("{version}.volume");
+        self.child_path(&part)
+    }
+
+    pub(crate) fn new_data_file(&self) -> (String, object_store::path::Path) {
         let ident: u64 = rand::random();
-        let part = format!("{ident:016x}.data");
-        match &self.base_path {
-            Some(p) => p.child(part),
-            None => object_store::path::Path::from(part),
-        }
+        let filename = format!("{ident:016x}.data");
+        let child = self.child_path(&filename);
+        (filename, child)
     }
 }
