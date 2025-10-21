@@ -142,6 +142,29 @@ impl FileAttr {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DirEntry<'a> {
+    name: &'a str,
+    parents: Vec<&'a str>,
+    attr: &'a FileAttr,
+}
+
+impl<'a> DirEntry<'a> {
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    pub fn attr(&self) -> &FileAttr {
+        self.attr
+    }
+
+    pub fn path(&self) -> String {
+        let mut path = self.parents.clone();
+        path.push(self.name);
+        path.join("/")
+    }
+}
+
 // TODO: add checksums/etags here?
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

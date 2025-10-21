@@ -116,7 +116,9 @@ impl fuser::Filesystem for Pond {
         let iter = fs_try!(reply, self.volume.readdir(ino.into()));
         let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
 
-        for (i, (name, attr)) in iter.enumerate().skip(offset) {
+        for (i, entry) in iter.enumerate().skip(offset) {
+            let attr = entry.attr();
+            let name = entry.name();
             let is_full = reply.add(attr.ino.into(), (i + 1) as i64, fuse_kind(attr.kind), name);
             if is_full {
                 break;

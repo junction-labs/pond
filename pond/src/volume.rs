@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, Error, FileAttr, FileType, Ino, Location, Result,
+    ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -150,7 +150,7 @@ impl Volume {
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = (&str, &FileAttr)>> {
+    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = DirEntry<'_>>> {
         let iter = self.meta.readdir(ino)?;
         Ok(iter)
     }
@@ -362,23 +362,18 @@ impl Volume {
         println!("version {}", self.version());
 
         for entry in self.metadata().walk(Ino::Root)? {
-            let (name, path, attr) = entry?;
+            let entry = entry?;
 
-            if path.is_empty() && !attr.ino.is_regular() {
+            if !entry.attr.ino.is_regular() {
                 continue;
             }
 
-            let path = {
-                let mut full_path = path;
-                full_path.push(name);
-                full_path.join("/")
-            };
-
-            match attr.kind {
+            let path = entry.path();
+            match entry.attr.kind {
                 FileType::Regular => {
                     let (l, b) = self
                         .metadata()
-                        .location(attr.ino)
+                        .location(entry.attr.ino)
                         .expect("BUG: failed to lookup location for ino we just walked");
                     let location = location_path(l);
                     let offset = b.offset;
