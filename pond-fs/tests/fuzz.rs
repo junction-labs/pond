@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     io::ErrorKind,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -307,8 +308,9 @@ fn spawn_mount(mountpoint: impl AsRef<Path>, volume: Volume) -> AutoUnmount {
         // fusermount3 child process that keeps the fuse mount alive as long
         // as this PROCESS is alive. that means we can't unmount/remount
         // in different tests.
-        false, // allow_other
-        false, // auto_unmount
+        false,          // allow_other
+        false,          // auto_unmount
+        Duration::ZERO, // kernel_cache_timeout
     )
     .unwrap();
 
