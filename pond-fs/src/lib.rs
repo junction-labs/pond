@@ -2,11 +2,19 @@ mod fuse;
 
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand, value_parser};
+use nix::{
+    poll::{PollFd, PollFlags},
+    sys::{signal::Signal, wait::waitpid},
+    unistd::ForkResult,
+};
 use pond::{Client, Version, Volume};
 use std::{
+    fs::File,
+    io::{Read, Write},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::fuse::Pond;
@@ -73,8 +81,37 @@ pub enum Cmd {
 
 #[derive(Parser)]
 pub struct MountArgs {
-    #[clap(short, long, default_value_t = false)]
-    pub debug: bool,
+    /// Run Pond in a background process. By default, Pond runs in the foreground.
+    ///
+    /// *NOTE* - If you're running Pond as a system service we strongly
+    /// recommend running it under your system's process supervisor instead of
+    /// using this option.
+    #[clap(long, short)]
+    pub background: bool,
+
+    /// The number of worker threads threads to run in the FUSE. Worker threads
+    /// are used for making network requests. There must be at least one FUSE
+    /// thread.
+    #[clap(
+        long,
+        default_value = "2",
+        value_parser = clap::value_parser!(u64).range(1..=2048),
+    )]
+    pub worker_threads: u64,
+
+    /// The maximum number of blocking threads that will be spawned when
+    /// blocking on the local filesystem, must be between 8 and 2048. These
+    /// threads are used for any local writes.
+    ///
+    /// Blocking threads are pooled, and terminated when not in use. They do not
+    /// take up additional resources. Setting this value lower than the default
+    /// of 512 is not recommended.
+    #[clap(
+        long,
+        default_value = "512",
+        value_parser = clap::value_parser!(u64).range(8..=2048),
+    )]
+    pub blocking_threads: u64,
 
     /// All all other users of the system to access the filesystem.
     ///
@@ -131,11 +168,11 @@ fn parse_duration_secs(s: &str) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs_f64(secs))
 }
 
-pub fn list(
-    runtime: tokio::runtime::Runtime,
-    volume: String,
-    version: Option<String>,
-) -> anyhow::Result<()> {
+pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
+    init_logging();
+
+    let runtime = new_runtime(None)?;
+
     let version = version.map(|v| v.parse()).transpose()?;
     let client = Client::new(volume)?;
     let volume = runtime.block_on(client.load_volume(&version))?;
@@ -144,12 +181,14 @@ pub fn list(
 }
 
 pub fn create(
-    runtime: tokio::runtime::Runtime,
     dir: impl AsRef<Path>,
-    to: impl AsRef<str>,
+    volume: impl AsRef<str>,
     version: impl AsRef<str>,
 ) -> anyhow::Result<()> {
-    let client = Client::new(to.as_ref())?;
+    init_logging();
+
+    let runtime = new_runtime(None)?;
+    let client = Client::new(volume.as_ref())?;
     let version = Version::from_str(version.as_ref())?;
 
     runtime.block_on(async {
@@ -159,7 +198,10 @@ pub fn create(
     })
 }
 
-pub fn versions(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Result<()> {
+pub fn versions(volume: String) -> anyhow::Result<()> {
+    init_logging();
+
+    let runtime = new_runtime(None)?;
     let client = Client::new(&volume)?;
     let versions = runtime.block_on(client.list_versions())?;
 
@@ -174,33 +216,178 @@ pub fn versions(runtime: tokio::runtime::Runtime, volume: String) -> anyhow::Res
     Ok(())
 }
 
-pub fn mount(runtime: tokio::runtime::Runtime, args: MountArgs) -> anyhow::Result<()> {
-    let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
-    let client = Client::new(args.volume)?;
-    let volume = runtime.block_on(
-        client
-            .with_cache_size(args.read_behavior.chunk_size.as_u64())
-            .with_chunk_size(args.read_behavior.chunk_size.as_u64())
-            .with_readahead(args.read_behavior.readahead_size.as_u64())
-            .load_volume(&version),
-    )?;
+pub fn mount(args: MountArgs) -> anyhow::Result<()> {
+    if args.background {
+        // mount in the background by forking and mounting in the child. the
+        // parent hangs out just long to reap the child and exit nonzero if the
+        // mount fails, but does nothing else.
+        //
+        // safety: do as little as possible before fork. UNIX sucks, so this is the
+        // best we can do. the biggest danger here is adding something to `args`
+        // that's not safe to fork with.
+        //
+        // we don't do the double-fork setsid trick here because we don't really
+        // expect Pond to be used as a true daemon - you're probably starting it
+        // in the background as part of a terminal session for convenience.
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed to create a pipe");
+        match unsafe { nix::unistd::fork().expect("failed to fork") } {
+            // wait for a successful mount and then exit so we can exit with
+            // a bad status if something goes wrong.
+            ForkResult::Parent { child } => {
+                std::mem::drop(write_fd);
 
-    let mut session = mount_volume(
-        args.mountpoint,
-        volume,
-        runtime,
-        args.allow_other,
-        args.auto_unmount,
-        args.kernel_cache_timeout,
-    )?;
-    session.run()?;
-    Ok(())
+                // mount timeout has to cover waiting to talk to S3 and fetching
+                // the actual volume metadtata. it can't just be a handful of
+                // millis while we wait for the mount syscall.
+                let mount_timeout = Duration::from_secs(10);
+                match read_pipe_status(read_fd, mount_timeout) {
+                    // the child told us everything is good
+                    Ok('0') => {
+                        eprintln!(
+                            "{volume} is mounted at {mountpoint}",
+                            volume = args.volume,
+                            mountpoint = args.mountpoint.display()
+                        );
+                        Ok(())
+                    }
+                    // the child told us everything is bad
+                    Ok(_) => {
+                        if let Err(e) = waitpid(child, None) {
+                            eprintln!(
+                                "error: failed waiting for child ({child}) process to exit: {e}"
+                            )
+                        }
+                        Err(anyhow::anyhow!("mount failed"))
+                    }
+                    // something bad happened waiting for the child. assume it's hung
+                    // and try to SIGTERM it.
+                    Err(_) => {
+                        if let Err(e) = nix::sys::signal::kill(child, Signal::SIGTERM) {
+                            eprintln!("error: failed to kill child process: {e}");
+                        }
+                        Err(anyhow::anyhow!(
+                            "mount timed out after {t} seconds",
+                            t = mount_timeout.as_secs()
+                        ))
+                    }
+                }
+            }
+            // start the mount and report status back to
+            // the parent.
+            ForkResult::Child => {
+                std::mem::drop(read_fd);
+                let mut pipe = File::from(write_fd);
+
+                let runtime = new_runtime(Some(&args))?;
+                let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
+                let client = Client::new(args.volume)?;
+                let volume = runtime.block_on(
+                    client
+                        .with_cache_size(args.read_behavior.chunk_size.as_u64())
+                        .with_chunk_size(args.read_behavior.chunk_size.as_u64())
+                        .with_readahead(args.read_behavior.readahead_size.as_u64())
+                        .load_volume(&version),
+                )?;
+
+                let mut session = mount_volume(
+                    runtime,
+                    volume,
+                    args.mountpoint,
+                    args.allow_other,
+                    args.auto_unmount,
+                    args.kernel_cache_timeout,
+                )?;
+
+                // if the parent's been killed before we can write to it, something
+                // is truly whacky and we should just bail. try to unmount and return.
+                if pipe.write_all(b"0").is_err() {
+                    session.unmount();
+                    return Err(anyhow::anyhow!("failed to write mount status. exiting"));
+                }
+
+                // we're basically set, close all the standard fds and get ready
+                // to run the mount session forever. at this point we're
+                // assuming the mount will run successfully and any errors are
+                // runtime errors, not setup errors.
+                //
+                // TODO: setup logging so that it logs to a local file or to a
+                // special fuse file. until we have that covered, don't init tracing
+                let _ = nix::unistd::close(std::io::stdin().as_raw_fd());
+                let _ = nix::unistd::close(std::io::stdout().as_raw_fd());
+                let _ = nix::unistd::close(std::io::stderr().as_raw_fd());
+                session.run()?;
+                Ok(())
+            }
+        }
+    } else {
+        // mounting in the foreground.
+        //
+        // this looks almost exactly like what we run in the child but we don't
+        // have to close FDs or communicate status. it's probably not worth
+        // abstracting any more of this away than we already have.
+        init_logging();
+
+        let runtime = new_runtime(Some(&args))?;
+        let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
+        let client = Client::new(args.volume)?;
+        let volume = runtime.block_on(
+            client
+                .with_cache_size(args.read_behavior.chunk_size.as_u64())
+                .with_chunk_size(args.read_behavior.chunk_size.as_u64())
+                .with_readahead(args.read_behavior.readahead_size.as_u64())
+                .load_volume(&version),
+        )?;
+
+        let mut session = mount_volume(
+            runtime,
+            volume,
+            args.mountpoint,
+            args.allow_other,
+            args.auto_unmount,
+            args.kernel_cache_timeout,
+        )?;
+        session.run()?;
+        Ok(())
+    }
+}
+
+fn read_pipe_status(fd: OwnedFd, timeout: Duration) -> std::io::Result<char> {
+    let mut buf = [0u8; 1];
+
+    // open the pipe as a regular file. we're trusting that poll will only
+    // return ready when there is actually data to read here, so we're not
+    // doing the fcntl dance to set O_NONBLOCK
+    let mut pipe = File::from(fd);
+
+    let start = Instant::now();
+    let mut poll_fds = [PollFd::new(pipe.as_fd(), PollFlags::POLLIN)];
+    loop {
+        let nready = nix::poll::poll(&mut poll_fds, timeout.as_millis() as u16)?;
+
+        // only return once enough time has actually elapsed, poll can
+        // wake up spuriously.
+        if nready == 0 {
+            if start.elapsed() > timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for mount status",
+                ));
+            }
+            continue;
+        }
+
+        let status_char = match pipe.read_exact(&mut buf) {
+            Ok(()) => buf[0] as char,
+            Err(_) => '1',
+        };
+        return Ok(status_char);
+    }
 }
 
 pub fn mount_volume(
-    mountpoint: impl AsRef<Path>,
-    volume: Volume,
     runtime: tokio::runtime::Runtime,
+    volume: Volume,
+    mountpoint: impl AsRef<Path>,
     allow_other: bool,
     auto_unmount: bool,
     kernel_cache_timeout: Duration,
@@ -223,4 +410,19 @@ pub fn mount_volume(
     }
 
     Ok(fuser::Session::new(pond, mountpoint, &opts)?)
+}
+
+fn init_logging() {
+    tracing_subscriber::fmt::init()
+}
+
+fn new_runtime(args: Option<&MountArgs>) -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+
+    if let Some(args) = args {
+        builder.worker_threads(args.worker_threads as usize);
+        builder.max_blocking_threads(args.blocking_threads as usize);
+    }
+
+    builder.enable_all().build()
 }

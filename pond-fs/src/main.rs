@@ -5,22 +5,17 @@ use clap::Parser;
 use pond_fs::*;
 
 fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
     let res = match args.cmd {
-        Cmd::List { volume, version } => list(runtime, volume, version),
+        Cmd::List { volume, version } => list(volume, version),
         Cmd::Create {
             dir,
-            volume: to,
+            volume,
             version,
-        } => create(runtime, dir, to, version),
-        Cmd::Versions { volume } => versions(runtime, volume),
-        Cmd::Mount(mount_args) => mount(runtime, mount_args),
+        } => create(dir, volume, version),
+        Cmd::Versions { volume } => versions(volume),
+        Cmd::Mount(mount_args) => mount(mount_args),
     };
 
     if let Err(e) = res {
