@@ -8,7 +8,6 @@ use std::{
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
 use pond::{Client, Version, Volume};
-use pond_fs::create;
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
 // known-bad seeds or anything like that.
@@ -99,6 +98,10 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     reset_dir(actual_dir);
     reset_dir(pack_dir);
 
+    let runtime = test_runtime();
+    let version = Version::from_static("123");
+    let client = Client::new(pack_dir.to_str().unwrap()).unwrap();
+
     // create a random test volume
     let mkdir = |p: &Path| create_dir_all(p, [ErrorKind::AlreadyExists, ErrorKind::NotADirectory]);
 
@@ -120,17 +123,16 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     }
 
     // pack it to the pack_dir
-    create(
-        test_runtime(),
-        expected_dir,
-        format!("file://{}", pack_dir.display()),
-        "123",
-    )
-    .unwrap();
+    runtime
+        .block_on(async {
+            let mut volume = client.create_volume().await;
+            volume.pack(expected_dir, version).await?;
+            Ok::<_, pond::Error>(())
+        })
+        .unwrap();
 
     // mount the new dir as filesystem
-    let client = Client::new(pack_dir.to_str().unwrap()).unwrap();
-    let volume = test_runtime().block_on(client.load_volume(&None)).unwrap();
+    let volume = runtime.block_on(client.load_volume(&None)).unwrap();
     let _mount = spawn_mount(actual_dir, volume);
 
     // walk both directories and see if we have the same files and directories
@@ -186,11 +188,12 @@ fn test_commit(
     reset_dir(mount_dir);
     reset_dir(volume_dir);
 
+    let runtime = test_runtime();
     let client = Client::new(volume_dir.to_str().unwrap()).unwrap();
 
     // create an empty volume and write a bunch of files and directories to it.
     // write the same entries to a local filesystem as a reference.
-    let volume = test_runtime().block_on(client.create_volume());
+    let volume = runtime.block_on(client.create_volume());
 
     let mount = spawn_mount(mount_dir, volume);
     for entry in &pre_commit_entries {
@@ -212,7 +215,7 @@ fn test_commit(
     // reload the volume at the lastest version and assert that
     // we have all the data from before the commit and nothing
     // from after it.
-    let volume = test_runtime().block_on(client.load_volume(&None)).unwrap();
+    let volume = runtime.block_on(client.load_volume(&None)).unwrap();
     assert_eq!(volume.version(), &Version::from_static("v1"));
 
     let mount = spawn_mount(mount_dir, volume);
@@ -301,9 +304,9 @@ impl Drop for AutoUnmount {
 // spawn a new mount on a background thread
 fn spawn_mount(mountpoint: impl AsRef<Path>, volume: Volume) -> AutoUnmount {
     let session = pond_fs::mount_volume(
-        mountpoint,
-        volume,
         test_runtime(),
+        volume,
+        mountpoint,
         // we explicitly do not want to set auto_unmount here - it spawns a
         // fusermount3 child process that keeps the fuse mount alive as long
         // as this PROCESS is alive. that means we can't unmount/remount
