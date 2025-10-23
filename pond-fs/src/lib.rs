@@ -1,4 +1,7 @@
 mod fuse;
+mod log;
+
+use log::init_logging;
 
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand, value_parser};
@@ -81,7 +84,9 @@ pub enum Cmd {
 
 #[derive(Parser)]
 pub struct MountArgs {
-    /// Run Pond in a background process. By default, Pond runs in the foreground.
+    /// Run Pond in a background process. By default, Pond runs in the
+    /// foreground. When running in the background, logging to stdout/stderr is
+    /// disabled.
     ///
     /// *NOTE* - If you're running Pond as a system service we strongly
     /// recommend running it under your system's process supervisor instead of
@@ -113,6 +118,19 @@ pub struct MountArgs {
     )]
     pub blocking_threads: u64,
 
+    /// Run with debug logging enabled. By default Pond only logs high-priority
+    /// messages, but stays mostly silent otherwise. This is mostly useful if
+    /// you're debugging an issue.
+    #[clap(long)]
+    pub debug: bool,
+
+    /// Log to a log file at the given path. The parent directory must exist
+    /// and be writable by this process.
+    ///
+    /// This does not disable logging to stdout and stderr.
+    #[clap(long)]
+    pub log_file: Option<PathBuf>,
+
     /// All all other users of the system to access the filesystem.
     ///
     /// By convention, this is disabled by default in FUSE implementations. See
@@ -131,6 +149,9 @@ pub struct MountArgs {
     #[clap(long, default_value = "1.0", value_name = "SECONDS", value_parser = parse_duration_secs)]
     pub kernel_cache_timeout: Duration,
 
+    #[command(flatten)]
+    pub read_behavior: ReadBehaviorArgs,
+
     /// The URL of the volume to mount.
     pub volume: String,
 
@@ -141,9 +162,6 @@ pub struct MountArgs {
     /// greatest version in the volume if not specified.
     #[clap(long)]
     pub version: Option<String>,
-
-    #[command(flatten)]
-    pub read_behavior: ReadBehaviorArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -169,7 +187,7 @@ fn parse_duration_secs(s: &str) -> anyhow::Result<Duration> {
 }
 
 pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
-    init_logging();
+    init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
 
@@ -185,7 +203,7 @@ pub fn create(
     volume: impl AsRef<str>,
     version: impl AsRef<str>,
 ) -> anyhow::Result<()> {
-    init_logging();
+    init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
     let client = Client::new(volume.as_ref())?;
@@ -199,7 +217,7 @@ pub fn create(
 }
 
 pub fn versions(volume: String) -> anyhow::Result<()> {
-    init_logging();
+    init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
     let client = Client::new(&volume)?;
@@ -315,6 +333,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 let _ = nix::unistd::close(std::io::stdin().as_raw_fd());
                 let _ = nix::unistd::close(std::io::stdout().as_raw_fd());
                 let _ = nix::unistd::close(std::io::stderr().as_raw_fd());
+                init_logging(args.debug, false, args.log_file.as_deref())?;
                 session.run()?;
                 Ok(())
             }
@@ -325,7 +344,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         // this looks almost exactly like what we run in the child but we don't
         // have to close FDs or communicate status. it's probably not worth
         // abstracting any more of this away than we already have.
-        init_logging();
+        init_logging(args.debug, true, args.log_file.as_deref())?;
 
         let runtime = new_runtime(Some(&args))?;
         let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
@@ -410,10 +429,6 @@ pub fn mount_volume(
     }
 
     Ok(fuser::Session::new(pond, mountpoint, &opts)?)
-}
-
-fn init_logging() {
-    tracing_subscriber::fmt::init()
 }
 
 fn new_runtime(args: Option<&MountArgs>) -> std::io::Result<tokio::runtime::Runtime> {

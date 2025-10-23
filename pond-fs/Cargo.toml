@@ -15,6 +15,7 @@ bytesize.workspace = true
 clap = { workspace = true, features = ["derive", "string"] }
 libc.workspace = true
 nix = { workspace = true, features = ["process", "poll", "signal"] }
+signal-hook.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
