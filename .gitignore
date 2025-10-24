@@ -1,5 +1,6 @@
 debug
 target
+flatc
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
