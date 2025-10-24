@@ -26,6 +26,17 @@ jobs:
               env:
                   ARBTEST_BUDGET_MS: "30000"
 
+    flatc:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: install flatc
+              run: cargo xtask download-flatc
+            - name: generate sources
+              run: cargo xtask generate
+            - name: check for uncommitted filed
+              run: cargo xtask check-uncommitted
+
     lint:
         runs-on: ubuntu-latest
         steps:
