@@ -1,9 +1,20 @@
 # Pond
 
-Pond is a snapshot based FUSE filesystem that stores data in object storage.
-Pond intelligently compacts and caches your data so that you can work with
-terabytes of data or millions of small files without worrying about exactly how
-your dataset is formatted.
+Pond is an S3-backed filesystem that lets you work with plain old files while
+storing data in S3. It lets you stop thinking about object storage and just do
+things.
+
+Pond is a snapshot-based distributed filesystem designed for write-once
+read-many (WORM) workloads. When you run Pond locally, you see a snapshot of a
+normal looking POSIX filesystem, anyone with access to the S3 bucket can load
+and mount the same Pond snapshot. When making changes to a Pond filesystem, you
+write to local disk; your changes aren't saved until you upload a new snapshot
+and they don't affect what anyone else reads until they explicilty load the
+updated snapshot.
+
+Pond snapshots are optimized for reading. In the background, Pond does
+prefetching and caching so your files feel like they're on your VM, even when
+you need to work with huge files or millions of tiny ones.
 
 ### A Snapshot Based Filesystem
 
