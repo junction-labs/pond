@@ -130,4 +130,3 @@ fn read_flatc_version() -> anyhow::Result<String> {
         .to_string();
     Ok(version)
 }
-
