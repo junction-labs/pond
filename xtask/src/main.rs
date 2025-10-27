@@ -62,6 +62,11 @@ fn ci_clippy(sh: &Shell) -> anyhow::Result<()> {
         // don't allow dbg
         "-D",
         "clippy::dbg_macro",
+        // don't allow printing either
+        "-D",
+        "clippy::print_stdout",
+        "-D",
+        "clippy::print_stderr",
     ];
 
     cmd!(sh, "cargo clippy {cargo_flags...} -- {clippy_flags...}").run()?;

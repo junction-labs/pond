@@ -352,6 +352,15 @@ fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize>
 
 impl Volume {
     pub fn dump(&self) -> Result<()> {
+        macro_rules! write_stdout {
+            ($($args:tt)*) => {{
+                    use std::io::Write as _;
+                    if let Err(_) = writeln!(std::io::stdout(), $($args)*) {
+                        return Ok(())
+                    };
+            }}
+        }
+
         fn location_path(l: &Location) -> String {
             match l {
                 Location::Staged { .. } => format!("**{l}"),
@@ -359,7 +368,7 @@ impl Volume {
             }
         }
 
-        println!("version {}", self.version());
+        write_stdout!("version {}", self.version());
 
         for entry in self.metadata().walk(Ino::Root)? {
             let (name, path, attr) = entry?;
@@ -383,11 +392,11 @@ impl Volume {
                     let location = location_path(l);
                     let offset = b.offset;
                     let len = b.len;
-                    println!("{len:>16} {path} -> {location} @ {offset}");
+                    write_stdout!("{len:>16} {path} -> {location} @ {offset}");
                 }
                 FileType::Directory => {
                     let len = 0;
-                    println!("{len:>16} {path:40}");
+                    write_stdout!("{len:>16} {path:40}");
                 }
             }
         }

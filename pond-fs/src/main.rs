@@ -21,9 +21,9 @@ fn main() -> std::io::Result<()> {
     if let Err(e) = res {
         if args.backtrace {
             // the entire error chain
-            eprintln!("{e:?}");
+            write_stderr!("{e:?}");
         } else {
-            eprintln!("{}", fmt_root_cause(e));
+            write_stderr!("{}", fmt_root_cause(e));
         }
         std::process::exit(-1);
     }
