@@ -301,7 +301,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 let client = Client::new(args.volume)?;
                 let volume = runtime.block_on(
                     client
-                        .with_cache_size(args.read_behavior.chunk_size.as_u64())
+                        .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                         .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                         .with_readahead(args.read_behavior.readahead_size.as_u64())
                         .load_volume(&version),
@@ -351,7 +351,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         let client = Client::new(args.volume)?;
         let volume = runtime.block_on(
             client
-                .with_cache_size(args.read_behavior.chunk_size.as_u64())
+                .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                 .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                 .with_readahead(args.read_behavior.readahead_size.as_u64())
                 .load_volume(&version),

@@ -29,7 +29,7 @@ impl Client {
     }
 
     pub fn with_cache_size(mut self, size: u64) -> Self {
-        self.chunk_size = size;
+        self.cache_size = size;
         self
     }
 
