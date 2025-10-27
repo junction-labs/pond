@@ -22,6 +22,17 @@ use std::{
 
 use crate::fuse::Pond;
 
+/// Like eprintln but doesn't panic on error.
+///
+/// Exported for use in main.rs.
+#[macro_export]
+macro_rules! write_stderr {
+    ($($args:tt)*) => {{
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), $($args)*);
+    }}
+}
+
 #[derive(Parser)]
 #[clap(version = version())]
 pub struct Args {
@@ -224,10 +235,10 @@ pub fn versions(volume: String) -> anyhow::Result<()> {
     let versions = runtime.block_on(client.list_versions())?;
 
     if versions.is_empty() {
-        eprintln!("No versions found under '{volume}'. Is this actually a volume?");
+        write_stderr!("No versions found under '{volume}'. Is this actually a volume?");
     } else {
         for version in versions {
-            println!("{version}");
+            let _ = write!(std::io::stdout(), "{version}");
         }
     }
 
@@ -261,7 +272,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 match read_pipe_status(read_fd, mount_timeout) {
                     // the child told us everything is good
                     Ok('0') => {
-                        eprintln!(
+                        write_stderr!(
                             "{volume} is mounted at {mountpoint}",
                             volume = args.volume,
                             mountpoint = args.mountpoint.display()
@@ -271,7 +282,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                     // the child told us everything is bad
                     Ok(_) => {
                         if let Err(e) = waitpid(child, None) {
-                            eprintln!(
+                            write_stderr!(
                                 "error: failed waiting for child ({child}) process to exit: {e}"
                             )
                         }
@@ -281,7 +292,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                     // and try to SIGTERM it.
                     Err(_) => {
                         if let Err(e) = nix::sys::signal::kill(child, Signal::SIGTERM) {
-                            eprintln!("error: failed to kill child process: {e}");
+                            write_stderr!("error: failed to kill child process: {e}");
                         }
                         Err(anyhow::anyhow!(
                             "mount timed out after {t} seconds",

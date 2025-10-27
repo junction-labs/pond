@@ -1,3 +1,7 @@
+// print-in-tests from clippy config doesn't seem to cover integration tests
+// so we're explicitly allowing it here.
+#![allow(clippy::print_stderr)]
+
 use std::{
     collections::BTreeMap,
     io::ErrorKind,
