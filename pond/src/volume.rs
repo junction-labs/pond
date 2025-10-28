@@ -3,9 +3,12 @@ use crate::{
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
+    scoped_latency_recorder,
+    stats::{METRICS_HANDLE, RecordLatencyGuard},
 };
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
+use metrics_exporter_prometheus::PrometheusHandle;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -56,6 +59,7 @@ enum FileDescriptor {
     Version,
     Commit,
     ClearCache,
+    Metrics,
 }
 
 pub struct Volume {
@@ -63,6 +67,7 @@ pub struct Volume {
     cache: Arc<ChunkCache>,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
+    metrics: PrometheusHandle,
 }
 
 impl Volume {
@@ -76,6 +81,7 @@ impl Volume {
             cache,
             fds: Default::default(),
             store,
+            metrics: METRICS_HANDLE.clone(),
         }
     }
 
@@ -115,6 +121,7 @@ impl Volume {
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
+        scoped_latency_recorder!("volume_getattr_latency_secs");
         match self.meta.getattr(ino) {
             Some(attr) => Ok(attr),
             None => Err(ErrorKind::NotFound.into()),
@@ -131,6 +138,7 @@ impl Volume {
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
+        scoped_latency_recorder!("volume_lookup_latency_secs");
         let attr = self.meta.lookup(parent, name)?;
         Ok(attr)
     }
@@ -231,6 +239,7 @@ impl Volume {
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
+            Ino::METRICS => new_fd(&mut self.fds, ino, FileDescriptor::Metrics),
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -257,7 +266,11 @@ impl Volume {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
+            Some(FileDescriptor::Metrics) => {
+                read_from_buf(self.metrics.render().as_bytes(), offset, buf)
+            }
             Some(FileDescriptor::Committed { key, range }) => {
+                scoped_latency_recorder!("volume_read_latency_secs", "type" => "committed");
                 // FIXME: readahead needs to know the extent of the location -
                 // the range here only includes the extent of THIS file in the
                 // total blob. without knowing the full range we can TRY to prefetch
@@ -271,9 +284,12 @@ impl Volume {
                     .await?;
                 Ok(copy_into(buf, &bytes))
             }
-            Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
-                .await
-                .map_err(|e| Error::with_source(e.kind().into(), "failed to read staged file", e)),
+            Some(FileDescriptor::Staged { file, .. }) => {
+                scoped_latency_recorder!("volume_read_latency_secs", "type" => "staged");
+                read_at(file, offset, buf).await.map_err(|e| {
+                    Error::with_source(e.kind().into(), "failed to read staged file", e)
+                })
+            }
             None => Err(ErrorKind::NotFound.into()),
         }
     }
@@ -290,6 +306,8 @@ impl Volume {
                 if offset != 0 {
                     return Err(ErrorKind::InvalidData.into());
                 }
+
+                scoped_latency_recorder!("volume_commit_latency_secs");
 
                 // for writing to the magic fd - and only for writing to the
                 // magic fd - we trim trailing ascii whitespace so that using
@@ -308,6 +326,7 @@ impl Volume {
             }
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
+                scoped_latency_recorder!("volume_write_latency_secs");
                 let n = write_at(file, offset, data).await.map_err(|e| {
                     let kind = e.kind().into();
                     Error::with_source(kind, "failed to write staged file", e)
@@ -346,16 +365,19 @@ impl Volume {
 }
 
 fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize> {
-    let version: &[u8] = version.as_ref();
+    read_from_buf(version.as_ref(), offset, buf)
+}
+
+fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
     let offset: usize = offset.try_into().map_err(|_| ErrorKind::InvalidData)?;
 
-    if offset > version.len() {
-        return Err(ErrorKind::InvalidData.into());
+    if offset > from.len() {
+        return Ok(0);
     }
 
-    let version = &version[offset..];
-    let amt = std::cmp::min(version.len(), buf.len());
-    buf[..amt].copy_from_slice(&version[..amt]);
+    let from = &from[offset..];
+    let amt = std::cmp::min(to.len(), from.len());
+    to[..amt].copy_from_slice(&from[..amt]);
     Ok(amt)
 }
 

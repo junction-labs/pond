@@ -223,7 +223,7 @@ impl VolumeMetadata {
         let mut dirs = BTreeMap::new();
         for entry in Self::reserved_entries() {
             if !entry.attr.ino.is_root() {
-                let dir_key = (Ino::Root, entry.name.to_string()).into();
+                let dir_key = (entry.parent, entry.name.to_string()).into();
                 dirs.insert(dir_key, entry.attr.ino);
             }
             data.insert(entry.attr.ino, entry);
@@ -238,7 +238,7 @@ impl VolumeMetadata {
         }
     }
 
-    const fn reserved_entries() -> [Entry; 4] {
+    const fn reserved_entries() -> [Entry; 6] {
         [
             Entry {
                 name: Cow::Borrowed("/"),
@@ -281,6 +281,31 @@ impl VolumeMetadata {
                 parent: Ino::Root,
                 attr: FileAttr {
                     ino: Ino::CLEAR_CACHE,
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Regular,
+                },
+                data: EntryData::Dynamic,
+            },
+            // <root>/.prom/pond.prom contains a snapshot of the installed prometheus recorder
+            Entry {
+                name: Cow::Borrowed(".prom"),
+                parent: Ino::Root,
+                attr: FileAttr {
+                    ino: Ino::PROMETHERUS,
+                    size: 0,
+                    mtime: UNIX_EPOCH,
+                    ctime: UNIX_EPOCH,
+                    kind: FileType::Directory,
+                },
+                data: EntryData::Directory,
+            },
+            Entry {
+                name: Cow::Borrowed("pond.prom"),
+                parent: Ino::PROMETHERUS,
+                attr: FileAttr {
+                    ino: Ino::METRICS,
                     size: 0,
                     mtime: UNIX_EPOCH,
                     ctime: UNIX_EPOCH,

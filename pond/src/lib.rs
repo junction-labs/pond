@@ -5,6 +5,7 @@ mod client;
 mod error;
 mod location;
 mod metadata;
+mod stats;
 mod storage;
 mod volume;
 
@@ -65,6 +66,8 @@ impl Ino {
     pub const VERSION: Self = Ino::Reserved(2);
     pub const COMMIT: Self = Ino::Reserved(3);
     pub const CLEAR_CACHE: Self = Ino::Reserved(4);
+    pub const PROMETHERUS: Self = Ino::Reserved(5);
+    pub const METRICS: Self = Ino::Reserved(6);
 
     pub fn as_u64(&self) -> u64 {
         match self {
