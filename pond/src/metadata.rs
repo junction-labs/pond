@@ -1299,7 +1299,9 @@ mod test {
                 continue;
             }
             assert_eq!(
-                volume.delete(Ino::Root, &entry.name).map_err(|e| e.kind()),
+                volume
+                    .delete(entry.parent, &entry.name)
+                    .map_err(|e| e.kind()),
                 Err(ErrorKind::PermissionDenied)
             );
         }
