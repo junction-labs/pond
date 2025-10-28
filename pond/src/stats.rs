@@ -17,7 +17,7 @@ pub(crate) static METRICS_HANDLE: LazyLock<PrometheusHandle> = LazyLock::new(|| 
 });
 
 #[macro_export]
-macro_rules! scoped_latency_recorder {
+macro_rules! record_latency {
     ($name:literal) => {
         let _guard = RecordLatencyGuard::new($name);
     };

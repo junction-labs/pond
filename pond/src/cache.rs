@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::{ops::Range, sync::Arc};
 
-use crate::{Error, error::ErrorKind, scoped_latency_recorder, stats::RecordLatencyGuard};
+use crate::{Error, error::ErrorKind, record_latency, stats::RecordLatencyGuard};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReadAheadPolicy {
@@ -146,7 +146,7 @@ impl ChunkCacheInner {
             .cache
             .fetch(chunk, || {
                 metrics::counter!("cache_misses_total").increment(1);
-                scoped_latency_recorder!("cache_fetch_latency_secs");
+                record_latency!("cache_fetch_latency_secs");
                 get_range(self.store.clone(), path, range)
             })
             .await?;
@@ -247,11 +247,12 @@ fn readahead_offsets(
 
 #[cfg(test)]
 mod test {
+    use std::num::NonZero;
+
     use super::*;
     use arbtest::arbtest;
     use bytes::Bytes;
     use object_store::{ObjectStore, PutPayload};
-    use std::num::NonZero;
 
     async fn storage_with_data(
         key: &object_store::path::Path,
