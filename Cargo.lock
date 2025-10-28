@@ -1814,6 +1814,7 @@ dependencies = [
  "pond",
  "signal-hook",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "walkdir",
 ]

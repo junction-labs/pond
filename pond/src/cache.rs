@@ -16,7 +16,7 @@ struct Chunk {
     offset: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct ChunkCache {
     inner: Arc<ChunkCacheInner>,
 }
@@ -37,6 +37,7 @@ impl Drop for CacheValue {
     }
 }
 
+#[derive(Debug)]
 struct ChunkCacheInner {
     store: crate::storage::Storage,
     cache: foyer::Cache<Chunk, CacheValue>,
@@ -51,10 +52,17 @@ impl ChunkCache {
         store: crate::storage::Storage,
         readahead_policy: ReadAheadPolicy,
     ) -> Self {
-        let max_cache_size = (max_cache_size / chunk_size) as usize;
-        let cache = foyer::Cache::<Chunk, CacheValue>::builder(max_cache_size)
+        let max_cache_entries = (max_cache_size / chunk_size) as usize;
+        let cache = foyer::Cache::<Chunk, CacheValue>::builder(max_cache_entries)
             .with_eviction_config(foyer::S3FifoConfig::default())
             .build();
+
+        tracing::info!(
+            max_entries = max_cache_entries,
+            capacity_bytes = max_cache_size * chunk_size,
+            readahead_size_bytes = readahead_policy.size,
+            "ChunkCache initialization"
+        );
 
         let inner = ChunkCacheInner {
             cache,

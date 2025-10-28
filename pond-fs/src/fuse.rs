@@ -2,7 +2,9 @@ use pond::{ErrorKind, Fd, Ino, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
+use tracing::instrument;
 
+#[derive(Debug)]
 pub struct Pond {
     volume: Volume,
     runtime: tokio::runtime::Runtime,
@@ -53,11 +55,12 @@ impl AsErrno for pond::ErrorKind {
 }
 
 macro_rules! fs_try {
-    ($reply:expr, $e:expr $(,)*) => {
+    ($reply:expr, $e:expr) => {
         match $e {
             Ok(v) => v,
             Err(err) => {
                 let err: pond::Error = err.into();
+                tracing::error!(err = %err);
                 $reply.error(err.kind().as_errno());
                 return;
             }
@@ -73,6 +76,7 @@ impl fuser::Filesystem for Pond {
     // TODO: set up uid/gid with init
     // TODO: set capabilities with init
 
+    #[instrument]
     fn lookup(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -91,6 +95,7 @@ impl fuser::Filesystem for Pond {
         }
     }
 
+    #[instrument]
     fn getattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -105,6 +110,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
+    #[instrument]
     fn readdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -127,6 +133,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
+    #[instrument]
     fn mkdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -145,6 +152,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
+    #[instrument]
     fn rmdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -157,6 +165,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
+    #[instrument]
     fn rename(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -178,6 +187,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
+    #[instrument]
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -214,6 +224,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
+    #[instrument]
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let ino: Ino = ino.into();
 
@@ -244,6 +255,7 @@ impl fuser::Filesystem for Pond {
         }
     }
 
+    #[instrument]
     fn read(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -274,6 +286,7 @@ impl fuser::Filesystem for Pond {
         reply.data(&buf[..n]);
     }
 
+    #[instrument]
     fn write(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -296,6 +309,7 @@ impl fuser::Filesystem for Pond {
         reply.written(n as u32);
     }
 
+    #[instrument]
     fn setattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -334,6 +348,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
+    #[instrument]
     fn release(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -349,6 +364,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
+    #[instrument]
     fn unlink(
         &mut self,
         _req: &fuser::Request<'_>,

@@ -61,6 +61,11 @@ impl Storage {
             .tempdir()
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
+        tracing::info!("Creating an inmemory object store client");
+        tracing::info!(
+            "Staged files will be written under: {}",
+            temp_dir.path().to_string_lossy()
+        );
         Ok(Storage {
             base_path: None,
             temp_dir: Arc::new(temp_dir),
@@ -96,6 +101,15 @@ impl Storage {
                 )
             })?;
 
+        tracing::info!(
+            bucket = bucket,
+            volume_path = base_path.to_string(),
+            "Creating object store client for S3"
+        );
+        tracing::info!(
+            "Staged files will be written under: {}",
+            temp_dir.path().to_string_lossy()
+        );
         Ok(Storage {
             base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),
@@ -137,6 +151,14 @@ impl Storage {
             }
         };
 
+        tracing::info!(
+            volume_path = base_path.to_string(),
+            "Creating object store client for local filesystem"
+        );
+        tracing::info!(
+            "Staged files will be written under: {}",
+            temp_dir.path().to_string_lossy()
+        );
         Ok(Storage {
             base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),

@@ -20,6 +20,7 @@ metrics-util.workspace = true
 nix = { workspace = true, features = ["process", "poll", "signal"] }
 signal-hook.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "net"] }
+tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 pond.workspace = true
