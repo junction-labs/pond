@@ -3,8 +3,8 @@ use crate::{
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
+    metrics::{METRICS_HANDLE, RecordLatencyGuard},
     record_latency,
-    stats::{METRICS_HANDLE, RecordLatencyGuard},
 };
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};

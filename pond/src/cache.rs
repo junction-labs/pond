@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::{ops::Range, sync::Arc};
 
-use crate::{Error, error::ErrorKind, record_latency, stats::RecordLatencyGuard};
+use crate::{Error, error::ErrorKind, metrics::RecordLatencyGuard, record_latency};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReadAheadPolicy {

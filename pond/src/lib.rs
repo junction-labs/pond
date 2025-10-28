@@ -5,7 +5,7 @@ mod client;
 mod error;
 mod location;
 mod metadata;
-mod stats;
+mod metrics;
 mod storage;
 mod volume;
 
