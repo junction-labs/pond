@@ -9,6 +9,20 @@ use crate::{
     metadata::{Version, VolumeMetadata},
 };
 
+#[macro_export]
+macro_rules! map_storage_err {
+    ($e:expr) => {
+        match &$e {
+            object_store::Error::AlreadyExists { .. } => ErrorKind::AlreadyExists,
+            object_store::Error::NotFound { .. } => ErrorKind::NotFound,
+            object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
+            object_store::Error::PermissionDenied { .. }
+            | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
+            _ => ErrorKind::Other,
+        }
+    };
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Storage {
     pub(crate) temp_dir: Arc<TempDir>,
@@ -17,7 +31,7 @@ pub(crate) struct Storage {
 }
 
 impl Storage {
-    /// Create an object_store::Client for a string.
+    /// Create an Storage instance from a location string.
     ///
     /// S3 scheme urls will use environment based credentials where possible and fall back to their
     /// default configurations.
@@ -201,15 +215,8 @@ impl Storage {
         let path = self.metadata_path(version);
         let get = self.remote.get(&path).and_then(|res| res.bytes());
         let bytes = get.await.map_err(|e| {
-            let kind = match e {
-                object_store::Error::NotFound { .. } => ErrorKind::NotFound,
-                object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                object_store::Error::PermissionDenied { .. }
-                | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                _ => ErrorKind::Other,
-            };
             Error::with_source(
-                kind,
+                map_storage_err!(e),
                 format!("failed to read volume metadata for version={version}"),
                 e,
             )
@@ -222,19 +229,11 @@ impl Storage {
         match self.remote.head(path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => {
-                let error_kind = match e {
-                    object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                    object_store::Error::PermissionDenied { .. }
-                    | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                    _ => ErrorKind::Other,
-                };
-                Err(Error::with_source(
-                    error_kind,
-                    format!("failed to head {path} for version={version}"),
-                    e,
-                ))
-            }
+            Err(e) => Err(Error::with_source(
+                map_storage_err!(e),
+                format!("failed to head {path} for version={version}"),
+                e,
+            )),
         }
     }
 

@@ -2,6 +2,7 @@ use crate::{
     ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
+    map_storage_err,
     metadata::{Modify, Version, VolumeMetadata},
 };
 use bytes::{Bytes, BytesMut};
@@ -327,10 +328,10 @@ impl Volume {
             ));
         }
 
-        let mut staged = StagedVolume { inner: self };
+        let mut staged = StagedVolume::new(self, version);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
-        staged.persist(version).await?;
+        staged.persist().await?;
 
         Ok(())
     }
@@ -491,15 +492,8 @@ fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor
 
 macro_rules! try_mpu {
     ($mpu:expr, $context:literal) => {
-        $mpu.await.map_err(|e| {
-            let kind = match &e {
-                object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
-                object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                _ => ErrorKind::Other,
-            };
-            Error::with_source(kind, $context, e)
-        })?
+        $mpu.await
+            .map_err(|e| Error::with_source(map_storage_err!(e), $context, e))?
     };
 }
 
@@ -512,9 +506,14 @@ macro_rules! try_io {
 
 struct StagedVolume<'a> {
     inner: &'a mut Volume,
+    version: Version,
 }
 
-impl StagedVolume<'_> {
+impl<'a> StagedVolume<'a> {
+    fn new(inner: &'a mut Volume, version: Version) -> Self {
+        Self { inner, version }
+    }
+
     /// The size of each part within the multipart upload (excluding the last which is allowed to
     /// be smaller). Aligned to 32MiB to help with alignment when reading from object storage.
     const MPU_UPLOAD_SIZE: usize = 32 * 1024 * 1024;
@@ -613,9 +612,9 @@ impl StagedVolume<'_> {
     }
 
     /// Mint and upload a new version of Volume.
-    async fn persist(self, version: Version) -> Result<()> {
-        let meta_path = self.inner.store.metadata_path(&version);
-        self.inner.meta.set_version(version);
+    async fn persist(self) -> Result<()> {
+        let meta_path = self.inner.store.metadata_path(&self.version);
+        self.inner.meta.set_version(self.version);
 
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
         let res = self
@@ -626,7 +625,10 @@ impl StagedVolume<'_> {
                 &meta_path,
                 PutPayload::from_bytes(new_volume),
                 PutOptions {
-                    mode: object_store::PutMode::Create,
+                    // TODO: there's a potential race condition here -- we do an existence check at
+                    // the beginning of the commit to make sure the version doesn't exist, but
+                    // there's potential for two mounts to write the same version here.
+                    mode: object_store::PutMode::Overwrite,
                     ..Default::default()
                 },
             )
@@ -634,20 +636,11 @@ impl StagedVolume<'_> {
 
         match res {
             Ok(_) => Ok(()),
-            Err(e) => {
-                let kind = match e {
-                    object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                    object_store::Error::AlreadyExists { .. } => ErrorKind::AlreadyExists,
-                    object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
-                    object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                    _ => ErrorKind::Other,
-                };
-                Err(Error::with_source(
-                    kind,
-                    "failed to upload volume metadata",
-                    e,
-                ))
-            }
+            Err(e) => Err(Error::with_source(
+                map_storage_err!(e),
+                "failed to upload volume metadata",
+                e,
+            )),
         }
     }
 }
