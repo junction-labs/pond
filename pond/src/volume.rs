@@ -264,6 +264,9 @@ impl Volume {
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
             Some(FileDescriptor::Metrics) => {
+                // this is somewhat expensive as it iterates and locks all shards to grab the
+                // usage. only do it when someone is trying to read the metrics.
+                self.cache.record_cache_size();
                 read_from_buf(METRICS_HANDLE.render().as_bytes(), offset, buf)
             }
             Some(FileDescriptor::Committed { key, range }) => {

@@ -54,6 +54,14 @@ impl ChunkCache {
         self.inner.cache.clear()
     }
 
+    /// Record the current number of entries within the cache and the size of the cache into their
+    /// respective gauge metrics.
+    pub(crate) fn record_cache_size(&self) {
+        let num_entries = self.inner.cache.usage();
+        metrics::gauge!("cache_entries_count").set(num_entries as f64);
+        metrics::gauge!("cache_size_bytes").set(num_entries as f64 * self.inner.chunk_size as f64);
+    }
+
     pub(crate) async fn get_at(
         &self,
         path: Arc<object_store::path::Path>,
