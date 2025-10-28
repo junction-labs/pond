@@ -5,8 +5,9 @@ use crate::{
     map_storage_err,
     metadata::{Modify, Version, VolumeMetadata},
 };
+use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
-use object_store::{ObjectStore, PutOptions, PutPayload};
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
@@ -617,25 +618,37 @@ impl<'a> StagedVolume<'a> {
         self.inner.meta.set_version(self.version);
 
         let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
-        let res = self
-            .inner
-            .store
-            .remote
-            .put_opts(
-                &meta_path,
-                PutPayload::from_bytes(new_volume),
-                PutOptions {
-                    // TODO: there's a potential race condition here -- we do an existence check at
-                    // the beginning of the commit to make sure the version doesn't exist, but
-                    // there's potential for two mounts to write the same version here.
-                    mode: object_store::PutMode::Overwrite,
-                    ..Default::default()
-                },
-            )
+
+        let put_metadata = || async {
+            self.inner
+                .store
+                .remote
+                .put_opts(
+                    &meta_path,
+                    // bytes::Bytes is Arc'd internally, no real copying here
+                    PutPayload::from_bytes(new_volume.clone()),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+        };
+        let res = put_metadata
+            .retry(ExponentialBuilder::default())
+            .when(should_retry)
+            .notify(|e, t| {
+                tracing::error!("Retrying metadata upload after {t:?} because error: {e:?}");
+            })
             .await;
 
         match res {
             Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { source, .. }) => Err(Error::with_source(
+                ErrorKind::AlreadyExists,
+                "race condition: version already exists. if you see a retry attempt for metadata upload, this may be a false alarm.",
+                source,
+            )),
             Err(e) => Err(Error::with_source(
                 map_storage_err!(e),
                 "failed to upload volume metadata",
@@ -643,6 +656,25 @@ impl<'a> StagedVolume<'a> {
             )),
         }
     }
+}
+
+fn should_retry(e: &object_store::Error) -> bool {
+    use std::error::Error;
+
+    let mut source = e.source();
+    while let Some(e) = source {
+        if let Some(http_error) = e.downcast_ref::<object_store::client::HttpError>() {
+            return matches!(
+                http_error.kind(),
+                // these are the only two that are not retried with PutMode::Create since they
+                // don't consider it idempotent. we'll retry these ourselves.
+                object_store::client::HttpErrorKind::Timeout
+                    | object_store::client::HttpErrorKind::Interrupted
+            );
+        }
+        source = e.source();
+    }
+    false
 }
 
 #[cfg(test)]
