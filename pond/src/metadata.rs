@@ -7,7 +7,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
+use crate::{
+    ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, error::ErrorKind,
+    location::LocationId,
+};
 
 // TODO: we duplicate file/dir names as strings in data values and entry keys.
 // have to figure out how to intern somewhere if we want to stop, and probably
@@ -162,6 +165,15 @@ pub(crate) enum EntryData {
         byte_range: ByteRange,
     },
     Dynamic,
+}
+
+impl EntryData {
+    fn location_id(&self) -> Option<&LocationId> {
+        match self {
+            EntryData::File { location_idx, .. } => Some(location_idx.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -592,8 +604,12 @@ impl VolumeMetadata {
     }
 
     /// Obtain information about a file based only on its `ino`.
-    pub(crate) fn getattr(&self, ino: Ino) -> Option<&FileAttr> {
-        self.data.get(&ino).map(|dent| &dent.attr)
+    pub(crate) fn getattr(&self, ino: Ino) -> Option<(&FileAttr, Option<&LocationId>)> {
+        self.data.get(&ino).map(|dent| {
+            let attr = &dent.attr;
+            let id = dent.data.location_id();
+            (attr, id)
+        })
     }
 
     pub(crate) fn setattr(
@@ -805,6 +821,11 @@ impl VolumeMetadata {
             // no other file type has a location
             _ => None,
         })
+    }
+
+    pub(crate) fn lookup_location(&self, id: &LocationId) -> Option<&Location> {
+        let LocationId(idx) = id;
+        self.locations.get(*idx)
     }
 
     /// Serialize committed data in this volume to bytes.
@@ -1544,7 +1565,7 @@ mod test {
         assert_eq!(location, &new_location);
         assert_eq!(*range, new_range);
 
-        let attr = meta.getattr(ino).unwrap();
+        let (attr, _) = meta.getattr(ino).unwrap();
         assert_eq!(attr.size, new_range.len);
     }
 
@@ -1569,7 +1590,7 @@ mod test {
 
         // no-op since it's a smaller len
         meta.modify(ino, None, Some(Modify::Max(3))).unwrap();
-        let attr = meta.getattr(ino).unwrap();
+        let (attr, _) = meta.getattr(ino).unwrap();
         assert_eq!(attr.size, 8);
         let (_, range_after) = meta.location(ino).unwrap();
         assert_eq!(range_after.len, 8);

@@ -2,6 +2,7 @@ use crate::{
     ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
+    location::LocationId,
     metadata::{Modify, Version, VolumeMetadata},
 };
 use bytes::{Bytes, BytesMut};
@@ -94,11 +95,15 @@ impl Volume {
         self.meta.to_bytes()
     }
 
-    pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
+    pub fn getattr(&self, ino: Ino) -> Result<(&FileAttr, Option<&LocationId>)> {
         match self.meta.getattr(ino) {
-            Some(attr) => Ok(attr),
+            Some((attr, id)) => Ok((attr, id)),
             None => Err(ErrorKind::NotFound.into()),
         }
+    }
+
+    pub fn location(&self, id: &LocationId) -> Option<&Location> {
+        self.meta.lookup_location(id)
     }
 
     pub fn setattr(
@@ -657,6 +662,33 @@ mod tests {
     use crate::Client;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_location_id() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let volume_path = tempdir.path().join("store");
+        std::fs::create_dir_all(&volume_path).unwrap();
+
+        let client = Client::new(volume_path.to_str().unwrap()).unwrap();
+        let mut volume = client.create_volume().await;
+
+        let (attr, _fd) = volume
+            .create(Ino::Root, "test.txt".to_string(), true)
+            .unwrap();
+        let ino = attr.ino;
+
+        let (_, l_id) = volume.getattr(ino).unwrap();
+        let l_id = l_id.unwrap();
+
+        // this fails to compile: this is a borrowck error
+        volume.commit(Version::from_static("123")).await.unwrap();
+
+        // and this will only clone a reference and not actually clone
+        // the value, so it's a type error
+        let l_id: LocationId = l_id.clone();
+        println!("{:?}", l_id)
+    }
+
     #[test]
     fn test_copy_into() {
         // buf.len() = sum(bytes.len())

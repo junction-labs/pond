@@ -98,7 +98,7 @@ impl fuser::Filesystem for Pond {
         _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        let attr = fs_try!(reply, self.volume.getattr(ino.into()));
+        let (attr, _location) = fs_try!(reply, self.volume.getattr(ino.into()));
         reply.attr(
             &self.kernel_cache_timeout,
             &fuse_attr(self.uid, self.gid, attr),
@@ -337,7 +337,7 @@ impl fuser::Filesystem for Pond {
             );
         };
 
-        let attr = fs_try!(reply, self.volume.getattr(ino));
+        let (attr, _location) = fs_try!(reply, self.volume.getattr(ino));
         reply.attr(
             &self.kernel_cache_timeout,
             &fuse_attr(self.uid, self.gid, attr),

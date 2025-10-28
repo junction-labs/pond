@@ -1,5 +1,18 @@
 use std::{borrow::Cow, sync::Arc};
 
+// this is a newtype around a usize, but we don't want to let it be used as
+// anything other than a reference so that holding one keeps a borrow on a
+// Volume. don't derive Clone or Copy.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct LocationId(pub(crate) usize);
+
+impl AsRef<LocationId> for usize {
+    fn as_ref(&self) -> &LocationId {
+        unsafe { std::mem::transmute(self) }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
     Staged { path: std::path::PathBuf },
