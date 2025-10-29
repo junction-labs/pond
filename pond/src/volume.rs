@@ -95,6 +95,10 @@ impl Volume {
         self.meta.to_bytes()
     }
 
+    pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
+        self.meta.to_bytes_with_version(version)
+    }
+
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
         match self.meta.getattr(ino) {
             Some(attr) => Ok(attr),
@@ -328,10 +332,10 @@ impl Volume {
             ));
         }
 
-        let mut staged = StagedVolume::new(self, version);
+        let mut staged = StagedVolume::new(self);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
-        staged.persist().await?;
+        staged.persist(version).await?;
 
         Ok(())
     }
@@ -506,12 +510,11 @@ macro_rules! try_io {
 
 struct StagedVolume<'a> {
     inner: &'a mut Volume,
-    version: Version,
 }
 
 impl<'a> StagedVolume<'a> {
-    fn new(inner: &'a mut Volume, version: Version) -> Self {
-        Self { inner, version }
+    fn new(inner: &'a mut Volume) -> Self {
+        Self { inner }
     }
 
     /// The size of each part within the multipart upload (excluding the last which is allowed to
@@ -612,11 +615,9 @@ impl<'a> StagedVolume<'a> {
     }
 
     /// Mint and upload a new version of Volume.
-    async fn persist(self) -> Result<()> {
-        let meta_path = self.inner.store.metadata_path(&self.version);
-        self.inner.meta.set_version(self.version);
-
-        let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
+    async fn persist(self, version: Version) -> Result<()> {
+        let meta_path = self.inner.store.metadata_path(&version);
+        let new_volume = bytes::Bytes::from(self.inner.to_bytes_with_version(&version)?);
 
         let put_metadata = || async {
             self.inner
@@ -642,7 +643,10 @@ impl<'a> StagedVolume<'a> {
             .await;
 
         match res {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.inner.meta.set_version(version);
+                Ok(())
+            }
             Err(object_store::Error::AlreadyExists { source, .. }) => Err(Error::with_source(
                 ErrorKind::AlreadyExists,
                 "race condition: version already exists. if you see a retry attempt for metadata upload, this may be a false alarm.",

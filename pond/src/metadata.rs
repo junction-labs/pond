@@ -811,6 +811,10 @@ impl VolumeMetadata {
     ///
     /// Note: uncommitted changes will be dropped. Commit if you want them persisted!
     pub(crate) fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+        self.to_bytes_with_version(&self.version)
+    }
+
+    pub(crate) fn to_bytes_with_version(&self, version: &Version) -> crate::Result<Vec<u8>> {
         let mut fbb = FlatBufferBuilder::new();
 
         let locations = {
@@ -831,7 +835,7 @@ impl VolumeMetadata {
             fbb.create_vector(&dir_entries)
         };
 
-        let fb_version = fbb.create_string(self.version.as_ref());
+        let fb_version = fbb.create_string(version.as_ref());
         let volume = fb::Volume::create(
             &mut fbb,
             &fb::VolumeArgs {
