@@ -647,9 +647,17 @@ impl<'a> StagedVolume<'a> {
                 self.inner.meta.set_version(version);
                 Ok(())
             }
+            // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
+            // but we did write a new metadata version. this can happen if our first attempt at the
+            // metadata PUT returned an error after it successfully uploaded it, and we do a
+            // retry which tells us it already exists. in this scenario, the most correct thing
+            // would be to read the existing file and see if it's identical to the current metadata
+            // we have. if it is, then this can return Ok(()) and we can bump the version. if not,
+            // then it was a race condition where some other mount actually wrote to the same version
+            // before we could.
             Err(object_store::Error::AlreadyExists { source, .. }) => Err(Error::with_source(
                 ErrorKind::AlreadyExists,
-                "race condition: version already exists. if you see a retry attempt for metadata upload, this may be a false alarm.",
+                "version already exists",
                 source,
             )),
             Err(e) => Err(Error::with_source(
