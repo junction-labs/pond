@@ -2,7 +2,6 @@ use crate::{
     ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
     cache::ChunkCache,
     error::ErrorKind,
-    map_storage_err,
     metadata::{Modify, Version, VolumeMetadata},
 };
 use backon::{ExponentialBuilder, Retryable};
@@ -494,7 +493,7 @@ fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor
 macro_rules! try_mpu {
     ($mpu:expr, $context:literal) => {
         $mpu.await
-            .map_err(|e| Error::with_source(map_storage_err!(e), $context, e))?
+            .map_err(|e| Error::with_source((&e).into(), $context, e))?
     };
 }
 
@@ -650,7 +649,7 @@ impl<'a> StagedVolume<'a> {
                 source,
             )),
             Err(e) => Err(Error::with_source(
-                map_storage_err!(e),
+                (&e).into(),
                 "failed to upload volume metadata",
                 e,
             )),
