@@ -16,7 +16,7 @@ struct Chunk {
     offset: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ChunkCache {
     inner: Arc<ChunkCacheInner>,
 }
@@ -37,7 +37,6 @@ impl Drop for CacheValue {
     }
 }
 
-#[derive(Debug)]
 struct ChunkCacheInner {
     store: crate::storage::Storage,
     cache: foyer::Cache<Chunk, CacheValue>,
@@ -61,7 +60,7 @@ impl ChunkCache {
             max_entries = max_cache_entries,
             capacity_bytes = max_cache_size * chunk_size,
             readahead_size_bytes = readahead_policy.size,
-            "ChunkCache initialization"
+            "ChunkCache created"
         );
 
         let inner = ChunkCacheInner {

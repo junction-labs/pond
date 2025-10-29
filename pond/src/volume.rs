@@ -71,7 +71,6 @@ enum FileDescriptor {
     },
 }
 
-#[derive(Debug)]
 pub struct Volume {
     meta: VolumeMetadata,
     cache: ChunkCache,

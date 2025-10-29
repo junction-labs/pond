@@ -61,7 +61,7 @@ impl Storage {
             .tempdir()
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
-        tracing::info!("Creating an inmemory object store client");
+        tracing::info!("Inmemory object store client created");
         tracing::info!(
             "Staged files will be written under: {}",
             temp_dir.path().to_string_lossy()
@@ -104,7 +104,7 @@ impl Storage {
         tracing::info!(
             bucket = bucket,
             volume_path = base_path.to_string(),
-            "Creating object store client for S3"
+            "S3 object store client created"
         );
         tracing::info!(
             "Staged files will be written under: {}",
@@ -153,7 +153,7 @@ impl Storage {
 
         tracing::info!(
             volume_path = base_path.to_string(),
-            "Creating object store client for local filesystem"
+            "Local filesystem object store client created"
         );
         tracing::info!(
             "Staged files will be written under: {}",
