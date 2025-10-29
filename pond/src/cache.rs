@@ -58,8 +58,9 @@ impl ChunkCache {
     /// respective gauge metrics.
     pub(crate) fn record_cache_size(&self) {
         let num_entries = self.inner.cache.usage();
-        metrics::gauge!("cache_entries_count").set(num_entries as f64);
-        metrics::gauge!("cache_size_bytes").set(num_entries as f64 * self.inner.chunk_size as f64);
+        metrics::gauge!("pond_cache_entries_count").set(num_entries as f64);
+        metrics::gauge!("pond_cache_size_bytes")
+            .set(num_entries as f64 * self.inner.chunk_size as f64);
     }
 
     pub(crate) async fn get_at(
@@ -149,12 +150,12 @@ impl ChunkCacheInner {
             offset,
         };
 
-        metrics::counter!("cache_requests_total").increment(1);
+        metrics::counter!("pond_cache_requests_total").increment(1);
         let entry = self
             .cache
             .fetch(chunk, || {
-                metrics::counter!("cache_misses_total").increment(1);
-                record_latency!("cache_fetch_latency_secs");
+                metrics::counter!("pond_cache_misses_total").increment(1);
+                record_latency!("pond_cache_fetch_latency_secs");
                 get_range(self.store.clone(), path, range)
             })
             .await?;
