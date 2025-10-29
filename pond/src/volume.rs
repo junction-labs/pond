@@ -259,6 +259,8 @@ impl Volume {
     }
 
     pub async fn read_at(&mut self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        metrics::histogram!("volume_read_buf_size_bytes").record(buf.len() as f64);
+
         match self.fds.get_mut(&fd) {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
@@ -295,6 +297,8 @@ impl Volume {
     }
 
     pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
+        metrics::histogram!("volume_write_buf_size_bytes").record(data.len() as f64);
+
         match self.fds.get_mut(&fd) {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
