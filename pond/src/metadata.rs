@@ -204,6 +204,9 @@ pub enum Modify {
     /// Set a new ByteRange, overwriting anything already there.
     Set(ByteRange),
 
+    /// Set the len of the current ByteRange::len.
+    Truncate(u64),
+
     /// Set the max of the current ByteRange::len and the given u64 as the new ByteRange::len.
     Max(u64),
 }
@@ -692,6 +695,16 @@ impl VolumeMetadata {
         match range {
             Some(Modify::Set(range)) => {
                 *byte_range = range;
+                entry.attr.size = byte_range.len;
+            }
+            Some(Modify::Truncate(len)) => {
+                if len > byte_range.len {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "not allowed to truncate with a greater len",
+                    ));
+                }
+                byte_range.len = len;
                 entry.attr.size = byte_range.len;
             }
             Some(Modify::Max(len)) => {

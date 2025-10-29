@@ -11,7 +11,7 @@ mod volume;
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
-pub use metadata::{Modify, Version};
+pub use metadata::Version;
 pub use volume::{Fd, Volume};
 
 use std::time::SystemTime;
@@ -208,14 +208,6 @@ impl ByteRange {
     #[inline]
     pub fn end(&self) -> u64 {
         self.offset + self.len
-    }
-
-    /// Advance offset by n bytes while keep the end of the the byte range the same.
-    pub fn advance(&mut self, n: u64) {
-        debug_assert!(self.len - n > 0);
-
-        self.offset += n;
-        self.len -= n;
     }
 
     pub fn as_range_usize(&self) -> std::ops::Range<usize> {
