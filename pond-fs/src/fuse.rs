@@ -1,4 +1,4 @@
-use pond::{ByteRange, ErrorKind, Fd, Ino, Modify, Volume};
+use pond::{ErrorKind, Fd, Ino, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -324,17 +324,7 @@ impl fuser::Filesystem for Pond {
         };
 
         if let Some(size) = size {
-            fs_try!(
-                reply,
-                self.volume.modify(
-                    ino,
-                    None,
-                    Some(Modify::Set(ByteRange {
-                        offset: 0,
-                        len: size,
-                    })),
-                )
-            );
+            fs_try!(reply, self.volume.truncate(ino, size));
         };
 
         let attr = fs_try!(reply, self.volume.getattr(ino));

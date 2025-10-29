@@ -86,6 +86,21 @@ impl Volume {
         &mut self.meta
     }
 
+    pub(crate) fn modify(
+        &mut self,
+        ino: Ino,
+        location: Option<Location>,
+        range: Option<Modify>,
+    ) -> Result<()> {
+        match ino {
+            Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
+            ino => {
+                self.meta.modify(ino, location, range)?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn version(&self) -> &Version {
         self.metadata().version()
     }
@@ -108,21 +123,6 @@ impl Volume {
         ctime: Option<SystemTime>,
     ) -> Result<&FileAttr> {
         self.meta.setattr(ino, mtime, ctime)
-    }
-
-    pub fn modify(
-        &mut self,
-        ino: Ino,
-        location: Option<Location>,
-        range: Option<Modify>,
-    ) -> Result<()> {
-        match ino {
-            Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
-            ino => {
-                self.meta.modify(ino, location, range)?;
-                Ok(())
-            }
-        }
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
@@ -178,6 +178,10 @@ impl Volume {
     pub fn delete(&mut self, parent: Ino, name: &str) -> Result<()> {
         self.meta.delete(parent, name)?;
         Ok(())
+    }
+
+    pub fn truncate(&mut self, ino: Ino, size: u64) -> Result<()> {
+        self.modify(ino, None, Some(Modify::Truncate(size)))
     }
 }
 
