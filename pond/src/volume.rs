@@ -4,8 +4,9 @@ use crate::{
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
 };
+use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
-use object_store::{ObjectStore, PutOptions, PutPayload};
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
@@ -107,6 +108,10 @@ impl Volume {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.meta.to_bytes()
+    }
+
+    pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
+        self.meta.to_bytes_with_version(version)
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
@@ -331,7 +336,7 @@ impl Volume {
             ));
         }
 
-        let mut staged = StagedVolume { inner: self };
+        let mut staged = StagedVolume::new(self);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
         staged.persist(version).await?;
@@ -495,15 +500,8 @@ fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor
 
 macro_rules! try_mpu {
     ($mpu:expr, $context:literal) => {
-        $mpu.await.map_err(|e| {
-            let kind = match &e {
-                object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
-                object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                _ => ErrorKind::Other,
-            };
-            Error::with_source(kind, $context, e)
-        })?
+        $mpu.await
+            .map_err(|e| Error::with_source((&e).into(), $context, e))?
     };
 }
 
@@ -518,7 +516,11 @@ struct StagedVolume<'a> {
     inner: &'a mut Volume,
 }
 
-impl StagedVolume<'_> {
+impl<'a> StagedVolume<'a> {
+    fn new(inner: &'a mut Volume) -> Self {
+        Self { inner }
+    }
+
     /// The size of each part within the multipart upload (excluding the last which is allowed to
     /// be smaller). Aligned to 32MiB to help with alignment when reading from object storage.
     const MPU_UPLOAD_SIZE: usize = 32 * 1024 * 1024;
@@ -619,41 +621,75 @@ impl StagedVolume<'_> {
     /// Mint and upload a new version of Volume.
     async fn persist(self, version: Version) -> Result<()> {
         let meta_path = self.inner.store.metadata_path(&version);
-        self.inner.meta.set_version(version);
+        let new_volume = bytes::Bytes::from(self.inner.to_bytes_with_version(&version)?);
 
-        let new_volume = bytes::Bytes::from(self.inner.to_bytes()?);
-        let res = self
-            .inner
-            .store
-            .remote
-            .put_opts(
-                &meta_path,
-                PutPayload::from_bytes(new_volume),
-                PutOptions {
-                    mode: object_store::PutMode::Create,
-                    ..Default::default()
-                },
-            )
+        let put_metadata = || async {
+            self.inner
+                .store
+                .remote
+                .put_opts(
+                    &meta_path,
+                    // bytes::Bytes is Arc'd internally, no real copying here
+                    PutPayload::from_bytes(new_volume.clone()),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+        };
+        let res = put_metadata
+            .retry(ExponentialBuilder::default())
+            .when(should_retry)
+            .notify(|e, t| {
+                tracing::error!("Retrying metadata upload after {t:?} because error: {e:?}");
+            })
             .await;
 
         match res {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let kind = match e {
-                    object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
-                    object_store::Error::AlreadyExists { .. } => ErrorKind::AlreadyExists,
-                    object_store::Error::PermissionDenied { .. } => ErrorKind::PermissionDenied,
-                    object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
-                    _ => ErrorKind::Other,
-                };
-                Err(Error::with_source(
-                    kind,
-                    "failed to upload volume metadata",
-                    e,
-                ))
+            Ok(_) => {
+                self.inner.meta.set_version(version);
+                Ok(())
             }
+            // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
+            // but we did write a new metadata version. this can happen if our first attempt at the
+            // metadata PUT returned an error after it successfully uploaded it, and we do a
+            // retry which tells us it already exists. in this scenario, the most correct thing
+            // would be to read the existing file and see if it's identical to the current metadata
+            // we have. if it is, then this can return Ok(()) and we can bump the version. if not,
+            // then it was a race condition where some other mount actually wrote to the same version
+            // before we could.
+            Err(object_store::Error::AlreadyExists { source, .. }) => Err(Error::with_source(
+                ErrorKind::AlreadyExists,
+                "version already exists",
+                source,
+            )),
+            Err(e) => Err(Error::with_source(
+                (&e).into(),
+                "failed to upload volume metadata",
+                e,
+            )),
         }
     }
+}
+
+fn should_retry(e: &object_store::Error) -> bool {
+    use std::error::Error;
+
+    let mut source = e.source();
+    while let Some(e) = source {
+        if let Some(http_error) = e.downcast_ref::<object_store::client::HttpError>() {
+            return matches!(
+                http_error.kind(),
+                // these are the only two that are not retried with PutMode::Create since they
+                // don't consider it idempotent. we'll retry these ourselves.
+                object_store::client::HttpErrorKind::Timeout
+                    | object_store::client::HttpErrorKind::Interrupted
+            );
+        }
+        source = e.source();
+    }
+    false
 }
 
 #[cfg(test)]

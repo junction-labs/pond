@@ -113,3 +113,16 @@ impl From<std::io::ErrorKind> for ErrorKind {
         }
     }
 }
+
+impl From<&object_store::Error> for ErrorKind {
+    fn from(e: &object_store::Error) -> Self {
+        match e {
+            object_store::Error::AlreadyExists { .. } => ErrorKind::AlreadyExists,
+            object_store::Error::NotFound { .. } => ErrorKind::NotFound,
+            object_store::Error::InvalidPath { .. } => ErrorKind::InvalidData,
+            object_store::Error::PermissionDenied { .. }
+            | object_store::Error::Unauthenticated { .. } => ErrorKind::PermissionDenied,
+            _ => ErrorKind::Other,
+        }
+    }
+}
