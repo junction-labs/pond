@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::{
@@ -68,14 +66,14 @@ impl Client {
             None => &self.store.latest_version().await?,
         };
         let metadata = self.store.load_version(version).await?;
-        let cache = Arc::new(ChunkCache::new(
+        let cache = ChunkCache::new(
             self.cache_size,
             self.chunk_size,
             self.store.clone(),
             ReadAheadPolicy {
                 size: self.readahead,
             },
-        ));
+        );
 
         Ok(Volume::new(
             metadata,
@@ -88,14 +86,14 @@ impl Client {
     /// Create a new volume.
     pub async fn create_volume(&self) -> Volume {
         let metadata = VolumeMetadata::empty();
-        let cache = Arc::new(ChunkCache::new(
+        let cache = ChunkCache::new(
             self.cache_size,
             self.chunk_size,
             self.store.clone(),
             ReadAheadPolicy {
                 size: self.readahead,
             },
-        ));
+        );
 
         Volume::new(
             metadata,

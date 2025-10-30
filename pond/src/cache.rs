@@ -16,6 +16,7 @@ struct Chunk {
     offset: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct ChunkCache {
     inner: Arc<ChunkCacheInner>,
 }

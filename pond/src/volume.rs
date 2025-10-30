@@ -10,8 +10,17 @@ use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use metrics_exporter_prometheus::PrometheusHandle;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use std::{
+    collections::BTreeMap,
+    io::SeekFrom,
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    sync::RwLock,
+};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -59,30 +68,41 @@ enum FileDescriptor {
     Version,
     Commit,
     ClearCache,
-    PromMetrics,
+    PromMetrics {
+        /// A static snapshot of the metrics at the time of FileDescriptor construction.
+        snapshot: Arc<[u8]>,
+    },
 }
 
 pub struct Volume {
     meta: VolumeMetadata,
-    cache: Arc<ChunkCache>,
+    cache: ChunkCache,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
-    metrics: Option<PrometheusHandle>,
+    metrics_snapshot: Option<Arc<RwLock<Arc<[u8]>>>>,
 }
 
 impl Volume {
     pub(crate) fn new(
         meta: VolumeMetadata,
-        cache: Arc<ChunkCache>,
+        cache: ChunkCache,
         store: crate::storage::Storage,
-        metrics: Option<PrometheusHandle>,
+        handle: Option<PrometheusHandle>,
     ) -> Self {
+        let metrics_snapshot = if let Some(handle) = handle {
+            let snapshot = Arc::new(RwLock::new(Default::default()));
+            tokio::spawn(metrics_refresh(handle, cache.clone(), snapshot.clone()));
+            Some(snapshot)
+        } else {
+            None
+        };
+
         Self {
             meta,
             cache,
             fds: Default::default(),
             store,
-            metrics,
+            metrics_snapshot,
         }
     }
 
@@ -199,6 +219,27 @@ impl Volume {
     }
 }
 
+/// Periodically record global metrics and re-render PrometheusHandle metrics, writing
+/// the result back into `shared` by replacing the internal Arc<String>.
+async fn metrics_refresh(
+    handle: PrometheusHandle,
+    cache: ChunkCache,
+    shared: Arc<RwLock<Arc<[u8]>>>,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        ticker.tick().await;
+
+        // records current cache state (e.g. number of entries, size in bytes) by iterating and
+        // locking shards within the cache.
+        cache.record_cache_size();
+
+        let refresh = Arc::from(handle.render().into_bytes());
+        let mut guard = shared.write().await;
+        *guard = refresh;
+    }
+}
+
 impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
@@ -240,7 +281,20 @@ impl Volume {
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
-            Ino::PROM_METRICS => new_fd(&mut self.fds, ino, FileDescriptor::PromMetrics),
+            Ino::PROM_METRICS => {
+                let data = match &self.metrics_snapshot {
+                    Some(metrics) => {
+                        let guard = metrics.read().await;
+                        Arc::clone(&guard)
+                    }
+                    None => Default::default(),
+                };
+                new_fd(
+                    &mut self.fds,
+                    ino,
+                    FileDescriptor::PromMetrics { snapshot: data },
+                )
+            }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -269,17 +323,7 @@ impl Volume {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
-            Some(FileDescriptor::PromMetrics) => {
-                if let Some(handle) = &self.metrics {
-                    // this is somewhat expensive as it iterates and locks all shards to grab the
-                    // usage. only do it when someone is trying to read the metrics.
-                    self.cache.record_cache_size();
-                    read_from_buf(handle.render().as_bytes(), offset, buf)
-                } else {
-                    // handler wasn't set up -- return an empty file.
-                    Ok(0)
-                }
-            }
+            Some(FileDescriptor::PromMetrics { snapshot }) => read_from_buf(snapshot, offset, buf),
             Some(FileDescriptor::Committed { key, range }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "committed");
                 // FIXME: readahead needs to know the extent of the location -
