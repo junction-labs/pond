@@ -5,6 +5,8 @@ use log::init_logging;
 
 use bytesize::ByteSize;
 use clap::{Parser, Subcommand, value_parser};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_util::MetricKindMask;
 use nix::{
     poll::{PollFd, PollFlags},
     sys::{signal::Signal, wait::waitpid},
@@ -342,10 +344,12 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 let mut pipe = File::from(write_fd);
 
                 let runtime = new_runtime(Some(&args))?;
+                let metrics = new_metrics()?;
                 let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
                 let client = Client::new(args.volume)?;
                 let volume = runtime.block_on(
                     client
+                        .with_metrics_handle(metrics)
                         .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                         .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                         .with_readahead(args.read_behavior.readahead_size.as_u64())
@@ -392,10 +396,12 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         init_logging(args.debug, true, args.log_file.as_deref())?;
 
         let runtime = new_runtime(Some(&args))?;
+        let metrics = new_metrics()?;
         let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
         let client = Client::new(args.volume)?;
         let volume = runtime.block_on(
             client
+                .with_metrics_handle(metrics)
                 .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                 .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                 .with_readahead(args.read_behavior.readahead_size.as_u64())
@@ -485,4 +491,11 @@ fn new_runtime(args: Option<&MountArgs>) -> std::io::Result<tokio::runtime::Runt
     }
 
     builder.enable_all().build()
+}
+
+fn new_metrics() -> anyhow::Result<PrometheusHandle> {
+    let builder = PrometheusBuilder::new();
+    Ok(builder
+        .idle_timeout(MetricKindMask::ALL, None)
+        .install_recorder()?)
 }

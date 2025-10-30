@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use metrics_exporter_prometheus::PrometheusHandle;
+
 use crate::{
     Result, Volume,
     cache::{ChunkCache, ReadAheadPolicy},
@@ -8,6 +10,7 @@ use crate::{
 
 pub struct Client {
     store: crate::storage::Storage,
+    metrics_handle: Option<PrometheusHandle>,
     cache_size: u64,
     chunk_size: u64,
     readahead: u64,
@@ -19,6 +22,7 @@ impl Client {
 
         Ok(Client {
             store,
+            metrics_handle: None,
             // 256 MiB
             cache_size: 256 * 1024 * 1024,
             // 16 MiB
@@ -26,6 +30,13 @@ impl Client {
             // 64 MiB
             readahead: 32 * 1024 * 1024,
         })
+    }
+
+    /// Use metrics_exporter_prometheus::PrometheusHandle to render all recorded metrics in
+    /// <root>/.prom/pond.prom. If this is not provided, <root>/.prom/pond.prom will be empty.
+    pub fn with_metrics_handle(mut self, handle: PrometheusHandle) -> Self {
+        self.metrics_handle = Some(handle);
+        self
     }
 
     pub fn with_cache_size(mut self, size: u64) -> Self {
@@ -66,7 +77,12 @@ impl Client {
             },
         ));
 
-        Ok(Volume::new(metadata, cache, self.store.clone()))
+        Ok(Volume::new(
+            metadata,
+            cache,
+            self.store.clone(),
+            self.metrics_handle.clone(),
+        ))
     }
 
     /// Create a new volume.
@@ -81,6 +97,11 @@ impl Client {
             },
         ));
 
-        Volume::new(metadata, cache, self.store.clone())
+        Volume::new(
+            metadata,
+            cache,
+            self.store.clone(),
+            self.metrics_handle.clone(),
+        )
     }
 }

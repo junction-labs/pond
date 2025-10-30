@@ -3,11 +3,12 @@ use crate::{
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
-    metrics::{METRICS_HANDLE, RecordLatencyGuard},
+    metrics::RecordLatencyGuard,
     scoped_timer,
 };
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
+use metrics_exporter_prometheus::PrometheusHandle;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -66,6 +67,7 @@ pub struct Volume {
     cache: Arc<ChunkCache>,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
+    metrics: Option<PrometheusHandle>,
 }
 
 impl Volume {
@@ -73,12 +75,14 @@ impl Volume {
         meta: VolumeMetadata,
         cache: Arc<ChunkCache>,
         store: crate::storage::Storage,
+        metrics: Option<PrometheusHandle>,
     ) -> Self {
         Self {
             meta,
             cache,
             fds: Default::default(),
             store,
+            metrics,
         }
     }
 
@@ -266,10 +270,15 @@ impl Volume {
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
             Some(FileDescriptor::PromMetrics) => {
-                // this is somewhat expensive as it iterates and locks all shards to grab the
-                // usage. only do it when someone is trying to read the metrics.
-                self.cache.record_cache_size();
-                read_from_buf(METRICS_HANDLE.render().as_bytes(), offset, buf)
+                if let Some(handle) = &self.metrics {
+                    // this is somewhat expensive as it iterates and locks all shards to grab the
+                    // usage. only do it when someone is trying to read the metrics.
+                    self.cache.record_cache_size();
+                    read_from_buf(handle.render().as_bytes(), offset, buf)
+                } else {
+                    // handler wasn't set up -- return an empty file.
+                    Ok(0)
+                }
             }
             Some(FileDescriptor::Committed { key, range }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "committed");
