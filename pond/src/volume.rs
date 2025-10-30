@@ -58,7 +58,7 @@ enum FileDescriptor {
     Version,
     Commit,
     ClearCache,
-    Metrics,
+    PromMetrics,
 }
 
 pub struct Volume {
@@ -236,7 +236,7 @@ impl Volume {
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
-            Ino::METRICS => new_fd(&mut self.fds, ino, FileDescriptor::Metrics),
+            Ino::PROM_METRICS => new_fd(&mut self.fds, ino, FileDescriptor::PromMetrics),
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -265,7 +265,7 @@ impl Volume {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
-            Some(FileDescriptor::Metrics) => {
+            Some(FileDescriptor::PromMetrics) => {
                 // this is somewhat expensive as it iterates and locks all shards to grab the
                 // usage. only do it when someone is trying to read the metrics.
                 self.cache.record_cache_size();

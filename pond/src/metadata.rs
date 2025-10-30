@@ -293,7 +293,7 @@ impl VolumeMetadata {
                 name: Cow::Borrowed(".prom"),
                 parent: Ino::Root,
                 attr: FileAttr {
-                    ino: Ino::PROMETHERUS,
+                    ino: Ino::PROM_DIR,
                     size: 0,
                     mtime: UNIX_EPOCH,
                     ctime: UNIX_EPOCH,
@@ -303,9 +303,9 @@ impl VolumeMetadata {
             },
             Entry {
                 name: Cow::Borrowed("pond.prom"),
-                parent: Ino::PROMETHERUS,
+                parent: Ino::PROM_DIR,
                 attr: FileAttr {
-                    ino: Ino::METRICS,
+                    ino: Ino::PROM_METRICS,
                     size: 0,
                     mtime: UNIX_EPOCH,
                     ctime: UNIX_EPOCH,
