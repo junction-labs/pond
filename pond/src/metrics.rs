@@ -17,49 +17,27 @@ pub(crate) static METRICS_HANDLE: LazyLock<PrometheusHandle> = LazyLock::new(|| 
 });
 
 #[macro_export]
-macro_rules! record_latency {
-    ($name:literal) => {
-        let _guard = RecordLatencyGuard::new($name);
-    };
-    ($name:literal, $($key:literal => $value:expr),+ $(,)?) => {
-        let _guard = RecordLatencyGuard::with_labels($name, &[$(($key, $value)),+]);
-    };
+macro_rules! scoped_timer {
+    ($name:expr $(, $label_key:expr $(=> $label_value:expr)?)* $(,)?) => {{
+        let hist = metrics::histogram!($name $(, $label_key $(=> $label_value)?)*);
+        RecordLatencyGuard::new(hist)
+    }};
 }
 
 pub(crate) struct RecordLatencyGuard {
+    hist: metrics::Histogram,
     start: Instant,
-    metric: &'static str,
-    labels: Option<&'static [(&'static str, &'static str)]>,
 }
 
 impl RecordLatencyGuard {
-    pub(crate) fn new(metric: &'static str) -> Self {
-        Self {
-            start: Instant::now(),
-            metric,
-            labels: None,
-        }
-    }
-
-    pub(crate) fn with_labels(
-        metric: &'static str,
-        labels: &'static [(&'static str, &'static str)],
-    ) -> Self {
-        Self {
-            start: Instant::now(),
-            metric,
-            labels: Some(labels),
-        }
+    pub(crate) fn new(hist: metrics::Histogram) -> Self {
+        let start = Instant::now();
+        Self { hist, start }
     }
 }
 
 impl Drop for RecordLatencyGuard {
     fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
-        if let Some(labels) = self.labels {
-            metrics::histogram!(self.metric, labels).record(elapsed);
-        } else {
-            metrics::histogram!(self.metric).record(elapsed);
-        }
+        self.hist.record(self.start.elapsed().as_secs_f64());
     }
 }
