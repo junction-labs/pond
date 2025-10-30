@@ -1,13 +1,25 @@
 use bytes::Bytes;
-use std::{ops::Range, sync::Arc};
+use std::{fmt::Display, ops::Range, sync::Arc};
 
 use crate::{Error, error::ErrorKind, metrics::RecordLatencyGuard, scoped_timer};
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ReadAheadPolicy {
-    /// Size of read-ahead in bytes. if you read a byte at index i, we will
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub max_cache_size_bytes: u64,
+    pub chunk_size_bytes: u64,
+    /// Size of readahead in bytes. if you read a byte at index i, we will
     /// pre-fetch the bytes within interval [i, i + size) in the background.
-    pub(crate) size: u64,
+    pub readahead_size_bytes: u64,
+}
+
+impl Display for CacheConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{{ cache_size_bytes={}, chunk_size_bytes={}, readahead_size_bytes={} }}",
+            self.max_cache_size_bytes, self.chunk_size_bytes, self.readahead_size_bytes
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,38 +52,28 @@ impl Drop for CacheValue {
 struct ChunkCacheInner {
     store: crate::storage::Storage,
     cache: foyer::Cache<Chunk, CacheValue>,
-    chunk_size: u64,
-    readahead_policy: ReadAheadPolicy,
+    config: CacheConfig,
 }
 
 impl ChunkCache {
-    pub(crate) fn new(
-        max_cache_size: u64,
-        chunk_size: u64,
-        store: crate::storage::Storage,
-        readahead_policy: ReadAheadPolicy,
-    ) -> Self {
-        let max_cache_entries = (max_cache_size / chunk_size) as usize;
+    pub(crate) fn new(config: CacheConfig, store: crate::storage::Storage) -> Self {
+        let max_cache_entries = (config.max_cache_size_bytes / config.chunk_size_bytes) as usize;
         let cache = foyer::Cache::<Chunk, CacheValue>::builder(max_cache_entries)
             .with_eviction_config(foyer::S3FifoConfig::default())
             .build();
 
-        tracing::info!(
-            max_entries = max_cache_entries,
-            capacity_bytes = max_cache_size * chunk_size,
-            readahead_size_bytes = readahead_policy.size,
-            "ChunkCache created"
-        );
-
         let inner = ChunkCacheInner {
             cache,
-            chunk_size,
-            readahead_policy,
             store,
+            config,
         };
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    pub(crate) fn config(&self) -> &CacheConfig {
+        &self.inner.config
     }
 
     pub(crate) fn clear(&self) {
@@ -84,7 +86,7 @@ impl ChunkCache {
         let num_entries = self.inner.cache.usage();
         metrics::gauge!("pond_cache_entries_count").set(num_entries as f64);
         metrics::gauge!("pond_cache_size_bytes")
-            .set(num_entries as f64 * self.inner.chunk_size as f64);
+            .set(num_entries as f64 * self.inner.config.chunk_size_bytes as f64);
     }
 
     pub(crate) async fn get_at(
@@ -94,7 +96,8 @@ impl ChunkCache {
         len: u64,
     ) -> crate::Result<Vec<Bytes>> {
         let mut chunks = vec![];
-        let read_offsets: Vec<_> = read_offsets(offset, len, self.inner.chunk_size)?.collect();
+        let read_offsets: Vec<_> =
+            read_offsets(offset, len, self.inner.config.chunk_size_bytes)?.collect();
 
         for offset in &read_offsets {
             let cache = self.inner.clone();
@@ -110,8 +113,8 @@ impl ChunkCache {
         let readahead_offsets = readahead_offsets(
             offset,
             len,
-            self.inner.readahead_policy.size,
-            self.inner.chunk_size,
+            self.inner.config.readahead_size_bytes,
+            self.inner.config.chunk_size_bytes,
         )?;
         for offset in readahead_offsets {
             let cache = self.inner.clone();
@@ -166,9 +169,9 @@ impl ChunkCacheInner {
         path: Arc<object_store::path::Path>,
         offset: u64,
     ) -> crate::Result<Bytes> {
-        assert!(offset.is_multiple_of(self.chunk_size));
+        assert!(offset.is_multiple_of(self.config.chunk_size_bytes));
 
-        let range = offset..(offset + self.chunk_size);
+        let range = offset..(offset + self.config.chunk_size_bytes);
         let chunk = Chunk {
             path: path.clone(),
             offset,
@@ -188,7 +191,7 @@ impl ChunkCacheInner {
 
     #[cfg(test)]
     fn is_cached(&self, path: Arc<object_store::path::Path>, offset: u64) -> bool {
-        let offset = (offset / self.chunk_size) * self.chunk_size;
+        let offset = (offset / self.config.chunk_size_bytes) * self.config.chunk_size_bytes;
         let chunk = Chunk { path, offset };
         self.cache.contains(&chunk)
     }
@@ -408,12 +411,17 @@ mod test {
         // volume store fetches/caches 10 byte chunks with a readahead size of
         // 40 bytes (4 chunks)
         let chunk_size = 10;
-        let cache = ChunkCache::new(1024, 10, storage, ReadAheadPolicy { size: 40 });
+        let config = CacheConfig {
+            max_cache_size_bytes: 1024,
+            chunk_size_bytes: chunk_size,
+            readahead_size_bytes: 40,
+        };
+        let cache = ChunkCache::new(config, storage);
         let read_offset = 123;
         let read_len = 234;
         let last_cached_byte =
             // align to the start of the last chunk
-            (read_offset + read_len + cache.inner.readahead_policy.size) / chunk_size * chunk_size
+            (read_offset + read_len + cache.inner.config.readahead_size_bytes) / chunk_size * chunk_size
             // and find the last byte
                 + (chunk_size - 1);
 
@@ -439,7 +447,12 @@ mod test {
     async fn test_bad_get_removes_entry() {
         let key: Arc<object_store::path::Path> = Arc::new("some-key".into());
         let storage = crate::storage::Storage::new_in_memory().unwrap();
-        let cache = ChunkCache::new(10, 10, storage, ReadAheadPolicy { size: 123 });
+        let config = CacheConfig {
+            max_cache_size_bytes: 10,
+            chunk_size_bytes: 10,
+            readahead_size_bytes: 123,
+        };
+        let cache = ChunkCache::new(config, storage);
         let res = cache.get_at(key.clone(), 10, 37).await;
         assert!(res.is_err());
         assert!(!cache.inner.is_cached(key, 10));

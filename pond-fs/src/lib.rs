@@ -462,6 +462,8 @@ pub fn mount_volume(
     auto_unmount: bool,
     kernel_cache_timeout: Duration,
 ) -> anyhow::Result<fuser::Session<Pond>> {
+    startup_log(&volume, &mountpoint);
+
     let pond = Pond::new(runtime, volume, None, None, kernel_cache_timeout);
     let mut opts = vec![
         fuser::MountOption::FSName("pond".to_string()),
@@ -480,6 +482,21 @@ pub fn mount_volume(
     }
 
     Ok(fuser::Session::new(pond, mountpoint, &opts)?)
+}
+
+/// Log information about the volume.
+#[tracing::instrument(name = "startup", level = "info", skip_all)]
+fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>) {
+    tracing::info!("Configured cache with: {}", volume.cache_config());
+    tracing::info!(
+        "Using object store client: {}",
+        volume.object_store_typename()
+    );
+    tracing::info!(version = %volume.version(), mountpoint=mountpoint.as_ref().to_str(), "Mounting volume:");
+    tracing::info!(
+        "Staged files will be written under: {}",
+        volume.staged_file_temp_dir().path().to_string_lossy()
+    );
 }
 
 fn new_runtime(args: Option<&MountArgs>) -> std::io::Result<tokio::runtime::Runtime> {

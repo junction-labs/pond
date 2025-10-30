@@ -54,6 +54,14 @@ impl Storage {
         }
     }
 
+    pub(crate) fn object_store_typename(&self) -> String {
+        format!("{}", self.remote)
+    }
+
+    pub(crate) fn staged_file_temp_dir(&self) -> Arc<TempDir> {
+        self.temp_dir.clone()
+    }
+
     pub(crate) fn new_in_memory() -> Result<Self> {
         let client = object_store::memory::InMemory::new();
         let temp_dir = tempfile::Builder::new()
@@ -61,11 +69,6 @@ impl Storage {
             .tempdir()
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempdir", e))?;
 
-        tracing::info!("Inmemory object store client created");
-        tracing::info!(
-            "Staged files will be written under: {}",
-            temp_dir.path().to_string_lossy()
-        );
         Ok(Storage {
             base_path: None,
             temp_dir: Arc::new(temp_dir),
@@ -101,15 +104,6 @@ impl Storage {
                 )
             })?;
 
-        tracing::info!(
-            bucket = bucket,
-            volume_path = base_path.to_string(),
-            "S3 object store client created"
-        );
-        tracing::info!(
-            "Staged files will be written under: {}",
-            temp_dir.path().to_string_lossy()
-        );
         Ok(Storage {
             base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),
@@ -151,14 +145,6 @@ impl Storage {
             }
         };
 
-        tracing::info!(
-            volume_path = base_path.to_string(),
-            "Local filesystem object store client created"
-        );
-        tracing::info!(
-            "Staged files will be written under: {}",
-            temp_dir.path().to_string_lossy()
-        );
         Ok(Storage {
             base_path: Some(base_path),
             temp_dir: Arc::new(temp_dir),

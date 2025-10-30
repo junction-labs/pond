@@ -75,7 +75,7 @@ impl fuser::Filesystem for Pond {
     // TODO: set up uid/gid with init
     // TODO: set capabilities with init
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn lookup(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -94,7 +94,7 @@ impl fuser::Filesystem for Pond {
         }
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn getattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -109,7 +109,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn readdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -132,7 +132,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn mkdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -151,7 +151,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn rmdir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -164,7 +164,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn rename(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -186,7 +186,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -223,7 +223,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let ino: Ino = ino.into();
 
@@ -254,7 +254,7 @@ impl fuser::Filesystem for Pond {
         }
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn read(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -285,7 +285,7 @@ impl fuser::Filesystem for Pond {
         reply.data(&buf[..n]);
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn write(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -308,7 +308,7 @@ impl fuser::Filesystem for Pond {
         reply.written(n as u32);
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn setattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -347,7 +347,7 @@ impl fuser::Filesystem for Pond {
         );
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn release(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -363,7 +363,7 @@ impl fuser::Filesystem for Pond {
         reply.ok();
     }
 
-    #[instrument(skip_all, fields())]
+    #[instrument(skip_all)]
     fn unlink(
         &mut self,
         _req: &fuser::Request<'_>,
