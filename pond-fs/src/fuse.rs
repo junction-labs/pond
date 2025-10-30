@@ -59,7 +59,7 @@ macro_rules! fs_try {
             Ok(v) => v,
             Err(err) => {
                 let err: pond::Error = err.into();
-                tracing::error!(err = %err);
+                tracing::error!("{err}");
                 $reply.error(err.kind().as_errno());
                 return;
             }
