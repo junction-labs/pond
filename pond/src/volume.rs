@@ -3,11 +3,20 @@ use crate::{
     cache::ChunkCache,
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
+    metrics::RecordLatencyGuard,
+    scoped_timer,
 };
+use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use std::{collections::BTreeMap, io::SeekFrom, path::Path, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    io::SeekFrom,
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
@@ -56,26 +65,39 @@ enum FileDescriptor {
     Version,
     Commit,
     ClearCache,
+    PromMetrics {
+        /// A static snapshot of the metrics at the time of FileDescriptor construction.
+        snapshot: Arc<Vec<u8>>,
+    },
 }
 
 pub struct Volume {
     meta: VolumeMetadata,
-    cache: Arc<ChunkCache>,
+    cache: ChunkCache,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
+    metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
 }
 
 impl Volume {
     pub(crate) fn new(
         meta: VolumeMetadata,
-        cache: Arc<ChunkCache>,
+        cache: ChunkCache,
         store: crate::storage::Storage,
+        metrics_snapshot_fn: Option<Box<dyn Fn() -> Vec<u8> + Send>>,
     ) -> Self {
+        let metrics_snapshot = metrics_snapshot_fn.map(|f| {
+            let snapshot = Arc::new(ArcSwap::from_pointee(Vec::new()));
+            tokio::spawn(metrics_refresh(f, cache.clone(), snapshot.clone()));
+            snapshot
+        });
+
         Self {
             meta,
             cache,
             fds: Default::default(),
             store,
+            metrics_snapshot,
         }
     }
 
@@ -115,6 +137,7 @@ impl Volume {
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
+        scoped_timer!("pond_volume_getattr_latency_secs");
         match self.meta.getattr(ino) {
             Some(attr) => Ok(attr),
             None => Err(ErrorKind::NotFound.into()),
@@ -131,6 +154,7 @@ impl Volume {
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
+        scoped_timer!("pond_volume_lookup_latency_secs");
         let attr = self.meta.lookup(parent, name)?;
         Ok(attr)
     }
@@ -190,6 +214,25 @@ impl Volume {
     }
 }
 
+/// Periodically record global metrics and re-render PrometheusHandle metrics, writing
+/// the result back into `shared` by replacing the internal Arc<String>.
+async fn metrics_refresh(
+    metrics_snapshot_fn: Box<dyn Fn() -> Vec<u8> + Send>,
+    cache: ChunkCache,
+    shared: Arc<ArcSwap<Vec<u8>>>,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        ticker.tick().await;
+
+        // records current cache state (e.g. number of entries, size in bytes) by iterating and
+        // locking each shards within the cache.
+        cache.record_cache_size();
+
+        shared.store(Arc::from(metrics_snapshot_fn()));
+    }
+}
+
 impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
@@ -231,6 +274,17 @@ impl Volume {
     pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
+            Ino::PROM_METRICS => {
+                let data = match &self.metrics_snapshot {
+                    Some(metrics) => metrics.load().clone(),
+                    None => Default::default(),
+                };
+                new_fd(
+                    &mut self.fds,
+                    ino,
+                    FileDescriptor::PromMetrics { snapshot: data },
+                )
+            }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
@@ -253,11 +307,15 @@ impl Volume {
     }
 
     pub async fn read_at(&mut self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
+
         match self.fds.get_mut(&fd) {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
+            Some(FileDescriptor::PromMetrics { snapshot }) => read_from_buf(snapshot, offset, buf),
             Some(FileDescriptor::Committed { key, range }) => {
+                scoped_timer!("pond_volume_read_latency_secs", "type" => "committed");
                 // FIXME: readahead needs to know the extent of the location -
                 // the range here only includes the extent of THIS file in the
                 // total blob. without knowing the full range we can TRY to prefetch
@@ -271,14 +329,19 @@ impl Volume {
                     .await?;
                 Ok(copy_into(buf, &bytes))
             }
-            Some(FileDescriptor::Staged { file, .. }) => read_at(file, offset, buf)
-                .await
-                .map_err(|e| Error::with_source(e.kind().into(), "failed to read staged file", e)),
+            Some(FileDescriptor::Staged { file, .. }) => {
+                scoped_timer!("pond_volume_read_latency_secs", "type" => "staged");
+                read_at(file, offset, buf).await.map_err(|e| {
+                    Error::with_source(e.kind().into(), "failed to read staged file", e)
+                })
+            }
             None => Err(ErrorKind::NotFound.into()),
         }
     }
 
     pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
+        metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
+
         match self.fds.get_mut(&fd) {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
@@ -290,6 +353,8 @@ impl Volume {
                 if offset != 0 {
                     return Err(ErrorKind::InvalidData.into());
                 }
+
+                scoped_timer!("pond_volume_commit_latency_secs");
 
                 // for writing to the magic fd - and only for writing to the
                 // magic fd - we trim trailing ascii whitespace so that using
@@ -308,6 +373,7 @@ impl Volume {
             }
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
+                scoped_timer!("pond_volume_write_latency_secs");
                 let n = write_at(file, offset, data).await.map_err(|e| {
                     let kind = e.kind().into();
                     Error::with_source(kind, "failed to write staged file", e)
@@ -346,16 +412,19 @@ impl Volume {
 }
 
 fn read_version(version: &Version, offset: u64, buf: &mut [u8]) -> Result<usize> {
-    let version: &[u8] = version.as_ref();
+    read_from_buf(version.as_ref(), offset, buf)
+}
+
+fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
     let offset: usize = offset.try_into().map_err(|_| ErrorKind::InvalidData)?;
 
-    if offset > version.len() {
-        return Err(ErrorKind::InvalidData.into());
+    if offset > from.len() {
+        return Ok(0);
     }
 
-    let version = &version[offset..];
-    let amt = std::cmp::min(version.len(), buf.len());
-    buf[..amt].copy_from_slice(&version[..amt]);
+    let from = &from[offset..];
+    let amt = std::cmp::min(to.len(), from.len());
+    to[..amt].copy_from_slice(&from[..amt]);
     Ok(amt)
 }
 
@@ -752,7 +821,7 @@ mod tests {
         let volume_path = tempdir.path().join("store");
         std::fs::create_dir_all(&volume_path).unwrap();
 
-        let client = Client::new(volume_path.to_str().unwrap()).unwrap();
+        let mut client = Client::new(volume_path.to_str().unwrap()).unwrap();
         let mut volume = client.create_volume().await;
 
         // clean volume -- this is not staged
