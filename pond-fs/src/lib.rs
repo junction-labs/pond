@@ -490,7 +490,7 @@ fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>) {
     tracing::info!("Configured cache with: {}", volume.cache_config());
     tracing::info!(
         "Using object store client: {}",
-        volume.object_store_typename()
+        volume.object_store_description()
     );
     tracing::info!(version = %volume.version(), mountpoint=mountpoint.as_ref().to_str(), "Mounting volume:");
     tracing::info!(

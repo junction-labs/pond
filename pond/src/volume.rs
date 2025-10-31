@@ -128,8 +128,8 @@ impl Volume {
         self.metadata().version()
     }
 
-    pub fn object_store_typename(&self) -> String {
-        self.store.object_store_typename()
+    pub fn object_store_description(&self) -> String {
+        self.store.object_store_description()
     }
 
     pub fn staged_file_temp_dir(&self) -> Arc<tempfile::TempDir> {
