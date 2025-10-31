@@ -54,6 +54,21 @@ impl Storage {
         }
     }
 
+    pub(crate) fn object_store_description(&self) -> String {
+        match &self.base_path {
+            Some(path) => {
+                format!("{}://{}", self.remote, path.as_ref())
+            }
+            None => {
+                format!("{}", self.remote)
+            }
+        }
+    }
+
+    pub(crate) fn staged_file_temp_dir(&self) -> Arc<TempDir> {
+        self.temp_dir.clone()
+    }
+
     pub(crate) fn new_in_memory() -> Result<Self> {
         let client = object_store::memory::InMemory::new();
         let temp_dir = tempfile::Builder::new()

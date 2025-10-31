@@ -1,6 +1,6 @@
 use crate::{
     ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
-    cache::ChunkCache,
+    cache::{CacheConfig, ChunkCache},
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
     metrics::RecordLatencyGuard,
@@ -126,6 +126,18 @@ impl Volume {
 
     pub fn version(&self) -> &Version {
         self.metadata().version()
+    }
+
+    pub fn object_store_description(&self) -> String {
+        self.store.object_store_description()
+    }
+
+    pub fn staged_file_temp_dir(&self) -> Arc<tempfile::TempDir> {
+        self.store.staged_file_temp_dir()
+    }
+
+    pub fn cache_config(&self) -> &CacheConfig {
+        self.cache.config()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -710,9 +722,6 @@ impl<'a> StagedVolume<'a> {
         let res = put_metadata
             .retry(ExponentialBuilder::default())
             .when(should_retry)
-            .notify(|e, t| {
-                tracing::error!("Retrying metadata upload after {t:?} because error: {e:?}");
-            })
             .await;
 
         match res {

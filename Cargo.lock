@@ -1791,7 +1791,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing",
  "url",
  "walkdir",
 ]
@@ -1814,6 +1813,7 @@ dependencies = [
  "pond",
  "signal-hook",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "walkdir",
 ]

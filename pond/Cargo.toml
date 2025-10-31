@@ -16,7 +16,6 @@ object_store.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
-tracing.workspace = true
 tempfile.workspace = true
 url.workspace = true
 walkdir.workspace = true

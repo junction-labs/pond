@@ -1,6 +1,6 @@
 use crate::{
     Result, Volume,
-    cache::{ChunkCache, ReadAheadPolicy},
+    cache::{CacheConfig, ChunkCache},
     metadata::{Version, VolumeMetadata},
 };
 
@@ -65,12 +65,12 @@ impl Client {
         };
         let metadata = self.store.load_version(version).await?;
         let cache = ChunkCache::new(
-            self.cache_size,
-            self.chunk_size,
-            self.store.clone(),
-            ReadAheadPolicy {
-                size: self.readahead,
+            CacheConfig {
+                max_cache_size_bytes: self.cache_size,
+                chunk_size_bytes: self.chunk_size,
+                readahead_size_bytes: self.readahead,
             },
+            self.store.clone(),
         );
 
         Ok(Volume::new(
@@ -85,12 +85,12 @@ impl Client {
     pub async fn create_volume(&mut self) -> Volume {
         let metadata = VolumeMetadata::empty();
         let cache = ChunkCache::new(
-            self.cache_size,
-            self.chunk_size,
-            self.store.clone(),
-            ReadAheadPolicy {
-                size: self.readahead,
+            CacheConfig {
+                max_cache_size_bytes: self.cache_size,
+                chunk_size_bytes: self.chunk_size,
+                readahead_size_bytes: self.readahead,
             },
+            self.store.clone(),
         );
 
         Volume::new(
