@@ -21,9 +21,25 @@ pub(crate) struct ChunkCache {
     inner: Arc<ChunkCacheInner>,
 }
 
+/// Thin wrapper around Bytes which lets us record cache evictions.
+struct CacheValue(Bytes);
+
+impl CacheValue {
+    /// Clone the underlying bytes::Bytes. bytes::Bytes is a ptr, so this is cheap.
+    fn clone_bytes(&self) -> Bytes {
+        self.0.clone()
+    }
+}
+
+impl Drop for CacheValue {
+    fn drop(&mut self) {
+        metrics::counter!("pond_cache_eviction_total").increment(1);
+    }
+}
+
 struct ChunkCacheInner {
     store: crate::storage::Storage,
-    cache: foyer::Cache<Chunk, Bytes>,
+    cache: foyer::Cache<Chunk, CacheValue>,
     chunk_size: u64,
     readahead_policy: ReadAheadPolicy,
 }
@@ -36,7 +52,7 @@ impl ChunkCache {
         readahead_policy: ReadAheadPolicy,
     ) -> Self {
         let max_cache_size = (max_cache_size / chunk_size) as usize;
-        let cache = foyer::Cache::<Chunk, Bytes>::builder(max_cache_size)
+        let cache = foyer::Cache::<Chunk, CacheValue>::builder(max_cache_size)
             .with_eviction_config(foyer::S3FifoConfig::default())
             .build();
 
@@ -151,16 +167,16 @@ impl ChunkCacheInner {
             offset,
         };
 
-        metrics::counter!("pond_cache_requests_total").increment(1);
+        metrics::counter!("pond_cache_get_total").increment(1);
         let entry = self
             .cache
             .fetch(chunk, || {
-                metrics::counter!("pond_cache_misses_total").increment(1);
+                metrics::counter!("pond_cache_fetch_total").increment(1);
                 scoped_timer!("pond_cache_fetch_latency_secs");
                 get_range(self.store.clone(), path, range)
             })
             .await?;
-        Ok(entry.value().clone())
+        Ok(entry.value().clone_bytes())
     }
 
     #[cfg(test)]
@@ -183,7 +199,7 @@ async fn get_range(
     store: crate::storage::Storage,
     path: Arc<object_store::path::Path>,
     range: Range<u64>,
-) -> crate::Result<Bytes> {
+) -> crate::Result<CacheValue> {
     let bs = store
         .remote
         .get_range(&path, range)
@@ -201,7 +217,7 @@ async fn get_range(
             }
             err => Error::with_source(ErrorKind::Other, "get_range failed", err),
         })?;
-    Ok(bs)
+    Ok(CacheValue(bs))
 }
 
 #[inline]
