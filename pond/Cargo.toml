@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap.workspace = true
 backon.workspace = true
 bytes.workspace = true
 flatbuffers.workspace = true
@@ -22,6 +23,6 @@ url.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-rand.workspace = true
 arbtest.workspace = true
 arbitrary.workspace = true
+rand.workspace = true

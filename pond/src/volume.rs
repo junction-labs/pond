@@ -6,6 +6,7 @@ use crate::{
     metrics::RecordLatencyGuard,
     scoped_timer,
 };
+use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -17,10 +18,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    sync::RwLock,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -70,7 +68,7 @@ enum FileDescriptor {
     ClearCache,
     PromMetrics {
         /// A static snapshot of the metrics at the time of FileDescriptor construction.
-        snapshot: Arc<[u8]>,
+        snapshot: Arc<Vec<u8>>,
     },
 }
 
@@ -79,7 +77,7 @@ pub struct Volume {
     cache: ChunkCache,
     fds: BTreeMap<Fd, FileDescriptor>,
     store: crate::storage::Storage,
-    metrics_snapshot: Option<Arc<RwLock<Arc<[u8]>>>>,
+    metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
 }
 
 impl Volume {
@@ -89,13 +87,13 @@ impl Volume {
         store: crate::storage::Storage,
         handle: Option<PrometheusHandle>,
     ) -> Self {
-        let metrics_snapshot = if let Some(handle) = handle {
-            let snapshot = Arc::new(RwLock::new(Default::default()));
+        let metrics_snapshot = handle.map(|handle| {
+            let snapshot = Arc::new(ArcSwap::from_pointee(Vec::new()));
+
             tokio::spawn(metrics_refresh(handle, cache.clone(), snapshot.clone()));
-            Some(snapshot)
-        } else {
-            None
-        };
+
+            snapshot
+        });
 
         Self {
             meta,
@@ -224,7 +222,7 @@ impl Volume {
 async fn metrics_refresh(
     handle: PrometheusHandle,
     cache: ChunkCache,
-    shared: Arc<RwLock<Arc<[u8]>>>,
+    shared: Arc<ArcSwap<Vec<u8>>>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(15));
     loop {
@@ -235,8 +233,7 @@ async fn metrics_refresh(
         cache.record_cache_size();
 
         let refresh = Arc::from(handle.render().into_bytes());
-        let mut guard = shared.write().await;
-        *guard = refresh;
+        shared.store(refresh);
     }
 }
 
@@ -283,10 +280,7 @@ impl Volume {
             Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
             Ino::PROM_METRICS => {
                 let data = match &self.metrics_snapshot {
-                    Some(metrics) => {
-                        let guard = metrics.read().await;
-                        Arc::clone(&guard)
-                    }
+                    Some(metrics) => metrics.load().clone(),
                     None => Default::default(),
                 };
                 new_fd(

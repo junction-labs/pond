@@ -1778,6 +1778,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "arbtest",
+ "arc-swap",
  "backon",
  "bytes",
  "flatbuffers",
