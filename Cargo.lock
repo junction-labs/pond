@@ -1786,7 +1786,6 @@ dependencies = [
  "foyer-memory",
  "futures",
  "metrics",
- "metrics-exporter-prometheus",
  "object_store",
  "rand 0.9.2",
  "tempfile",

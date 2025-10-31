@@ -1,5 +1,3 @@
-use metrics_exporter_prometheus::PrometheusHandle;
-
 use crate::{
     Result, Volume,
     cache::{ChunkCache, ReadAheadPolicy},
@@ -8,7 +6,7 @@ use crate::{
 
 pub struct Client {
     store: crate::storage::Storage,
-    metrics_handle: Option<PrometheusHandle>,
+    metrics_snapshot_fn: Option<Box<dyn Fn() -> Vec<u8> + Send>>,
     cache_size: u64,
     chunk_size: u64,
     readahead: u64,
@@ -20,7 +18,7 @@ impl Client {
 
         Ok(Client {
             store,
-            metrics_handle: None,
+            metrics_snapshot_fn: None,
             // 256 MiB
             cache_size: 256 * 1024 * 1024,
             // 16 MiB
@@ -30,10 +28,10 @@ impl Client {
         })
     }
 
-    /// Use metrics_exporter_prometheus::PrometheusHandle to render all recorded metrics in
-    /// <root>/.prom/pond.prom. If this is not provided, <root>/.prom/pond.prom will be empty.
-    pub fn with_metrics_handle(mut self, handle: PrometheusHandle) -> Self {
-        self.metrics_handle = Some(handle);
+    /// Renders Prometheus metrics to `<root>/.prom/pond.prom` using the given function.
+    /// If unset, the file will be empty.
+    pub fn with_metrics_snapshot_fn(mut self, f: Box<dyn Fn() -> Vec<u8> + Send>) -> Self {
+        self.metrics_snapshot_fn = Some(f);
         self
     }
 
@@ -60,7 +58,7 @@ impl Client {
         self.store.exists(version).await
     }
 
-    pub async fn load_volume(&self, version: &Option<Version>) -> Result<Volume> {
+    pub async fn load_volume(&mut self, version: &Option<Version>) -> Result<Volume> {
         let version = match version {
             Some(version) => version,
             None => &self.store.latest_version().await?,
@@ -79,12 +77,12 @@ impl Client {
             metadata,
             cache,
             self.store.clone(),
-            self.metrics_handle.clone(),
+            self.metrics_snapshot_fn.take(),
         ))
     }
 
     /// Create a new volume.
-    pub async fn create_volume(&self) -> Volume {
+    pub async fn create_volume(&mut self) -> Volume {
         let metadata = VolumeMetadata::empty();
         let cache = ChunkCache::new(
             self.cache_size,
@@ -99,7 +97,7 @@ impl Client {
             metadata,
             cache,
             self.store.clone(),
-            self.metrics_handle.clone(),
+            self.metrics_snapshot_fn.take(),
         )
     }
 }

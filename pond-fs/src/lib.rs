@@ -205,7 +205,7 @@ pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
     let runtime = new_runtime(None)?;
 
     let version = version.map(|v| v.parse()).transpose()?;
-    let client = Client::new(volume)?;
+    let mut client = Client::new(volume)?;
     let volume = runtime.block_on(client.load_volume(&version))?;
 
     macro_rules! write_stdout {
@@ -253,7 +253,7 @@ pub fn create(
     init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
-    let client = Client::new(volume.as_ref())?;
+    let mut client = Client::new(volume.as_ref())?;
     let version = Version::from_str(version.as_ref())?;
 
     runtime.block_on(async {
@@ -349,7 +349,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 let client = Client::new(args.volume)?;
                 let volume = runtime.block_on(
                     client
-                        .with_metrics_handle(metrics)
+                        .with_metrics_snapshot_fn(Box::new(move || metrics.render().into_bytes()))
                         .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                         .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                         .with_readahead(args.read_behavior.readahead_size.as_u64())
@@ -401,7 +401,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         let client = Client::new(args.volume)?;
         let volume = runtime.block_on(
             client
-                .with_metrics_handle(metrics)
+                .with_metrics_snapshot_fn(Box::new(move || metrics.render().into_bytes()))
                 .with_cache_size(args.read_behavior.max_cache_size.as_u64())
                 .with_chunk_size(args.read_behavior.chunk_size.as_u64())
                 .with_readahead(args.read_behavior.readahead_size.as_u64())

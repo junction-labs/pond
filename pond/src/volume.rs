@@ -9,7 +9,6 @@ use crate::{
 use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
-use metrics_exporter_prometheus::PrometheusHandle;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{
     collections::BTreeMap,
@@ -85,13 +84,11 @@ impl Volume {
         meta: VolumeMetadata,
         cache: ChunkCache,
         store: crate::storage::Storage,
-        handle: Option<PrometheusHandle>,
+        metrics_snapshot_fn: Option<Box<dyn Fn() -> Vec<u8> + Send>>,
     ) -> Self {
-        let metrics_snapshot = handle.map(|handle| {
+        let metrics_snapshot = metrics_snapshot_fn.map(|f| {
             let snapshot = Arc::new(ArcSwap::from_pointee(Vec::new()));
-
-            tokio::spawn(metrics_refresh(handle, cache.clone(), snapshot.clone()));
-
+            tokio::spawn(metrics_refresh(f, cache.clone(), snapshot.clone()));
             snapshot
         });
 
@@ -220,7 +217,7 @@ impl Volume {
 /// Periodically record global metrics and re-render PrometheusHandle metrics, writing
 /// the result back into `shared` by replacing the internal Arc<String>.
 async fn metrics_refresh(
-    handle: PrometheusHandle,
+    metrics_snapshot_fn: Box<dyn Fn() -> Vec<u8> + Send>,
     cache: ChunkCache,
     shared: Arc<ArcSwap<Vec<u8>>>,
 ) {
@@ -229,11 +226,10 @@ async fn metrics_refresh(
         ticker.tick().await;
 
         // records current cache state (e.g. number of entries, size in bytes) by iterating and
-        // locking shards within the cache.
+        // locking each shards within the cache.
         cache.record_cache_size();
 
-        let refresh = Arc::from(handle.render().into_bytes());
-        shared.store(refresh);
+        shared.store(Arc::from(metrics_snapshot_fn()));
     }
 }
 
@@ -825,7 +821,7 @@ mod tests {
         let volume_path = tempdir.path().join("store");
         std::fs::create_dir_all(&volume_path).unwrap();
 
-        let client = Client::new(volume_path.to_str().unwrap()).unwrap();
+        let mut client = Client::new(volume_path.to_str().unwrap()).unwrap();
         let mut volume = client.create_volume().await;
 
         // clean volume -- this is not staged
