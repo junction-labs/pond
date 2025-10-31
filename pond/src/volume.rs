@@ -224,7 +224,7 @@ async fn metrics_refresh(
     cache: ChunkCache,
     shared: Arc<ArcSwap<Vec<u8>>>,
 ) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
     loop {
         ticker.tick().await;
 
