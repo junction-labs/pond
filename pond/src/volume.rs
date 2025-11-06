@@ -74,7 +74,7 @@ enum FileDescriptor {
 pub struct Volume {
     meta: VolumeMetadata,
     cache: ChunkCache,
-    fds: BTreeMap<Fd, FileDescriptor>,
+    fds: BTreeMap<Fd, FileDescriptor>, // rwlock
     store: crate::storage::Storage,
     metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
 }

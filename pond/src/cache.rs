@@ -22,6 +22,19 @@ impl Display for CacheConfig {
     }
 }
 
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            // 256 MiB
+            max_cache_size_bytes: 256 * 1024 * 1024,
+            // 8 MiB
+            chunk_size_bytes: 8 * 1024 * 1024,
+            // 32 MiB
+            readahead_size_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Chunk {
     path: Arc<object_store::path::Path>,
