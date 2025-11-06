@@ -9,6 +9,7 @@ mod metrics;
 mod storage;
 mod volume;
 
+pub use cache::CacheConfig;
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
