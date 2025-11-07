@@ -205,12 +205,12 @@ pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
     let runtime = new_runtime(None)?;
 
     let version = version.map(|v| v.parse()).transpose()?;
-    let mut client = Client::new(volume)?;
+    let mut client = Client::new(volume, false)?;
     let volume = runtime.block_on(client.load_volume(&version))?;
 
     macro_rules! write_stdout {
         ($($args:tt)*) => {
-            if let Err(_e) = write!(std::io::stdout(), $($args,)*) {
+            if let Err(_e) = writeln!(std::io::stdout(), $($args,)*) {
                 return Ok(())
             }
         };
@@ -253,7 +253,7 @@ pub fn create(
     init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
-    let mut client = Client::new(volume.as_ref())?;
+    let mut client = Client::new(volume.as_ref(), true)?;
     let version = Version::from_str(version.as_ref())?;
 
     runtime.block_on(async {
@@ -267,7 +267,7 @@ pub fn versions(volume: String) -> anyhow::Result<()> {
     init_logging(false, true, None)?;
 
     let runtime = new_runtime(None)?;
-    let client = Client::new(&volume)?;
+    let client = Client::new(&volume, false)?;
     let versions = runtime.block_on(client.list_versions())?;
 
     if versions.is_empty() {
@@ -346,7 +346,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 let runtime = new_runtime(Some(&args))?;
                 let metrics = new_metrics()?;
                 let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
-                let client = Client::new(args.volume)?;
+                let client = Client::new(args.volume, false)?;
                 let volume = runtime.block_on(
                     client
                         .with_metrics_snapshot_fn(Box::new(move || metrics.render().into_bytes()))
@@ -398,7 +398,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
         let runtime = new_runtime(Some(&args))?;
         let metrics = new_metrics()?;
         let version = args.version.map(|v| Version::from_str(&v)).transpose()?;
-        let client = Client::new(args.volume)?;
+        let client = Client::new(args.volume, false)?;
         let volume = runtime.block_on(
             client
                 .with_metrics_snapshot_fn(Box::new(move || metrics.render().into_bytes()))

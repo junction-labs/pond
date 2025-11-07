@@ -21,7 +21,7 @@ impl Storage {
     ///
     /// S3 scheme urls will use environment based credentials where possible and fall back to their
     /// default configurations.
-    pub(crate) fn for_location(s: &str) -> Result<Self> {
+    pub(crate) fn for_location(s: &str, create: bool) -> Result<Self> {
         match Url::parse(s) {
             Ok(url) => match url.scheme() {
                 "memory" => Ok(Self::new_in_memory()?),
@@ -36,7 +36,7 @@ impl Storage {
                             ),
                         ));
                     }
-                    Self::new_filesystem(url.path())
+                    Self::new_filesystem(url.path(), create)
                 }
                 scheme => Err(Error::new(
                     ErrorKind::InvalidData,
@@ -44,7 +44,7 @@ impl Storage {
                 )),
             },
             // hope the whole thing is path.
-            Err(url::ParseError::RelativeUrlWithoutBase) => Self::new_filesystem(s),
+            Err(url::ParseError::RelativeUrlWithoutBase) => Self::new_filesystem(s, create),
             // not a valid location string
             Err(e) => Err(Error::with_source(
                 ErrorKind::InvalidData,
@@ -118,14 +118,35 @@ impl Storage {
         })
     }
 
-    pub(crate) fn new_filesystem(base_path: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub(crate) fn new_filesystem(
+        base_path: impl AsRef<std::path::Path>,
+        create: bool,
+    ) -> Result<Self> {
+        if !base_path.as_ref().exists() && create {
+            std::fs::create_dir_all(&base_path).map_err(|e| {
+                let kind = e.kind().into();
+                Error::with_source(
+                    kind,
+                    format!(
+                        "unable to create volume at {}",
+                        base_path.as_ref().to_string_lossy()
+                    ),
+                    e,
+                )
+            })?;
+        }
+
         // use the URL path as the base path for the tempdir and the client, but
         // don't actually save it as base_path - we want paths relative
         // to the local filesystem client
-        let base_path = match std::fs::canonicalize(base_path) {
+        let base_path = match std::fs::canonicalize(&base_path) {
             Ok(path) => path,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Error::new(ErrorKind::NotFound, "base path does not exist"));
+                return Err(Error::with_source(
+                    ErrorKind::NotFound,
+                    format!("{} does not exist", base_path.as_ref().to_string_lossy()),
+                    e,
+                ));
             }
             Err(e) => {
                 return Err(Error::with_source(

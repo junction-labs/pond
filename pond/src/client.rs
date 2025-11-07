@@ -13,8 +13,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(location: impl AsRef<str>) -> Result<Self> {
-        let store = crate::storage::Storage::for_location(location.as_ref())?;
+    pub fn new(location: impl AsRef<str>, create: bool) -> Result<Self> {
+        let store = crate::storage::Storage::for_location(location.as_ref(), create)?;
 
         Ok(Client {
             store,
