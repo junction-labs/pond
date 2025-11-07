@@ -274,7 +274,7 @@ pub fn versions(volume: String) -> anyhow::Result<()> {
         write_stderr!("No versions found under '{volume}'. Is this actually a volume?");
     } else {
         for version in versions {
-            let _ = write!(std::io::stdout(), "{version}");
+            let _ = writeln!(std::io::stdout(), "{version}");
         }
     }
 
