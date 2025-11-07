@@ -352,6 +352,9 @@ impl Volume {
                     return Ok(0);
                 }
                 let blob_offset = range.offset + offset;
+                let left = std::cmp::max(0, range.end() - blob_offset);
+                let read_len = std::cmp::min(left, buf.len() as u64);
+
                 let bytes: Vec<Bytes> = self
                     .cache
                     .get_at(key.clone(), blob_offset, read_len)

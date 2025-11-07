@@ -18,12 +18,7 @@ impl Client {
         Ok(Client {
             store,
             metrics_snapshot_fn: None,
-            // 256 MiB
-            cache_size: 256 * 1024 * 1024,
-            // 16 MiB
-            chunk_size: 16 * 1024 * 1024,
-            // 64 MiB
-            readahead: 32 * 1024 * 1024,
+            cache_config: CacheConfig::default(),
         })
     }
 
