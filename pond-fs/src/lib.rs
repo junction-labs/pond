@@ -210,7 +210,7 @@ pub fn list(volume: String, version: Option<String>) -> anyhow::Result<()> {
 
     macro_rules! write_stdout {
         ($($args:tt)*) => {
-            if let Err(_e) = write!(std::io::stdout(), $($args,)*) {
+            if let Err(_e) = writeln!(std::io::stdout(), $($args,)*) {
                 return Ok(())
             }
         };
