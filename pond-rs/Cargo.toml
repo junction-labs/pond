@@ -6,6 +6,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+bytes.workspace = true
+futures.workspace = true
+paste.workspace = true
 tokio.workspace = true
 
 pond.workspace = true
