@@ -104,8 +104,8 @@ pub struct MountArgs {
     /// *NOTE* - If you're running Pond as a system service we strongly
     /// recommend running it under your system's process supervisor instead of
     /// using this option.
-    #[clap(long, short, default_value_t = true, action = clap::ArgAction::Set)]
-    pub background: bool,
+    #[clap(long, short, default_value_t = true)]
+    pub background: std::primitive::bool,
 
     /// The number of worker threads threads to run in the FUSE. Worker threads
     /// are used for making network requests. There must be at least one FUSE
@@ -159,7 +159,7 @@ pub struct MountArgs {
     ///
     /// If you are not running Pond as root, `user_allow_other` must be set in your /etc/fuse.conf
     /// to enable auto_unmount.
-    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = false)]
     pub auto_unmount: std::primitive::bool,
 
     /// The timeout in seconds for which name lookups and file/directory attributes will be cached.
@@ -314,7 +314,7 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                     Ok('0') => {
                         if !args.auto_unmount {
                             write_stderr!(
-                                "WARN: auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
+                                "auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
                                 mountpoint = args.mountpoint.display()
                             );
                         }
@@ -509,7 +509,7 @@ fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>, auto_unmount: bool
     );
 
     if !auto_unmount {
-        tracing::warn!(
+        tracing::info!(
             "auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
             mountpoint = mountpoint.as_ref().display()
         );
