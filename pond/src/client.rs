@@ -26,6 +26,7 @@ impl Client {
         Self::new(location, true)
     }
 
+    #[inline]
     pub fn new(location: impl AsRef<str>, create: bool) -> Result<Self> {
         let store = crate::storage::Storage::for_location(location.as_ref(), create)?;
 

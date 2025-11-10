@@ -123,7 +123,7 @@ impl Storage {
         create: bool,
     ) -> Result<Self> {
         if !base_path.as_ref().exists() && create {
-            std::fs::create_dir_all(&base_path).map_err(|e| {
+            std::fs::create_dir(&base_path).map_err(|e| {
                 let kind = e.kind().into();
                 Error::with_source(
                     kind,
