@@ -55,8 +55,12 @@ to think about how to lay out your data - you can just do things.
   experimental, you'll need a working Rust toolichain to try it out. We
   recommend installing Rustup from [the official website](https://rustup.rs/).
 
-Before installing, Pond make sure FUSE is set up on your operating system. The
+Before installing Pond, make sure FUSE is set up on your operating system. The
 instructions vary, but on most distros FUSE is available by default.
+
+By default `user_allow_other` is unset in `/etc/fuse.conf`, restricting access 
+to the mounted fuse to just you. If you want to enable `auto_umount` or allow
+other users to access the mounted fuse, you must set `user_allow_other`.
 
 Install Pond from source by cloning the git repo and running `cargo install`:
 
