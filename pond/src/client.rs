@@ -13,6 +13,19 @@ pub struct Client {
 }
 
 impl Client {
+    /// Returns a Client for the Volume at the given location.
+    pub fn open(location: impl AsRef<str>) -> Result<Self> {
+        Self::new(location, false)
+    }
+
+    /// Returns a Client for the Volume at the given location.
+    ///
+    /// For locations that reference a local volume (using LocalFilesystem), we will
+    /// create the volume parent dirs if they do not exist.
+    pub fn create(location: impl AsRef<str>) -> Result<Self> {
+        Self::new(location, true)
+    }
+
     pub fn new(location: impl AsRef<str>, create: bool) -> Result<Self> {
         let store = crate::storage::Storage::for_location(location.as_ref(), create)?;
 

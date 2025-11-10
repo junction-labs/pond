@@ -38,7 +38,7 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     reset_dir(expected_dir);
     reset_dir(actual_dir);
 
-    let mut client = Client::new("memory://", true).unwrap();
+    let mut client = Client::create("memory://").unwrap();
     let volume = test_runtime().block_on(client.create_volume());
     let _mount = spawn_mount(actual_dir, volume);
 
@@ -104,7 +104,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
 
     let runtime = test_runtime();
     let version = Version::from_static("123");
-    let mut client = Client::new(pack_dir.to_str().unwrap(), true).unwrap();
+    let mut client = Client::create(pack_dir.to_str().unwrap()).unwrap();
 
     // create a random test volume
     let mkdir = |p: &Path| create_dir_all(p, [ErrorKind::AlreadyExists, ErrorKind::NotADirectory]);
@@ -193,7 +193,7 @@ fn test_commit(
     reset_dir(volume_dir);
 
     let runtime = test_runtime();
-    let mut client = Client::new(volume_dir.to_str().unwrap(), true).unwrap();
+    let mut client = Client::create(volume_dir.to_str().unwrap()).unwrap();
 
     // create an empty volume and write a bunch of files and directories to it.
     // write the same entries to a local filesystem as a reference.
