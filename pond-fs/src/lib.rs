@@ -312,17 +312,17 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                 match read_pipe_status(read_fd, mount_timeout) {
                     // the child told us everything is good
                     Ok('0') => {
+                        write_stderr!(
+                            "{volume} is mounted at {mountpoint}",
+                            volume = args.volume,
+                            mountpoint = args.mountpoint.display()
+                        );
                         if !args.auto_unmount {
                             write_stderr!(
                                 "auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
                                 mountpoint = args.mountpoint.display()
                             );
                         }
-                        write_stderr!(
-                            "{volume} is mounted at {mountpoint}",
-                            volume = args.volume,
-                            mountpoint = args.mountpoint.display()
-                        );
                         Ok(())
                     }
                     // the child told us everything is bad
