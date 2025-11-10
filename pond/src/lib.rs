@@ -183,10 +183,7 @@ impl<'a> DirEntry<'a> {
     }
 
     pub fn is_regular(&self) -> bool {
-        matches!(
-            self.data,
-            metadata::EntryData::Directory | metadata::EntryData::File { .. }
-        )
+        self.attr.ino.is_regular()
     }
 }
 
