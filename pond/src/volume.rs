@@ -830,7 +830,7 @@ mod tests {
         let volume_path = tempdir.path().join("store");
         std::fs::create_dir_all(&volume_path).unwrap();
 
-        let mut client = Client::new(volume_path.to_str().unwrap()).unwrap();
+        let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
         let mut volume = client.create_volume().await;
 
         // clean volume -- this is not staged
