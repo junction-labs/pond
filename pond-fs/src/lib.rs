@@ -104,8 +104,8 @@ pub struct MountArgs {
     /// *NOTE* - If you're running Pond as a system service we strongly
     /// recommend running it under your system's process supervisor instead of
     /// using this option.
-    #[clap(long, short)]
-    pub background: bool,
+    #[clap(long, short, default_value_t = true)]
+    pub background: std::primitive::bool,
 
     /// The number of worker threads threads to run in the FUSE. Worker threads
     /// are used for making network requests. There must be at least one FUSE
@@ -146,6 +146,8 @@ pub struct MountArgs {
 
     /// All all other users of the system to access the filesystem.
     ///
+    /// To use this, `user_allow_other` must be set in your /etc/fuse.conf.
+    ///
     /// By convention, this is disabled by default in FUSE implementations. See
     /// the libfuse wiki for an explanation of why.
     ///
@@ -153,9 +155,11 @@ pub struct MountArgs {
     #[clap(long)]
     pub allow_other: bool,
 
-    /// Automatically unmount the filesystem if this process exits for any
-    /// reason.
-    #[clap(long, default_value_t = true)]
+    /// Automatically unmount the filesystem if this process exits for any reason.
+    ///
+    /// If you are not running Pond as root, `user_allow_other` must be set in your /etc/fuse.conf
+    /// to enable auto_unmount.
+    #[clap(long, default_value_t = false)]
     pub auto_unmount: std::primitive::bool,
 
     /// The timeout in seconds for which name lookups and file/directory attributes will be cached.
@@ -313,6 +317,12 @@ pub fn mount(args: MountArgs) -> anyhow::Result<()> {
                             volume = args.volume,
                             mountpoint = args.mountpoint.display()
                         );
+                        if !args.auto_unmount {
+                            write_stderr!(
+                                "auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
+                                mountpoint = args.mountpoint.display()
+                            );
+                        }
                         Ok(())
                     }
                     // the child told us everything is bad
@@ -462,7 +472,7 @@ pub fn mount_volume(
     auto_unmount: bool,
     kernel_cache_timeout: Duration,
 ) -> anyhow::Result<fuser::Session<Pond>> {
-    startup_log(&volume, &mountpoint);
+    startup_log(&volume, &mountpoint, auto_unmount);
 
     let pond = Pond::new(runtime, volume, None, None, kernel_cache_timeout);
     let mut opts = vec![
@@ -486,7 +496,7 @@ pub fn mount_volume(
 
 /// Log information about the volume.
 #[tracing::instrument(name = "startup", level = "info", skip_all)]
-fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>) {
+fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>, auto_unmount: bool) {
     tracing::info!("Configured cache with: {}", volume.cache_config());
     tracing::info!(
         "Using object store client: {}",
@@ -497,6 +507,13 @@ fn startup_log(volume: &Volume, mountpoint: impl AsRef<Path>) {
         "Staged files will be written under: {}",
         volume.staged_file_temp_dir().path().to_string_lossy()
     );
+
+    if !auto_unmount {
+        tracing::info!(
+            "auto_unmount is disabled. To unmount Pond, run: umount {mountpoint}",
+            mountpoint = mountpoint.as_ref().display()
+        );
+    }
 }
 
 fn new_runtime(args: Option<&MountArgs>) -> std::io::Result<tokio::runtime::Runtime> {
