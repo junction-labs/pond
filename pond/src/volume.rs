@@ -275,6 +275,8 @@ impl Volume {
                     let staged = Location::Staged { path };
                     // modify metadata next
                     self.modify(ino, Some(staged), Some(Modify::Set((0, 0).into())))?;
+                    let now = Some(SystemTime::now());
+                    self.setattr(ino, now, now)?;
                     // only create the fd once the file is open and metadata is valid
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
@@ -691,10 +693,12 @@ impl<'a> StagedVolume<'a> {
 
     /// Relocate all staged files to dest.
     fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
+        let now = Some(SystemTime::now());
         for (ino, byte_range) in ranges {
             self.inner
                 .meta
                 .modify(ino, Some(dest.clone()), Some(Modify::Set(byte_range)))?;
+            self.inner.setattr(ino, now, now)?;
         }
 
         // deduplicate and clean up all hanging staged Locations

@@ -353,14 +353,15 @@ impl VolumeMetadata {
             btree_map::Entry::Vacant(slot) => slot,
             btree_map::Entry::Occupied(slot) => unreachable!("BUG: inode reused"),
         };
+        let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
             parent,
             attr: FileAttr {
                 ino,
                 size: 0,
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
+                mtime: now,
+                ctime: now,
                 kind: FileType::Directory,
             },
             data: EntryData::Directory,
@@ -527,14 +528,15 @@ impl VolumeMetadata {
         let slot = self.data.entry(ino);
 
         let location_idx = insert_unique(&mut self.locations, location);
+        let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
             parent,
             attr: FileAttr {
                 ino,
                 size: byte_range.len,
-                mtime: SystemTime::now(),
-                ctime: SystemTime::now(),
+                mtime: now,
+                ctime: now,
                 kind: FileType::Regular,
             },
             data: EntryData::File {
