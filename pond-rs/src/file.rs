@@ -32,7 +32,6 @@ impl AsyncRead for ReadOnlyFile {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        // store fut so cx can wake up
         match self.fut.as_mut() {
             Some(fut) => match fut.poll_unpin(cx) {
                 std::task::Poll::Ready(Ok(bytes)) => {
@@ -58,6 +57,8 @@ impl AsyncRead for ReadOnlyFile {
                 };
                 self.fut = Some(Box::pin(fut));
 
+                // we just created the fut, let them know they can poll it again and the next time
+                // we'll attach the context to the fut
                 cx.waker().wake_by_ref();
                 std::task::Poll::Pending
             }

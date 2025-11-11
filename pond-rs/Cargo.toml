@@ -12,3 +12,6 @@ paste.workspace = true
 tokio.workspace = true
 
 pond.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
