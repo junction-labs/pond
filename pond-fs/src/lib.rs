@@ -491,6 +491,10 @@ pub fn mount_volume(
         opts.push(fuser::MountOption::AutoUnmount);
     }
 
+    if !mountpoint.as_ref().exists() {
+        std::fs::create_dir(&mountpoint)?;
+    }
+
     Ok(fuser::Session::new(pond, mountpoint, &opts)?)
 }
 
