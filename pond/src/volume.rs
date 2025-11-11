@@ -391,6 +391,10 @@ impl Volume {
                     Error::with_source(kind, "failed to write staged file", e)
                 })?;
                 self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
+
+                let now = Some(SystemTime::now());
+                self.setattr(fd.ino, now, now)?;
+
                 Ok(n)
             }
             // no other fds are writable

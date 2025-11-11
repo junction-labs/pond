@@ -359,8 +359,8 @@ impl VolumeMetadata {
             attr: FileAttr {
                 ino,
                 size: 0,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
+                mtime: SystemTime::now(),
+                ctime: SystemTime::now(),
                 kind: FileType::Directory,
             },
             data: EntryData::Directory,
@@ -533,8 +533,8 @@ impl VolumeMetadata {
             attr: FileAttr {
                 ino,
                 size: byte_range.len,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
+                mtime: SystemTime::now(),
+                ctime: SystemTime::now(),
                 kind: FileType::Regular,
             },
             data: EntryData::File {
