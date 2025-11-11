@@ -1,254 +1,126 @@
-use std::{path::Path, str::FromStr, time::SystemTime};
+use pond::FileAttr;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
-use pond::{ErrorKind, FileAttr, Ino, Version};
+use crate::OpenOptions;
+use crate::ReadOnlyFile;
+use crate::adapter::VolumeAdapter;
 
-#[derive(Default)]
-pub enum OpenMode {
-    #[default]
-    Read,
-    // Write,
+#[derive(Clone)]
+pub struct Volume {
+    cmds: mpsc::Sender<Cmd>,
 }
 
-#[derive(Default)]
-pub struct OpenOptions {
-    mode: OpenMode,
-    create: bool,
-    truncate: bool,
-    append: bool,
-}
+impl Volume {
+    pub async fn load(
+        volume: impl AsRef<str>,
+        version: Option<pond::Version>,
+        cache_config: pond::CacheConfig,
+    ) -> pond::Result<Self> {
+        let volume = pond::Client::new(volume)?
+            .with_cache_config(cache_config)
+            .load_volume(&version)
+            .await?;
+        let path_volume = crate::adapter::VolumeAdapter::new(volume);
 
-impl OpenOptions {
-    pub(crate) fn new() -> Self {
-        Default::default()
-    }
+        // interfacing with pond::Volume through a channel, following the Communicating Sequential
+        // Processes (CSP) pattern. this serializes all operations to pond::Volume making it
+        // thread-safe (which pond::Volume isn't).
+        let (tx, rx) = mpsc::channel(16);
+        let _handle = tokio::spawn(dispatch_loop(path_volume, rx));
 
-    /// Sets the mode of the file to either read-only or write-only.
-    pub fn mode(&mut self, opt: OpenMode) -> &mut Self {
-        self.mode = opt;
-        self
-    }
-
-    /// Sets the option to create a new file, or open it if it already exists.
-    pub fn create(&mut self, opt: bool) -> &mut Self {
-        self.create = opt;
-        self
-    }
-
-    /// Sets the option for truncating a previous file.
-    pub fn truncate(&mut self, opt: bool) -> &mut Self {
-        self.truncate = opt;
-        self
-    }
-
-    /// Sets the option for the append mode.
-    ///
-    /// This option, when true, means that writes will append to a file instead of overwriting
-    /// previous contents. Note that setting .write(true).append(true) has the same effect as
-    /// setting only .append(true).
-    pub fn append(&mut self, opt: bool) -> &mut Self {
-        self.append = opt;
-        self
+        Ok(Self { cmds: tx })
     }
 }
 
-/// Adapter for pond::Volume that allows it to operate on paths, rather than Ino and names.
-pub(crate) struct VolumeAdapter {
-    inner: pond::Volume,
-}
-
-impl VolumeAdapter {
-    pub(crate) fn new(volume: pond::Volume) -> Self {
-        Self { inner: volume }
+/// Process and dispatch Cmds on the receiving end of the mpsc::channel.
+async fn dispatch_loop(mut volume: VolumeAdapter, mut cmds: mpsc::Receiver<Cmd>) {
+    while let Some(cmd) = cmds.recv().await {
+        dispatch(&mut volume, cmd).await;
     }
 }
 
-fn from_os_str(s: &std::ffi::OsStr) -> pond::Result<&str> {
-    s.to_str().ok_or(pond::ErrorKind::InvalidData.into())
-}
+/// Generates some boilerplate needed to support the communicating sequential processes (CSP)
+/// model to make pond::Volume thread-safe.
+macro_rules! cmds {
+    ($(
+        $(#[$id_attr:meta])* $vis:vis $variant:ident => $method:ident(
+            $($arg_name:ident : $arg_ty:ty),* $(,)?
+        ) -> $result_ty:ty
+    ),* $(,)?) => {
 
-fn parent(path: &str) -> Option<&str> {
-    let path = Path::new(path);
-    path.parent()
-        .map(|p| p.to_str().expect("should be convertible back to &str"))
-}
+        enum Cmd {
+            $(
+                $variant {
+                    $(
+                        $arg_name: $arg_ty,
+                    )*
+                    resp: oneshot::Sender<$result_ty>,
+                }
+            ),*
+        }
 
-/// Resolve a path to its FileAttr.
-///
-/// Walks the path components, resolving `FileAttr`s for each component along the way. Returns an
-/// error if the path is invalid (e.g. does not exist, permissions, etc.).
-async fn resolve_fileattr<'a>(
-    volume: &'a pond::Volume,
-    path: &'a str,
-) -> pond::Result<&'a FileAttr> {
-    let path = Path::new(path);
-
-    let mut attr = volume.getattr(Ino::Root)?;
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => continue,
-            std::path::Component::Normal(os_str) => {
-                let name = from_os_str(os_str)?;
-                attr = volume
-                    .lookup(attr.ino, name)?
-                    .ok_or(pond::ErrorKind::NotFound)?;
-            }
-            _ => {
-                return Err(pond::Error::new(
-                    pond::ErrorKind::Unsupported,
-                    "Only absolute paths are supported",
-                ));
+        async fn dispatch(volume: &mut VolumeAdapter, cmd: Cmd) {
+            match cmd {
+                $(
+                    Cmd::$variant { $($arg_name,)* resp } => {
+                        let _ = resp.send(volume.$method($($arg_name),*).await);
+                    }
+                ),*
             }
         }
-    }
 
-    Ok(attr)
+        impl Volume {
+            $(
+                paste::paste! {
+                    $(#[$id_attr])*
+                    $vis async fn [<$variant:snake>](
+                        &self,
+                        $($arg_name: $arg_ty),*
+                    ) -> $result_ty {
+                        let (tx, rx) = oneshot::channel();
+                        let cmd = Cmd::$variant {
+                            $(
+                                $arg_name,
+                            )*
+                            resp: tx,
+                        };
+                        let _ = self.cmds.send(cmd).await;
+                        rx.await.expect("volume exited unexpectedly")
+                    }
+                }
+            )*
+        }
+    };
 }
 
-/// Resolve a path to its direct parent Ino and its filename.
-///
-/// Returns an error if the path to the file does not exist. Does not check the file at the path
-/// for existence.
-async fn resolve_parent_ino_and_filename(
-    volume: &pond::Volume,
-    path: &str,
-) -> pond::Result<(Ino, String)> {
-    let parent = parent(path).ok_or(pond::ErrorKind::InvalidData)?;
-    let parent_ino = resolve_fileattr(volume, parent).await?.ino;
-    let name = Path::new(path)
-        .file_name()
-        .ok_or(pond::ErrorKind::InvalidData)?;
-    let name = from_os_str(name)?;
-
-    Ok((parent_ino, name.to_string()))
+cmds! {
+    /// Get the version of the current Volume.
+    pub Version => version() -> pond::Version,
+    /// Commit and persist all currently staged changes with the provided version label.
+    pub Commit  => commit(version: String) -> Result<(), pond::Error>,
+    /// Get the FileAttr for the directory or file at the given path.
+    pub Metadata => metadata(path: String) -> pond::Result<FileAttr>,
+    /// Check if the given path exists.
+    pub Exists => exists(path: String) -> pond::Result<bool>,
+    /// ReadDir
+    pub ReadDir => read_dir(path: String) -> pond::Result<()>,
+    /// CreateDir
+    pub CreateDir => create_dir(path: String) -> pond::Result<FileAttr>,
+    pub CreateDirAll => create_dir_all(path: String) -> pond::Result<FileAttr>,
+    pub RemoveDir => remove_dir(path: String) -> pond::Result<()>,
+    pub RemoveDirAll => remove_dir_all(path: String) -> pond::Result<()>,
+    pub RemoveFile => remove_file(path: String) -> pond::Result<()>,
+    pub Copy => copy(src: String, dst: String) -> pond::Result<()>,
+    pub Rename => rename(src: String, dst: String) -> pond::Result<()>,
+    pub Touch => touch(path: String) -> pond::Result<FileAttr>,
+    pub(crate) OpenFd => open(path: String, options: OpenOptions) -> pond::Result<(pond::Fd, FileAttr)>,
+    pub(crate) ReadAt => read_at(fd: pond::Fd, offset: u64, size: usize) -> pond::Result<bytes::Bytes>,
 }
 
-impl VolumeAdapter {
-    pub(crate) async fn version(&self) -> Version {
-        self.inner.version().clone()
-    }
-
-    /// Commit all staged changes in a volume, persisting it into the backend for this volume.
-    pub(crate) async fn commit(&mut self, version: String) -> pond::Result<()> {
-        let version = Version::from_str(&version)?;
-        self.inner.commit(version).await
-    }
-
-    /// Fetch metadata of a file if it exists.
-    pub(crate) async fn metadata(&self, path: String) -> pond::Result<FileAttr> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
-        Ok(attr.clone())
-    }
-
-    /// Check if a file or directory exists.
-    pub(crate) async fn exists(&self, path: String) -> pond::Result<bool> {
-        match resolve_fileattr(&self.inner, &path).await {
-            Ok(_) => Ok(true),
-            Err(e) => match e.kind() {
-                ErrorKind::NotFound => Ok(false),
-                _ => Err(e),
-            },
-        }
-    }
-
-    /// Iterate over the directory entries within the given directory.
-    ///
-    /// The return value holds a read-lock on the volume.
-    pub(crate) async fn read_dir(&self, path: String) -> pond::Result<()> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
-        match attr.kind {
-            pond::FileType::Regular => Err(pond::ErrorKind::NotADirectory.into()),
-            pond::FileType::Directory => todo!(),
-        }
-    }
-
-    /// Create a directory in the volume.
-    pub(crate) async fn create_dir(&mut self, path: String) -> pond::Result<FileAttr> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
-        self.inner.mkdir(parent_ino, name).cloned()
-    }
-
-    /// Create a directory in the volume.
-    pub(crate) async fn create_dir_all(&mut self, path: String) -> pond::Result<FileAttr> {
-        todo!()
-    }
-
-    /// Remove a directory from the volume.
-    pub(crate) async fn remove_dir(&mut self, path: String) -> pond::Result<()> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
-        self.inner.rmdir(parent_ino, &name)
-    }
-
-    pub(crate) async fn remove_dir_all(&mut self, path: String) -> pond::Result<()> {
-        todo!()
-    }
-
-    /// Attempts to open a file in read-only mode.
-    pub(crate) async fn open(
-        &mut self,
-        path: String,
-        _options: OpenOptions,
-    ) -> pond::Result<(pond::Fd, FileAttr)> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
-        let attr = attr.clone();
-        let fd = self.inner.open_read(attr.ino).await?;
-        Ok((fd, attr))
-    }
-
-    pub(crate) async fn read_at(
-        &mut self,
-        fd: pond::Fd,
-        offset: u64,
-        size: usize,
-    ) -> pond::Result<bytes::Bytes> {
-        let mut buf = bytes::BytesMut::with_capacity(size);
-        let n = self.inner.read_at(fd, offset, &mut buf).await?;
-        buf.truncate(n);
-        Ok(buf.freeze())
-    }
-
-    /// Remove a file from the volume.
-    pub(crate) async fn remove_file(&mut self, path: String) -> pond::Result<()> {
-        let (parent_ino, filename) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
-        self.inner.delete(parent_ino, &filename)
-    }
-
-    pub(crate) async fn copy(&mut self, from: String, to: String) -> pond::Result<()> {
-        todo!(
-            "do something smart for committed (point to the same range) and do something dumb for staged (copy on write?)"
-        )
-    }
-
-    /// Move a file from src to dst.
-    pub(crate) async fn rename(&mut self, src: String, dst: String) -> pond::Result<()> {
-        let (src_parent, src_filename) = resolve_parent_ino_and_filename(&self.inner, &src).await?;
-        let (dst_parent, dst_filename) = resolve_parent_ino_and_filename(&self.inner, &dst).await?;
-        // this doesnt work, because rename dest shoudnt exist??
-        self.inner
-            .rename(src_parent, &src_filename, dst_parent, dst_filename)
-    }
-
-    /// Touch a file.
-    ///
-    /// Creates an empty file if it doesn't exist, updates the ctime otherwise.
-    pub(crate) async fn touch(&mut self, path: String) -> pond::Result<FileAttr> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
-
-        match self.inner.create(parent_ino, name.clone(), true) {
-            Ok((attr, fd)) => {
-                let attr = attr.clone();
-                self.inner.release(fd).await?;
-                Ok(attr)
-            }
-            Err(e) if e.kind() == pond::ErrorKind::AlreadyExists => {
-                let ino = self
-                    .inner
-                    .lookup(parent_ino, &name)?
-                    .ok_or(pond::ErrorKind::NotFound)?
-                    .ino;
-                let attr = self.inner.setattr(ino, None, Some(SystemTime::now()))?;
-                Ok(attr.clone())
-            }
-            Err(e) => Err(e),
-        }
+impl Volume {
+    pub async fn open(&self, path: String, options: OpenOptions) -> pond::Result<ReadOnlyFile> {
+        let (fd, attr) = self.open_fd(path, options).await?;
+        Ok(ReadOnlyFile::new(fd, attr, self.clone()))
     }
 }
