@@ -2,57 +2,6 @@ use std::{path::Path, str::FromStr, time::SystemTime};
 
 use pond::{ErrorKind, FileAttr, Ino, Version};
 
-#[derive(Default)]
-pub enum OpenMode {
-    #[default]
-    Read,
-    // Write,
-}
-
-#[allow(dead_code)]
-#[derive(Default)]
-pub struct OpenOptions {
-    mode: OpenMode,
-    create: bool,
-    truncate: bool,
-    append: bool,
-}
-
-#[allow(dead_code)]
-impl OpenOptions {
-    pub(crate) fn new() -> Self {
-        Default::default()
-    }
-
-    /// Sets the mode of the file to either read-only or write-only.
-    pub fn mode(&mut self, opt: OpenMode) -> &mut Self {
-        self.mode = opt;
-        self
-    }
-
-    /// Sets the option to create a new file, or open it if it already exists.
-    pub fn create(&mut self, opt: bool) -> &mut Self {
-        self.create = opt;
-        self
-    }
-
-    /// Sets the option for truncating a previous file.
-    pub fn truncate(&mut self, opt: bool) -> &mut Self {
-        self.truncate = opt;
-        self
-    }
-
-    /// Sets the option for the append mode.
-    ///
-    /// This option, when true, means that writes will append to a file instead of overwriting
-    /// previous contents. Note that setting .write(true).append(true) has the same effect as
-    /// setting only .append(true).
-    pub fn append(&mut self, opt: bool) -> &mut Self {
-        self.append = opt;
-        self
-    }
-}
-
 /// Adapter for pond::Volume that allows it to operate on paths, rather than Ino and names.
 pub(crate) struct VolumeAdapter {
     inner: pond::Volume,
@@ -185,15 +134,26 @@ impl VolumeAdapter {
     }
 
     /// Attempts to open a file in read-only mode.
-    pub(crate) async fn open(
-        &mut self,
-        path: String,
-        _options: OpenOptions,
-    ) -> pond::Result<(pond::Fd, FileAttr)> {
+    pub(crate) async fn open_read(&mut self, path: String) -> pond::Result<(pond::Fd, FileAttr)> {
         let attr = resolve_fileattr(&self.inner, &path).await?;
         let attr = attr.clone();
         let fd = self.inner.open_read(attr.ino).await?;
         Ok((fd, attr))
+    }
+
+    pub(crate) async fn open_read_write(
+        &mut self,
+        path: String,
+    ) -> pond::Result<(pond::Fd, FileAttr)> {
+        let attr = resolve_fileattr(&self.inner, &path).await?;
+        let attr = attr.clone();
+        let fd = self.inner.open_read_write(attr.ino).await?;
+        Ok((fd, attr))
+    }
+
+    /// Release an open file.
+    pub(crate) async fn release(&mut self, fd: pond::Fd) -> pond::Result<()> {
+        self.inner.release(fd).await
     }
 
     pub(crate) async fn read_at(
@@ -203,9 +163,19 @@ impl VolumeAdapter {
         size: usize,
     ) -> pond::Result<bytes::Bytes> {
         let mut buf = bytes::BytesMut::with_capacity(size);
+        buf.resize(size, 0u8);
         let n = self.inner.read_at(fd, offset, &mut buf).await?;
         buf.truncate(n);
         Ok(buf.freeze())
+    }
+
+    pub(crate) async fn write_at(
+        &mut self,
+        fd: pond::Fd,
+        offset: u64,
+        buf: bytes::Bytes,
+    ) -> pond::Result<usize> {
+        self.inner.write_at(fd, offset, &buf).await
     }
 
     /// Remove a file from the volume.
@@ -216,7 +186,7 @@ impl VolumeAdapter {
 
     pub(crate) async fn copy(&mut self, _from: String, _to: String) -> pond::Result<()> {
         todo!(
-            "do something smart for committed (point to the same range) and do something dumb for staged (copy on write?)"
+            "do something smart for committed (identical Location) and do something dumb for staged (eager copy)"
         )
     }
 
@@ -254,6 +224,3 @@ impl VolumeAdapter {
         }
     }
 }
-
-#[cfg(test)]
-mod test {}
