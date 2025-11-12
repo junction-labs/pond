@@ -46,8 +46,8 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     // apply but ignore errors when trying to commit with the same
     // version twice. they should be no-ops - we know they're different
     // in the reference fs and we don't care.
-    let apply = |dir: &Path, op: &FuzzOp| {
-        let res = apply_op(dir, op);
+    let apply = |dir: &Path, op: &FuzzOp, assert_mtime: bool| {
+        let res = apply_op(dir, op, assert_mtime);
         match (op, res) {
             (FuzzOp::Commit(_), Err(e)) if e.kind() == ErrorKind::AlreadyExists => {
                 Ok(OpOutput::None)
@@ -55,8 +55,13 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
             (_, res) => res.map_err(|e| e.kind()),
         }
     };
-    let reference_res: Vec<_> = ops.iter().map(|op| apply(expected_dir, op)).collect();
-    let test_res: Vec<_> = ops.iter().map(|op| apply(actual_dir, op)).collect();
+    // sometimes the kernel cache holds onto the mtime for too long, so let's skip checking it for
+    // the reference filesystem
+    let reference_res: Vec<_> = ops
+        .iter()
+        .map(|op| apply(expected_dir, op, false))
+        .collect();
+    let test_res: Vec<_> = ops.iter().map(|op| apply(actual_dir, op, true)).collect();
 
     // print our own error history so it's easy to spot when things don't match.
     if reference_res != test_res {
@@ -220,7 +225,7 @@ fn test_commit(
         .collect();
 
     // commit
-    apply_op(mount_dir, &FuzzOp::Commit("v1".to_string())).unwrap();
+    apply_op(mount_dir, &FuzzOp::Commit("v1".to_string()), true).unwrap();
 
     // compare the ctimes after the commit happens
     {
@@ -547,9 +552,7 @@ fn mtime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
         return Ok(None);
     }
 
-    // open the actual file to bypass kernel cache which may be stale
-    let fh = std::fs::File::open(path)?;
-    fh.metadata()?.modified().map(Some)
+    std::fs::metadata(path)?.modified().map(Some)
 }
 
 fn ctime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
@@ -557,14 +560,16 @@ fn ctime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
         return Ok(None);
     }
 
-    // open the actual file to bypass kernel cache which may be stale
-    let fh = std::fs::File::open(path)?;
-    let md = fh.metadata()?;
+    let md = std::fs::metadata(path)?;
     let systime = UNIX_EPOCH + Duration::new(md.ctime() as u64, md.ctime_nsec() as u32);
     Ok(Some(systime))
 }
 
-fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Error> {
+fn apply_op(
+    root: impl AsRef<Path>,
+    op: &FuzzOp,
+    assert_mtime: bool,
+) -> Result<OpOutput, std::io::Error> {
     let root = root.as_ref();
 
     match op {
@@ -592,20 +597,20 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
         FuzzOp::Write(path, data) => {
             let path = root.join(path);
             let prev_mtime = mtime(&path)?;
-            let now = SystemTime::now();
             tri!(std::fs::write(&path, data));
-            let mtime = mtime(&path)?;
-            // (1) file didn't exist before, so prev_mtime is None
-            // (2) previous mtime was bumped after we wrote
-            // (3) the two writes happened in the same ns, so they're equal. make sure they're
-            //     equal to now
-            assert!(
-                prev_mtime.is_none() || prev_mtime < mtime || prev_mtime == Some(now),
-                "now: {:?} -- {:?} < {:?} failed",
-                now,
-                prev_mtime,
-                mtime,
-            );
+            if assert_mtime {
+                // (1) file didn't exist before, so prev_mtime is None
+                // (2) previous mtime was bumped after we wrote
+                // (3) the two writes happened in the same ns, so they're equal. make sure they're
+                //     equal to now
+                let mtime = mtime(&path)?;
+                assert!(
+                    prev_mtime.is_none() || prev_mtime < mtime,
+                    "{:?} < {:?}",
+                    prev_mtime,
+                    mtime,
+                );
+            }
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
