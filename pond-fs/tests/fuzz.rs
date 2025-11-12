@@ -7,7 +7,7 @@ use std::{
     io::ErrorKind,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -549,11 +549,13 @@ fn mtime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
     std::fs::metadata(path)?.modified().map(Some)
 }
 
-fn ctime(path: &PathBuf) -> Result<Option<i64>, std::io::Error> {
+fn ctime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
     if !std::fs::exists(path)? {
         return Ok(None);
     }
-    Ok(Some(std::fs::metadata(path)?.ctime()))
+    let md = std::fs::metadata(path)?;
+    let systime = UNIX_EPOCH + Duration::new(md.ctime() as u64, md.ctime_nsec() as u32);
+    Ok(Some(systime))
 }
 
 fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Error> {
@@ -585,7 +587,11 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
             let path = root.join(path);
             let prev_mtime = mtime(&path)?;
             tri!(std::fs::write(&path, data));
-            assert!(prev_mtime.is_none() || prev_mtime < mtime(&path)?);
+            assert!(
+                prev_mtime.is_none() || prev_mtime < mtime(&path)?,
+                "{prev_mtime:?} < {:?}",
+                mtime(&path)
+            );
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
