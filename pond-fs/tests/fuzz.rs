@@ -586,12 +586,13 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
         FuzzOp::Write(path, data) => {
             let path = root.join(path);
             let prev_mtime = mtime(&path)?;
+            let now = SystemTime::now();
             tri!(std::fs::write(&path, data));
-            assert!(
-                prev_mtime.is_none() || prev_mtime < mtime(&path)?,
-                "{prev_mtime:?} < {:?}",
-                mtime(&path)
-            );
+            // (1) file didn't exist before, so prev_mtime is None
+            // (2) previous mtime was bumped after we wrote
+            // (3) the two writes happened in the same ns, so they're equal. make sure they're
+            //     equal to now
+            assert!(prev_mtime.is_none() || prev_mtime < mtime(&path)? || prev_mtime == Some(now));
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
