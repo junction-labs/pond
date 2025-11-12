@@ -233,7 +233,15 @@ fn test_commit(
             .collect();
         after_commit_ctimes.sort();
         after_commit_ctimes.dedup();
-        assert!(after_commit_ctimes.len() <= 1);
+
+        if before_commit
+            .iter()
+            .any(|e| matches!(e, FuzzEntry::File(..)))
+        {
+            assert_eq!(after_commit_ctimes.len(), 1);
+        } else {
+            assert_eq!(after_commit_ctimes.len(), 0);
+        }
 
         if let Some(ctime) = after_commit_ctimes.first() {
             assert!(before_commit_ctimes.iter().all(|e| e <= ctime));
