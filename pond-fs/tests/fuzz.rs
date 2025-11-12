@@ -592,7 +592,14 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
             // (2) previous mtime was bumped after we wrote
             // (3) the two writes happened in the same ns, so they're equal. make sure they're
             //     equal to now
-            assert!(prev_mtime.is_none() || prev_mtime < mtime(&path)? || prev_mtime == Some(now));
+            let mtime = mtime(&path)?;
+            assert!(
+                prev_mtime.is_none() || prev_mtime < mtime || prev_mtime == Some(now),
+                "now: {:?}, {:?} < {:?} failed",
+                now,
+                prev_mtime,
+                mtime,
+            );
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
