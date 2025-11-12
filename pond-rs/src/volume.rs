@@ -2,9 +2,9 @@ use pond::FileAttr;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::OpenOptions;
-use crate::ReadOnlyFile;
 use crate::adapter::VolumeAdapter;
+use crate::file::ReadOnlyFile;
+use crate::file::ReadWriteFile;
 
 #[derive(Clone)]
 pub struct Volume {
@@ -114,13 +114,37 @@ cmds! {
     pub Copy => copy(src: String, dst: String) -> pond::Result<()>,
     pub Rename => rename(src: String, dst: String) -> pond::Result<()>,
     pub Touch => touch(path: String) -> pond::Result<FileAttr>,
-    pub(crate) OpenFd => open(path: String, options: OpenOptions) -> pond::Result<(pond::Fd, FileAttr)>,
+    pub(crate) OpenRoFd => open_read(path: String) -> pond::Result<(pond::Fd, FileAttr)>,
+    pub(crate) OpenRwFd => open_read_write(path: String) -> pond::Result<(pond::Fd, FileAttr)>,
+    pub(crate) ReleaseFd => release(fd: pond::Fd) -> pond::Result<()>,
     pub(crate) ReadAt => read_at(fd: pond::Fd, offset: u64, size: usize) -> pond::Result<bytes::Bytes>,
+    pub(crate) WriteAt => write_at(fd: pond::Fd, offset: u64, buf: bytes::Bytes) -> pond::Result<usize>,
 }
 
 impl Volume {
-    pub async fn open(&self, path: String, options: OpenOptions) -> pond::Result<ReadOnlyFile> {
-        let (fd, attr) = self.open_fd(path, options).await?;
+    /// Open a file for reading only.
+    pub async fn open_read(&self, path: String) -> pond::Result<ReadOnlyFile> {
+        let (fd, attr) = self.open_ro_fd(path).await?;
         Ok(ReadOnlyFile::new(fd, attr, self.clone()))
+    }
+
+    /// Open a file for reading and writing.
+    ///
+    /// If the file is committed, this truncates the file completely, creating a new file.
+    pub async fn open_read_write(&self, path: String) -> pond::Result<ReadWriteFile> {
+        let (fd, attr) = self.open_rw_fd(path).await?;
+        Ok(ReadWriteFile::new(fd, attr, self.clone()))
+    }
+
+    /// Try to send a ReleaseFd through the Cmd channel without blocking.
+    ///
+    /// If the channel is full, return the Fd within the error of the Result.
+    pub(crate) fn try_release_fd(&self, fd: pond::Fd) -> Result<(), pond::Fd> {
+        let (tx, _rx) = oneshot::channel();
+        let cmd = Cmd::ReleaseFd { fd, resp: tx };
+        match self.cmds.try_send(cmd) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(fd),
+        }
     }
 }

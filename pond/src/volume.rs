@@ -350,9 +350,9 @@ impl Volume {
                 //
                 // TODO(dustin): is this right? otherwise we read more than we should for the file?
                 // is the kernel truncating it for us based on the attr?
+                //
+                let read_len = std::cmp::min(range.len, buf.len() as u64);
                 let blob_offset = range.offset + offset;
-                let left = std::cmp::max(0, range.end() - blob_offset);
-                let read_len = std::cmp::min(left, buf.len() as u64);
 
                 let bytes: Vec<Bytes> = self
                     .cache
