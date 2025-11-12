@@ -546,14 +546,20 @@ fn mtime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
     if !std::fs::exists(path)? {
         return Ok(None);
     }
-    std::fs::metadata(path)?.modified().map(Some)
+
+    // open the actual file to bypass kernel cache which may be stale
+    let fh = std::fs::File::open(path)?;
+    fh.metadata()?.modified().map(Some)
 }
 
 fn ctime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
     if !std::fs::exists(path)? {
         return Ok(None);
     }
-    let md = std::fs::metadata(path)?;
+
+    // open the actual file to bypass kernel cache which may be stale
+    let fh = std::fs::File::open(path)?;
+    let md = fh.metadata()?;
     let systime = UNIX_EPOCH + Duration::new(md.ctime() as u64, md.ctime_nsec() as u32);
     Ok(Some(systime))
 }
@@ -588,14 +594,14 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
             let prev_mtime = mtime(&path)?;
             let now = SystemTime::now();
             tri!(std::fs::write(&path, data));
+            let mtime = mtime(&path)?;
             // (1) file didn't exist before, so prev_mtime is None
             // (2) previous mtime was bumped after we wrote
             // (3) the two writes happened in the same ns, so they're equal. make sure they're
             //     equal to now
-            let mtime = mtime(&path)?;
             assert!(
                 prev_mtime.is_none() || prev_mtime < mtime || prev_mtime == Some(now),
-                "now: {:?}, {:?} < {:?} failed",
+                "now: {:?} -- {:?} < {:?} failed",
                 now,
                 prev_mtime,
                 mtime,

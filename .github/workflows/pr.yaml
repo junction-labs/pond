@@ -22,7 +22,7 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - name: run tests
-              run: cargo test
+              run: RUST_BACKTRACE=1 cargo test
               env:
                   ARBTEST_BUDGET_MS: "30000"
 
