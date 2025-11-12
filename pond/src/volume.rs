@@ -112,13 +112,14 @@ impl Volume {
     pub(crate) fn modify(
         &mut self,
         ino: Ino,
+        now: SystemTime,
         location: Option<Location>,
         range: Option<Modify>,
     ) -> Result<()> {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.meta.modify(ino, location, range)?;
+                self.meta.modify(ino, now, location, range)?;
                 Ok(())
             }
         }
@@ -222,7 +223,7 @@ impl Volume {
     }
 
     pub fn truncate(&mut self, ino: Ino, size: u64) -> Result<()> {
-        self.modify(ino, None, Some(Modify::Truncate(size)))
+        self.modify(ino, SystemTime::now(), None, Some(Modify::Truncate(size)))
     }
 }
 
@@ -274,9 +275,12 @@ impl Volume {
                     let (path, file) = self.store.tempfile()?;
                     let staged = Location::Staged { path };
                     // modify metadata next
-                    self.modify(ino, Some(staged), Some(Modify::Set((0, 0).into())))?;
-                    let now = Some(SystemTime::now());
-                    self.setattr(ino, now, now)?;
+                    self.modify(
+                        ino,
+                        SystemTime::now(),
+                        Some(staged),
+                        Some(Modify::Set((0, 0).into())),
+                    )?;
                     // only create the fd once the file is open and metadata is valid
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
                 }
@@ -392,10 +396,12 @@ impl Volume {
                     let kind = e.kind().into();
                     Error::with_source(kind, "failed to write staged file", e)
                 })?;
-                self.modify(fd.ino, None, Some(Modify::Max(offset + n as u64)))?;
-
-                let now = Some(SystemTime::now());
-                self.setattr(fd.ino, now, now)?;
+                self.modify(
+                    fd.ino,
+                    SystemTime::now(),
+                    None,
+                    Some(Modify::Max(offset + n as u64)),
+                )?;
 
                 Ok(n)
             }
@@ -693,12 +699,12 @@ impl<'a> StagedVolume<'a> {
 
     /// Relocate all staged files to dest.
     fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
-        let now = Some(SystemTime::now());
+        let now = SystemTime::now();
         for (ino, byte_range) in ranges {
             self.inner
                 .meta
-                .modify(ino, Some(dest.clone()), Some(Modify::Set(byte_range)))?;
-            self.inner.setattr(ino, now, now)?;
+                .modify(ino, now, Some(dest.clone()), Some(Modify::Set(byte_range)))?;
+            self.inner.setattr(ino, None, Some(now))?;
         }
 
         // deduplicate and clean up all hanging staged Locations
