@@ -353,14 +353,15 @@ impl VolumeMetadata {
             btree_map::Entry::Vacant(slot) => slot,
             btree_map::Entry::Occupied(slot) => unreachable!("BUG: inode reused"),
         };
+        let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
             parent,
             attr: FileAttr {
                 ino,
                 size: 0,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
+                mtime: now,
+                ctime: now,
                 kind: FileType::Directory,
             },
             data: EntryData::Directory,
@@ -527,14 +528,15 @@ impl VolumeMetadata {
         let slot = self.data.entry(ino);
 
         let location_idx = insert_unique(&mut self.locations, location);
+        let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
             parent,
             attr: FileAttr {
                 ino,
                 size: byte_range.len,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
+                mtime: now,
+                ctime: now,
                 kind: FileType::Regular,
             },
             data: EntryData::File {
@@ -699,6 +701,8 @@ impl VolumeMetadata {
     pub(crate) fn modify(
         &mut self,
         ino: Ino,
+        mtime: SystemTime,
+        ctime: Option<SystemTime>,
         location: Option<Location>,
         range: Option<Modify>,
     ) -> crate::Result<()> {
@@ -739,6 +743,10 @@ impl VolumeMetadata {
             None => (),
         }
 
+        entry.attr.mtime = mtime;
+        if let Some(ctime) = ctime {
+            entry.attr.ctime = ctime;
+        }
         Ok(())
     }
 
@@ -1579,6 +1587,8 @@ mod test {
 
         meta.modify(
             ino,
+            SystemTime::now(),
+            None,
             Some(new_location.clone()),
             Some(Modify::Set(new_range)),
         )
@@ -1605,14 +1615,17 @@ mod test {
             )
             .unwrap()
             .ino;
+        let now = SystemTime::now();
 
-        meta.modify(ino, None, Some(Modify::Max(8))).unwrap();
+        meta.modify(ino, now, None, None, Some(Modify::Max(8)))
+            .unwrap();
         let (location, range) = meta.location(ino).unwrap();
         assert!(matches!(location, Location::Staged { .. }));
         assert_eq!(range.len, 8);
 
         // no-op since it's a smaller len
-        meta.modify(ino, None, Some(Modify::Max(3))).unwrap();
+        meta.modify(ino, now, None, None, Some(Modify::Max(3)))
+            .unwrap();
         let attr = meta.getattr(ino).unwrap();
         assert_eq!(attr.size, 8);
         let (_, range_after) = meta.location(ino).unwrap();

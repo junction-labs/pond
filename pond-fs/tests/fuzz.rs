@@ -5,8 +5,9 @@
 use std::{
     collections::BTreeMap,
     io::ErrorKind,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -45,15 +46,22 @@ fn test_empty_volume(expected_dir: &Path, actual_dir: &Path, ops: Vec<FuzzOp>) {
     // apply but ignore errors when trying to commit with the same
     // version twice. they should be no-ops - we know they're different
     // in the reference fs and we don't care.
-    let apply = |dir: &Path, op: &FuzzOp| {
-        let res = apply_op(dir, op);
+    let apply = |dir: &Path, op: &FuzzOp, assert_mtime: bool| {
+        let res = apply_op(dir, op, assert_mtime);
         match (op, res) {
-            (FuzzOp::Commit(_), Err(ErrorKind::AlreadyExists)) => Ok(OpOutput::None),
-            (_, res) => res,
+            (FuzzOp::Commit(_), Err(e)) if e.kind() == ErrorKind::AlreadyExists => {
+                Ok(OpOutput::None)
+            }
+            (_, res) => res.map_err(|e| e.kind()),
         }
     };
-    let reference_res: Vec<_> = ops.iter().map(|op| apply(expected_dir, op)).collect();
-    let test_res: Vec<_> = ops.iter().map(|op| apply(actual_dir, op)).collect();
+    // sometimes the kernel cache holds onto the mtime for too long, so let's skip checking it for
+    // the reference filesystem
+    let reference_res: Vec<_> = ops
+        .iter()
+        .map(|op| apply(expected_dir, op, false))
+        .collect();
+    let test_res: Vec<_> = ops.iter().map(|op| apply(actual_dir, op, true)).collect();
 
     // print our own error history so it's easy to spot when things don't match.
     if reference_res != test_res {
@@ -204,10 +212,46 @@ fn test_commit(
         apply_entry(expected_dir, entry).unwrap();
         apply_entry(mount_dir, entry).unwrap();
     }
+
+    // check the ctimes of the files before we commit, they should be updated after the commit is
+    // done
     let before_commit = read_entries(mount_dir);
+    let before_commit_ctimes: Vec<_> = before_commit
+        .iter()
+        .filter_map(|e| match e {
+            FuzzEntry::File(arb_path, _) => ctime(&mount_dir.join(arb_path)).unwrap(),
+            _ => None,
+        })
+        .collect();
 
     // commit
-    apply_op(mount_dir, &FuzzOp::Commit("v1".to_string())).unwrap();
+    apply_op(mount_dir, &FuzzOp::Commit("v1".to_string()), true).unwrap();
+
+    // compare the ctimes after the commit happens
+    {
+        let mut after_commit_ctimes: Vec<_> = read_entries(mount_dir)
+            .into_iter()
+            .filter_map(|e| match e {
+                FuzzEntry::File(arb_path, _) => ctime(&mount_dir.join(arb_path)).unwrap(),
+                _ => None,
+            })
+            .collect();
+        after_commit_ctimes.sort();
+        after_commit_ctimes.dedup();
+
+        if before_commit
+            .iter()
+            .any(|e| matches!(e, FuzzEntry::File(..)))
+        {
+            assert_eq!(after_commit_ctimes.len(), 1);
+        } else {
+            assert_eq!(after_commit_ctimes.len(), 0);
+        }
+
+        if let Some(ctime) = after_commit_ctimes.first() {
+            assert!(before_commit_ctimes.iter().all(|e| e <= ctime));
+        }
+    }
 
     // write a whole bunch of stuff to the mount, then drop it without
     // committing. we should lose all of this.
@@ -503,7 +547,29 @@ macro_rules! tri {
     };
 }
 
-fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::ErrorKind> {
+fn mtime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
+    if !std::fs::exists(path)? {
+        return Ok(None);
+    }
+
+    std::fs::metadata(path)?.modified().map(Some)
+}
+
+fn ctime(path: &PathBuf) -> Result<Option<SystemTime>, std::io::Error> {
+    if !std::fs::exists(path)? {
+        return Ok(None);
+    }
+
+    let md = std::fs::metadata(path)?;
+    let systime = UNIX_EPOCH + Duration::new(md.ctime() as u64, md.ctime_nsec() as u32);
+    Ok(Some(systime))
+}
+
+fn apply_op(
+    root: impl AsRef<Path>,
+    op: &FuzzOp,
+    assert_mtime: bool,
+) -> Result<OpOutput, std::io::Error> {
     let root = root.as_ref();
 
     match op {
@@ -530,7 +596,21 @@ fn apply_op(root: impl AsRef<Path>, op: &FuzzOp) -> Result<OpOutput, std::io::Er
         }
         FuzzOp::Write(path, data) => {
             let path = root.join(path);
-            tri!(std::fs::write(path, data));
+            let prev_mtime = mtime(&path)?;
+            tri!(std::fs::write(&path, data));
+            if assert_mtime {
+                // (1) file didn't exist before, so prev_mtime is None
+                // (2) previous mtime was bumped after we wrote
+                // (3) the two writes happened in the same ns, so they're equal. make sure they're
+                //     equal to now
+                let mtime = mtime(&path)?;
+                assert!(
+                    prev_mtime.is_none() || prev_mtime < mtime,
+                    "{:?} < {:?}",
+                    prev_mtime,
+                    mtime,
+                );
+            }
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Remove(path) => {
