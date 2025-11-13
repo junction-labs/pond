@@ -701,7 +701,8 @@ impl VolumeMetadata {
     pub(crate) fn modify(
         &mut self,
         ino: Ino,
-        now: SystemTime,
+        mtime: SystemTime,
+        ctime: Option<SystemTime>,
         location: Option<Location>,
         range: Option<Modify>,
     ) -> crate::Result<()> {
@@ -742,7 +743,10 @@ impl VolumeMetadata {
             None => (),
         }
 
-        entry.attr.mtime = now;
+        entry.attr.mtime = mtime;
+        if let Some(ctime) = ctime {
+            entry.attr.ctime = ctime;
+        }
         Ok(())
     }
 
@@ -1584,6 +1588,7 @@ mod test {
         meta.modify(
             ino,
             SystemTime::now(),
+            None,
             Some(new_location.clone()),
             Some(Modify::Set(new_range)),
         )
@@ -1612,13 +1617,15 @@ mod test {
             .ino;
         let now = SystemTime::now();
 
-        meta.modify(ino, now, None, Some(Modify::Max(8))).unwrap();
+        meta.modify(ino, now, None, None, Some(Modify::Max(8)))
+            .unwrap();
         let (location, range) = meta.location(ino).unwrap();
         assert!(matches!(location, Location::Staged { .. }));
         assert_eq!(range.len, 8);
 
         // no-op since it's a smaller len
-        meta.modify(ino, now, None, Some(Modify::Max(3))).unwrap();
+        meta.modify(ino, now, None, None, Some(Modify::Max(3)))
+            .unwrap();
         let attr = meta.getattr(ino).unwrap();
         assert_eq!(attr.size, 8);
         let (_, range_after) = meta.location(ino).unwrap();

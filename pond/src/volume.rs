@@ -112,14 +112,15 @@ impl Volume {
     pub(crate) fn modify(
         &mut self,
         ino: Ino,
-        now: SystemTime,
+        mtime: SystemTime,
+        ctime: Option<SystemTime>,
         location: Option<Location>,
         range: Option<Modify>,
     ) -> Result<()> {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.meta.modify(ino, now, location, range)?;
+                self.meta.modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
         }
@@ -223,7 +224,13 @@ impl Volume {
     }
 
     pub fn truncate(&mut self, ino: Ino, size: u64) -> Result<()> {
-        self.modify(ino, SystemTime::now(), None, Some(Modify::Truncate(size)))
+        self.modify(
+            ino,
+            SystemTime::now(),
+            None,
+            None,
+            Some(Modify::Truncate(size)),
+        )
     }
 }
 
@@ -278,6 +285,7 @@ impl Volume {
                     self.modify(
                         ino,
                         SystemTime::now(),
+                        None,
                         Some(staged),
                         Some(Modify::Set((0, 0).into())),
                     )?;
@@ -399,6 +407,7 @@ impl Volume {
                 self.modify(
                     fd.ino,
                     SystemTime::now(),
+                    None,
                     None,
                     Some(Modify::Max(offset + n as u64)),
                 )?;
@@ -701,10 +710,13 @@ impl<'a> StagedVolume<'a> {
     fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
         let now = SystemTime::now();
         for (ino, byte_range) in ranges {
-            self.inner
-                .meta
-                .modify(ino, now, Some(dest.clone()), Some(Modify::Set(byte_range)))?;
-            self.inner.setattr(ino, None, Some(now))?;
+            self.inner.meta.modify(
+                ino,
+                now,
+                Some(now),
+                Some(dest.clone()),
+                Some(Modify::Set(byte_range)),
+            )?;
         }
 
         // deduplicate and clean up all hanging staged Locations
