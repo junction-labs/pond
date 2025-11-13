@@ -1828,6 +1828,8 @@ dependencies = [
 name = "pond-rs"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
+ "arbtest",
  "bytes",
  "futures",
  "paste",
