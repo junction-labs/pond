@@ -14,4 +14,6 @@ tokio.workspace = true
 pond.workspace = true
 
 [dev-dependencies]
+arbtest.workspace = true
+arbitrary.workspace = true
 tempfile.workspace = true
