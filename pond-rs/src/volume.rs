@@ -76,8 +76,11 @@ macro_rules! cmds {
                     $(#[$id_attr])*
                     $vis async fn [<$variant:snake>](
                         &self,
-                        $($arg_name: $arg_ty),*
+                        $($arg_name: impl Into<$arg_ty>),*
                     ) -> $result_ty {
+                        $(
+                            let $arg_name = $arg_name.into();
+                        )*
                         let (tx, rx) = oneshot::channel();
                         let cmd = Cmd::$variant {
                             $(
