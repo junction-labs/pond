@@ -1,0 +1,19 @@
+[package]
+name = "pond-rs"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+paste.workspace = true
+tokio.workspace = true
+
+pond.workspace = true
+
+[dev-dependencies]
+arbtest.workspace = true
+arbitrary.workspace = true
+tempfile.workspace = true

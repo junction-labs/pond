@@ -74,7 +74,7 @@ enum FileDescriptor {
 pub struct Volume {
     meta: VolumeMetadata,
     cache: ChunkCache,
-    fds: BTreeMap<Fd, FileDescriptor>,
+    fds: BTreeMap<Fd, FileDescriptor>, // rwlock
     store: crate::storage::Storage,
     metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
 }
@@ -347,8 +347,13 @@ impl Volume {
                 // total blob. without knowing the full range we can TRY to prefetch
                 // into the next chunk but we'll only get one at most - that banks
                 // on the object store's API being kind enough to return partial ranges.
+                //
+                // TODO(dustin): is this right? otherwise we read more than we should for the file?
+                // is the kernel truncating it for us based on the attr?
+                //
                 let read_len = std::cmp::min(range.len, buf.len() as u64);
                 let blob_offset = range.offset + offset;
+
                 let bytes: Vec<Bytes> = self
                     .cache
                     .get_at(key.clone(), blob_offset, read_len)
