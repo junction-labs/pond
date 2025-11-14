@@ -17,7 +17,7 @@ impl Volume {
         version: Option<pond::Version>,
         cache_config: pond::CacheConfig,
     ) -> pond::Result<Self> {
-        let volume = pond::Client::new(volume)?
+        let volume = pond::Client::open(volume)?
             .with_cache_config(cache_config)
             .load_volume(&version)
             .await?;
