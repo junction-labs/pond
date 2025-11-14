@@ -30,7 +30,7 @@ fn test_volume_ops(volume_dir: &Path, reference_dir: &Path, ops: Vec<FuzzOp>) {
 
     let runtime = test_runtime();
     let volume = runtime.block_on(async {
-        let mut client = Client::new(volume_dir.to_str().unwrap()).unwrap();
+        let mut client = Client::open(volume_dir.to_str().unwrap()).unwrap();
         let mut base = client.create_volume().await;
         base.commit(Version::from_static("init")).await.unwrap();
         Volume::load(volume_dir.to_str().unwrap(), None, CacheConfig::default())
