@@ -173,6 +173,22 @@ impl Volume {
         Ok(attr)
     }
 
+    pub fn is_staged(&self, ino: Ino) -> Result<bool> {
+        match self.meta.location(ino) {
+            Some((location, _)) => match location {
+                Location::Staged { .. } => Ok(true),
+                Location::Committed { .. } => Ok(false),
+            },
+            None => {
+                let attr = self.getattr(ino)?;
+                match attr.kind {
+                    crate::FileType::Regular => panic!("BUG: regular file doesn't have a location"),
+                    crate::FileType::Directory => Err(ErrorKind::IsADirectory.into()),
+                }
+            }
+        }
+    }
+
     pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr> {
         self.meta.mkdir(parent, name)
     }

@@ -63,7 +63,7 @@ fn parent(path: &str) -> Option<&str> {
 /// Resolve a path to its FileAttr.
 ///
 /// Walks the path components, resolving `FileAttr`s for each component along the way. Returns an
-/// error if the path is invalid (e.g. does not exist, permissions, not an aboslute path, etc.).
+/// error if the path is invalid (e.g. does not exist, permissions, not an absolute path, etc.).
 async fn resolve_fileattr<'a>(
     volume: &'a pond_core::Volume,
     path: &'a str,
@@ -136,6 +136,12 @@ impl VolumeAdapter {
                 _ => Err(e),
             },
         }
+    }
+
+    /// Check if the file is staged.
+    pub(crate) async fn is_staged(&self, path: String) -> pond_core::Result<bool> {
+        let ino = resolve_fileattr(&self.inner, &path).await?.ino;
+        self.inner.is_staged(ino)
     }
 
     /// Iterate over the directory entries within the given directory.
@@ -260,6 +266,23 @@ impl VolumeAdapter {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn create(
+        &mut self,
+        path: String,
+    ) -> pond_core::Result<(pond_core::Fd, FileAttr)> {
+        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+
+        match self.inner.create(parent_ino, name.clone(), true) {
+            Ok((attr, fd)) => Ok((fd, attr.clone())),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) async fn truncate(&mut self, path: String, len: u64) -> pond_core::Result<()> {
+        let ino = resolve_fileattr(&self.inner, &path).await?.ino;
+        self.inner.truncate(ino, len)
     }
 
     /// Attempts to open a file in read-only mode.

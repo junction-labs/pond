@@ -6,112 +6,39 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::Volume;
 
-pub struct ReadOnlyFile {
-    fd: pond_core::Fd,
-    attr: FileAttr,
-    offset: u64,
-    handle: Volume,
-    fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<bytes::Bytes>>>>>,
+/// Options for opening a Pond file. Read access is always set.
+#[derive(Default)]
+pub struct OpenOptions {
+    pub(crate) write: bool,
+    pub(crate) truncate: bool,
+    pub(crate) create: bool,
 }
 
-impl ReadOnlyFile {
-    pub(crate) fn new(fd: pond_core::Fd, attr: FileAttr, handle: Volume) -> Self {
-        Self {
-            fd,
-            attr,
-            offset: 0,
-            handle,
-            fut: None,
-        }
+impl OpenOptions {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Sets the option for write access.
+    pub fn write(mut self, write: bool) -> Self {
+        self.write = write;
+        self
+    }
+
+    /// Sets the option for truncating a previous file.
+    pub fn truncate(mut self, truncate: bool) -> Self {
+        self.truncate = truncate;
+        self
+    }
+
+    /// Sets the option to create a new file, or open it if it already exists.
+    pub fn create(mut self, create: bool) -> Self {
+        self.create = create;
+        self
     }
 }
 
-/// Close the Fd attached to this file.
-impl Drop for ReadOnlyFile {
-    fn drop(&mut self) {
-        // attempt to release the handle synchronously first, and if that fails then fire off an
-        // tokio task that'll do asynchronously.
-        match self.handle.try_release_fd(self.fd) {
-            Ok(()) => (),
-            Err(fd) => {
-                let handle = self.handle.clone();
-                tokio::spawn(async move { handle.release_fd(fd).await });
-            }
-        }
-    }
-}
-
-impl AsyncRead for ReadOnlyFile {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.fut.as_mut() {
-            Some(fut) => match fut.poll_unpin(cx) {
-                std::task::Poll::Ready(Ok(bytes)) => {
-                    let n = bytes.len();
-                    buf.put_slice(&bytes);
-                    self.offset += n as u64;
-                    self.fut = None;
-
-                    std::task::Poll::Ready(Ok(()))
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    std::task::Poll::Ready(Err(std::io::Error::other(e)))
-                }
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            },
-            None => {
-                let fut = {
-                    let fd = self.fd;
-                    let offset = self.offset;
-                    let size = std::cmp::min((self.attr.size - offset) as usize, buf.remaining());
-                    let handle = self.handle.clone();
-                    async move { handle.read_at(fd, offset, size).await }
-                };
-                self.fut = Some(Box::pin(fut));
-
-                // we just created the fut, let them know they can poll it again and the next time
-                // we'll attach the context to the fut
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-        }
-    }
-}
-
-impl AsyncSeek for ReadOnlyFile {
-    fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
-        let new_offset = match position {
-            SeekFrom::Start(delta) => Some(delta),
-            SeekFrom::Current(delta) => self.offset.checked_add_signed(delta),
-            SeekFrom::End(delta) => self.attr.size.checked_add_signed(delta),
-        };
-
-        let Some(new_offset) = new_offset else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid seek resulted in an offset overflow",
-            ));
-        };
-
-        if new_offset != self.offset {
-            self.fut = None;
-            self.offset = new_offset;
-        }
-        Ok(())
-    }
-
-    fn poll_complete(
-        self: Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<u64>> {
-        std::task::Poll::Ready(Ok(self.offset))
-    }
-}
-
-pub struct ReadWriteFile {
+pub struct File {
     fd: pond_core::Fd,
     attr: FileAttr,
     offset: u64,
@@ -120,7 +47,7 @@ pub struct ReadWriteFile {
     write_fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<usize>>>>>,
 }
 
-impl ReadWriteFile {
+impl File {
     pub(crate) fn new(fd: pond_core::Fd, attr: FileAttr, handle: Volume) -> Self {
         Self {
             fd,
@@ -134,7 +61,7 @@ impl ReadWriteFile {
 }
 
 /// Close the Fd attached to this file.
-impl Drop for ReadWriteFile {
+impl Drop for File {
     fn drop(&mut self) {
         // attempt to release the handle synchronously first, and if that fails then fire off an
         // tokio task that'll do asynchronously.
@@ -148,7 +75,7 @@ impl Drop for ReadWriteFile {
     }
 }
 
-impl AsyncRead for ReadWriteFile {
+impl AsyncRead for File {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -188,7 +115,7 @@ impl AsyncRead for ReadWriteFile {
     }
 }
 
-impl AsyncSeek for ReadWriteFile {
+impl AsyncSeek for File {
     fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
         let new_offset = match position {
             SeekFrom::Start(delta) => Some(delta),
@@ -219,7 +146,7 @@ impl AsyncSeek for ReadWriteFile {
     }
 }
 
-impl AsyncWrite for ReadWriteFile {
+impl AsyncWrite for File {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -267,4 +194,10 @@ impl AsyncWrite for ReadWriteFile {
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
+}
+
+#[cfg(test)]
+mod test {
+    // write a test where you open a readonly fd and try to write to it.
+    // is there a way to tell the user that they're going to open a staged file?
 }

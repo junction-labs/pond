@@ -3,8 +3,8 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::adapter::VolumeAdapter;
-use crate::file::ReadOnlyFile;
-use crate::file::ReadWriteFile;
+use crate::file::File;
+use crate::file::OpenOptions;
 
 #[derive(Clone)]
 pub struct Volume {
@@ -107,6 +107,9 @@ cmds! {
     /// Checks if the provided path exists. Returns `Ok(true)` if the path points to an existing
     /// entity.
     pub Exists => exists(path: String) -> pond_core::Result<bool>,
+    /// Checks if the provided path exists and is staged. Returns `Ok(true)` if the path points
+    /// to an existing entity and that entity is staged.
+    pub IsStaged => is_staged(path: String) -> pond_core::Result<bool>,
     /// Reads the contents of a directory. Returns a snapshot (vector of entries) of the directory contents.
     ///
     /// Takes an optional offset and length for paginated reads, since the contents of the
@@ -121,7 +124,7 @@ cmds! {
     pub CreateDirAll => create_dir_all(path: String) -> pond_core::Result<FileAttr>,
     /// Removes an empty directory.
     ///
-    /// To remove an non-empty directory (and all of its contents), use [`remove_dir_all`].
+    /// To remove an non-empty directory (and all of its contents), use [`Volume::remove_dir_all`].
     pub RemoveDir => remove_dir(path: String) -> pond_core::Result<()>,
     /// Removes the directory at this path, after removing all its contents.
     pub RemoveDirAll => remove_dir_all(path: String) -> pond_core::Result<()>,
@@ -136,6 +139,8 @@ cmds! {
     /// Creates an empty file if it doesn't exist, otherwise it updates the ctime of the existing
     /// file.
     pub Touch => touch(path: String) -> pond_core::Result<FileAttr>,
+    pub(crate) Create => create(path: String) -> pond_core::Result<(pond_core::Fd, FileAttr)>,
+    pub(crate) Truncate => truncate(path: String, len: u64) -> pond_core::Result<()>,
     pub(crate) OpenRoFd => open_read(path: String) -> pond_core::Result<(pond_core::Fd, FileAttr)>,
     pub(crate) OpenRwFd => open_read_write(path: String) -> pond_core::Result<(pond_core::Fd, FileAttr)>,
     pub(crate) ReleaseFd => release(fd: pond_core::Fd) -> pond_core::Result<()>,
@@ -144,18 +149,48 @@ cmds! {
 }
 
 impl Volume {
+    pub async fn open(&self, path: String, option: OpenOptions) -> pond_core::Result<File> {
+        let (fd, attr) = if option.write {
+            if option.create {
+                self.create(path).await?
+            } else {
+                let staged = self.is_staged(path.clone()).await?;
+                if !staged && !option.truncate {
+                    return Err(pond_core::Error::new(
+                        pond_core::ErrorKind::Unsupported,
+                        "Committed files cannot be open for writing without truncating.",
+                    ));
+                } else if staged && option.truncate {
+                    self.truncate(path.clone(), 0u64).await?;
+                }
+                // !staged && option.truncate is done by default in the lower level volume. no need
+                // to explicitly call truncate.
+
+                self.open_rw_fd(path).await?
+            }
+        } else {
+            self.open_ro_fd(path).await?
+        };
+
+        Ok(File::new(fd, attr, self.clone()))
+    }
+
     /// Opens a file for reading.
-    pub async fn open_read(&self, path: String) -> pond_core::Result<ReadOnlyFile> {
-        let (fd, attr) = self.open_ro_fd(path).await?;
-        Ok(ReadOnlyFile::new(fd, attr, self.clone()))
+    ///
+    /// If the file is committed, the file is truncated. If the file is staged, there's no
+    /// truncating. For more granular options, use [`Volume::open`] which takes an [`OpenOptions`].
+    pub async fn open_read(&self, path: String) -> pond_core::Result<File> {
+        self.open(path, OpenOptions::new().write(false)).await
     }
 
     /// Opens a file for reading and writing.
     ///
-    /// If the file is committed, this truncates the file completely, creating a new file.
-    pub async fn open_read_write(&self, path: String) -> pond_core::Result<ReadWriteFile> {
-        let (fd, attr) = self.open_rw_fd(path).await?;
-        Ok(ReadWriteFile::new(fd, attr, self.clone()))
+    /// If the file is committed, the file is truncated. If the file is staged, there's no
+    /// truncating. For more granular options, use [`Volume::open`] which takes an [`OpenOptions`].
+    pub async fn open_read_write(&self, path: String) -> pond_core::Result<File> {
+        let committed = !self.is_staged(path.clone()).await?;
+        self.open(path, OpenOptions::new().write(true).truncate(committed))
+            .await
     }
 
     /// Try to send a ReleaseFd through the Cmd channel without blocking.
