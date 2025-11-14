@@ -71,6 +71,16 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
             .await
             .map(|_| OpOutput::None)
             .map_err(pond_err),
+        FuzzOp::CreateDirAll(path) => volume
+            .create_dir_all(path.for_volume())
+            .await
+            .map(OpOutput::Metadata)
+            .map_err(pond_err),
+        FuzzOp::RemoveDirAll(path) => volume
+            .remove_dir_all(path.for_volume())
+            .await
+            .map(|_| OpOutput::None)
+            .map_err(pond_err),
         FuzzOp::RemoveFile(path) => volume
             .remove_file(path.for_volume())
             .await
@@ -128,6 +138,16 @@ fn apply_fs(root: &Path, op: &FuzzOp) -> Result<OpOutput, std::io::ErrorKind> {
                 .map_err(|e| e.kind())
         }
         FuzzOp::RemoveDir(path) => std::fs::remove_dir(root.join(path))
+            .map(|_| OpOutput::None)
+            .map_err(|e| e.kind()),
+        FuzzOp::CreateDirAll(path) => {
+            let path = root.join(path);
+            std::fs::create_dir_all(&path).map_err(|e| e.kind())?;
+            fileattr(&path)
+                .map(OpOutput::Metadata)
+                .map_err(|e| e.kind())
+        }
+        FuzzOp::RemoveDirAll(path) => std::fs::remove_dir_all(root.join(path))
             .map(|_| OpOutput::None)
             .map_err(|e| e.kind()),
         FuzzOp::RemoveFile(path) => {
@@ -238,7 +258,9 @@ impl<'a> Arbitrary<'a> for ArbPath {
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzOp {
     CreateDir(ArbPath),
+    CreateDirAll(ArbPath),
     RemoveDir(ArbPath),
+    RemoveDirAll(ArbPath),
     RemoveFile(ArbPath),
     Write(ArbPath, String),
     Read(ArbPath),
@@ -249,7 +271,9 @@ impl std::fmt::Display for FuzzOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FuzzOp::CreateDir(path) => write!(f, "mkdir {path}"),
+            FuzzOp::CreateDirAll(path) => write!(f, "mkdir_all {path}"),
             FuzzOp::RemoveDir(path) => write!(f, "rmdir {path}"),
+            FuzzOp::RemoveDirAll(path) => write!(f, "rmdir_all {path}"),
             FuzzOp::RemoveFile(path) => write!(f, "rmfile {path}"),
             FuzzOp::Write(path, data) => write!(f, "write {path} ({})", data.len()),
             FuzzOp::Read(path) => write!(f, "read {path}"),
