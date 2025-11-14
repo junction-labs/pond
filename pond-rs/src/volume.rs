@@ -107,7 +107,7 @@ cmds! {
     /// Check if the given path exists.
     pub Exists => exists(path: String) -> pond::Result<bool>,
     /// ReadDir
-    pub ReadDir => read_dir(path: String) -> pond::Result<()>,
+    pub ReadDir => read_dir(path: String, offset: Option<String>, len: usize) -> pond::Result<Vec<crate::DirEntry>>,
     /// CreateDir
     pub CreateDir => create_dir(path: String) -> pond::Result<FileAttr>,
     pub CreateDirAll => create_dir_all(path: String) -> pond::Result<FileAttr>,
