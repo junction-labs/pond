@@ -1,10 +1,10 @@
 use std::{
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     str::FromStr,
     time::SystemTime,
 };
 
-use pond::{ErrorKind, FileAttr, Ino, Version};
+use pond::{ErrorKind, FileAttr, FileType, Ino, Version};
 
 /// Adapter for pond::Volume that allows it to operate on paths, rather than Ino and names.
 pub(crate) struct VolumeAdapter {
@@ -14,6 +14,39 @@ pub(crate) struct VolumeAdapter {
 impl VolumeAdapter {
     pub(crate) fn new(volume: pond::Volume) -> Self {
         Self { inner: volume }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirEntry {
+    path: PathBuf,
+    file_name: String,
+    attr: FileAttr,
+}
+
+impl DirEntry {
+    pub fn new(path: PathBuf, file_name: String, attr: FileAttr) -> Self {
+        Self {
+            path,
+            file_name,
+            attr,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    pub fn file_type(&self) -> FileType {
+        self.attr.kind
+    }
+
+    pub fn attr(&self) -> &FileAttr {
+        &self.attr
     }
 }
 
@@ -108,12 +141,35 @@ impl VolumeAdapter {
     /// Iterate over the directory entries within the given directory.
     ///
     /// The return value holds a read-lock on the volume.
-    pub(crate) async fn read_dir(&self, path: String) -> pond::Result<()> {
+    pub(crate) async fn read_dir(
+        &self,
+        path: String,
+        offset: Option<String>,
+        len: usize,
+    ) -> pond::Result<Vec<crate::DirEntry>> {
         let attr = resolve_fileattr(&self.inner, &path).await?;
-        match attr.kind {
-            pond::FileType::Regular => Err(pond::ErrorKind::NotADirectory.into()),
-            pond::FileType::Directory => todo!(),
+        if attr.kind != pond::FileType::Directory {
+            return Err(pond::ErrorKind::NotADirectory.into());
         }
+
+        let parent = Path::new(&path);
+        let entries = self
+            .inner
+            .readdir(attr.ino)?
+            .filter(|entry| entry.attr().ino.is_regular())
+            .skip_while(|entry| match &offset {
+                Some(offset) => *entry.name() <= **offset,
+                None => false,
+            })
+            .take(len)
+            .map(|entry| crate::DirEntry {
+                path: parent.join(entry.name()),
+                file_name: entry.name().to_string(),
+                attr: entry.attr().clone(),
+            })
+            .collect();
+
+        Ok(entries)
     }
 
     /// Create a directory in the volume.

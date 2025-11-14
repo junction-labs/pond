@@ -8,7 +8,7 @@ use std::{
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
 use pond::{Client, Error, ErrorKind, FileAttr, FileType, Ino, Version};
-use pond_rs::{CacheConfig, Volume};
+use pond_rs::{CacheConfig, DirEntry, Volume};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
@@ -125,6 +125,23 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
             .await
             .map(OpOutput::Metadata)
             .map_err(pond_err),
+        FuzzOp::ReadDir(path) => {
+            let mut entries = Vec::new();
+            let mut offset = None;
+            loop {
+                let tmp = volume
+                    .read_dir(path.for_volume(), offset, 3_usize)
+                    .await
+                    .map_err(pond_err)?;
+
+                let Some(e) = tmp.last() else {
+                    break;
+                };
+                offset = Some(e.file_name().to_string());
+                entries.extend(tmp);
+            }
+            Ok(OpOutput::ReadDir(entries))
+        }
     }
 }
 
@@ -179,6 +196,15 @@ fn apply_fs(root: &Path, op: &FuzzOp) -> Result<OpOutput, std::io::ErrorKind> {
         FuzzOp::Metadata(path) => fileattr(&root.join(path))
             .map(OpOutput::Metadata)
             .map_err(|e| e.kind()),
+        FuzzOp::ReadDir(path) => {
+            let mut entries = std::fs::read_dir(root.join(path))
+                .map_err(|e| e.kind())?
+                .map(|entry| entry.map_err(|e| e.kind()))
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort_by_key(|a| a.file_name());
+            let entries = entries.into_iter().map(pond_direntry).collect();
+            Ok(OpOutput::ReadDir(entries))
+        }
     }
 }
 
@@ -265,19 +291,21 @@ enum FuzzOp {
     Write(ArbPath, String),
     Read(ArbPath),
     Metadata(ArbPath),
+    ReadDir(ArbPath),
 }
 
 impl std::fmt::Display for FuzzOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FuzzOp::CreateDir(path) => write!(f, "mkdir {path}"),
+            FuzzOp::CreateDir(path) => write!(f, "mkdir     {path}"),
             FuzzOp::CreateDirAll(path) => write!(f, "mkdir_all {path}"),
-            FuzzOp::RemoveDir(path) => write!(f, "rmdir {path}"),
+            FuzzOp::RemoveDir(path) => write!(f, "rmdir     {path}"),
             FuzzOp::RemoveDirAll(path) => write!(f, "rmdir_all {path}"),
-            FuzzOp::RemoveFile(path) => write!(f, "rmfile {path}"),
-            FuzzOp::Write(path, data) => write!(f, "write {path} ({})", data.len()),
-            FuzzOp::Read(path) => write!(f, "read {path}"),
-            FuzzOp::Metadata(path) => write!(f, "metadata {path}"),
+            FuzzOp::RemoveFile(path) => write!(f, "rmfile    {path}"),
+            FuzzOp::Write(path, data) => write!(f, "write     {path} ({})", data.len()),
+            FuzzOp::Read(path) => write!(f, "read      {path}"),
+            FuzzOp::Metadata(path) => write!(f, "metadata  {path}"),
+            FuzzOp::ReadDir(path) => write!(f, "readdir   {path}"),
         }
     }
 }
@@ -288,6 +316,7 @@ enum OpOutput {
     Read(String),
     Metadata(FileAttr),
     Write(usize),
+    ReadDir(Vec<DirEntry>),
 }
 
 impl PartialEq for OpOutput {
@@ -295,15 +324,16 @@ impl PartialEq for OpOutput {
         match (self, other) {
             (Self::None, Self::None) => true,
             (Self::Read(a), Self::Read(b)) => a == b,
-            (Self::Metadata(a), Self::Metadata(b)) => {
-                if a.kind == FileType::Regular {
-                    a.size == b.size && a.kind == b.kind
-                } else {
-                    // pond doesn't set a size for directories, so ignore it
-                    a.kind == b.kind
-                }
-            }
+            (Self::Metadata(a), Self::Metadata(b)) => fileattr_eq(a, b),
             (Self::Write(a), Self::Write(b)) => a == b,
+            (Self::ReadDir(a), Self::ReadDir(b)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b.iter()).all(|(lhs, rhs)| {
+                        // filename should be the same, but full path is different because it'll be
+                        // comparing an absolute pond path to the regular fs path
+                        lhs.file_name() == rhs.file_name() && fileattr_eq(lhs.attr(), rhs.attr())
+                    })
+            }
             _ => false,
         }
     }
@@ -311,6 +341,36 @@ impl PartialEq for OpOutput {
 
 /// No-op, PartialEq is all we need.
 impl Eq for OpOutput {}
+
+/// Compare two FileAttrs, only looking at FileType and file size (iif it is not a directory).
+fn fileattr_eq(a: &FileAttr, b: &FileAttr) -> bool {
+    if a.kind == FileType::Regular {
+        a.size == b.size && a.kind == b.kind
+    } else {
+        // pond doesn't set a size for directories, so ignore it
+        a.kind == b.kind
+    }
+}
+
+fn pond_direntry(entry: std::fs::DirEntry) -> DirEntry {
+    let file_name = entry.file_name().into_string().unwrap();
+    let meta = entry.metadata().unwrap();
+    DirEntry::new(
+        entry.path(),
+        file_name,
+        FileAttr {
+            ino: Ino::None,
+            size: meta.len(),
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+            kind: if meta.is_file() {
+                FileType::Regular
+            } else {
+                FileType::Directory
+            },
+        },
+    )
+}
 
 fn reset_dir(path: &Path) {
     let _ = std::fs::remove_dir_all(path);
