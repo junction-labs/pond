@@ -347,7 +347,10 @@ impl Volume {
                 // total blob. without knowing the full range we can TRY to prefetch
                 // into the next chunk but we'll only get one at most - that banks
                 // on the object store's API being kind enough to return partial ranges.
-                let read_len = std::cmp::min(range.len, buf.len() as u64);
+                let read_len = std::cmp::min(range.len.saturating_sub(offset), buf.len() as u64);
+                if read_len == 0 {
+                    return Ok(0);
+                }
                 let blob_offset = range.offset + offset;
                 let bytes: Vec<Bytes> = self
                     .cache
@@ -798,9 +801,9 @@ fn should_retry(e: &object_store::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::Client;
 
-    use super::*;
     #[test]
     fn test_copy_into() {
         // buf.len() = sum(bytes.len())
@@ -848,6 +851,55 @@ mod tests {
         let n = volume.read_at(fd, 0, &mut buf).await.unwrap();
         assert_eq!(n, contents.len());
         assert_eq!(buf, contents.as_bytes());
+    }
+
+    #[test]
+    fn read_at() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let volume_path = tempdir.path().join("store");
+        std::fs::create_dir_all(&volume_path).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        // create a volume with three files, all of which are 5 bytes long.
+        let (mut volume, inos) = runtime.block_on(async {
+            let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
+            let mut volume = client.create_volume().await;
+
+            let mut create = async |name, bs| {
+                let (attr, fd) = volume
+                    .create(Ino::Root, std::primitive::str::to_string(name), true)
+                    .unwrap();
+                let ino = attr.ino;
+                volume.write_at(fd, 0, bs).await.unwrap();
+                ino
+            };
+
+            let a = create("a", b"aaaaa").await;
+            let b = create("b", b"bbbbb").await;
+            let c = create("c", b"ccccc").await;
+            volume.commit(Version::from_static("v1")).await.unwrap();
+
+            (volume, [a, b, c])
+        });
+
+        // generate a random set of reads from all three files. all of the reads
+        // are at most 16 bytes, and will have a random offset in 0..10. this should
+        // generate a decent mix of in-bounds nad out-of-bounds reads
+        arbtest::arbtest(|u| {
+            let ino = u.choose(&inos)?;
+            let offset = u.int_in_range(0..=10)?;
+            let mut buf = [0u8; 16];
+
+            runtime.block_on(async {
+                let fd = volume.open_read(*ino).await.unwrap();
+                volume.read_at(fd, offset, &mut buf).await.unwrap();
+            });
+
+            Ok(())
+        });
     }
 
     #[tokio::test]
