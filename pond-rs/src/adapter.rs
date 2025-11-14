@@ -1,4 +1,8 @@
-use std::{path::Path, str::FromStr, time::SystemTime};
+use std::{
+    path::{Component, Path},
+    str::FromStr,
+    time::SystemTime,
+};
 
 use pond::{ErrorKind, FileAttr, Ino, Version};
 
@@ -26,7 +30,7 @@ fn parent(path: &str) -> Option<&str> {
 /// Resolve a path to its FileAttr.
 ///
 /// Walks the path components, resolving `FileAttr`s for each component along the way. Returns an
-/// error if the path is invalid (e.g. does not exist, permissions, etc.).
+/// error if the path is invalid (e.g. does not exist, permissions, not an aboslute path, etc.).
 async fn resolve_fileattr<'a>(
     volume: &'a pond::Volume,
     path: &'a str,
@@ -36,8 +40,8 @@ async fn resolve_fileattr<'a>(
     let mut attr = volume.getattr(Ino::Root)?;
     for component in path.components() {
         match component {
-            std::path::Component::RootDir => continue,
-            std::path::Component::Normal(os_str) => {
+            Component::RootDir => continue,
+            Component::Normal(os_str) => {
                 let name = from_os_str(os_str)?;
                 attr = volume
                     .lookup(attr.ino, name)?
@@ -118,9 +122,47 @@ impl VolumeAdapter {
         self.inner.mkdir(parent_ino, name).cloned()
     }
 
-    /// Create a directory in the volume.
-    pub(crate) async fn create_dir_all(&mut self, _path: String) -> pond::Result<FileAttr> {
-        todo!()
+    pub(crate) async fn create_dir_all(&mut self, path: String) -> pond::Result<FileAttr> {
+        let path = Path::new(&path);
+
+        let mut ino = self.inner.getattr(pond::Ino::Root)?.ino;
+        let mut components = path.components().peekable();
+        while let Some(component) = components.next() {
+            match component {
+                Component::RootDir => continue,
+                Component::Normal(os_str) => {
+                    let name = from_os_str(os_str)?;
+                    match self.inner.lookup(ino, name)? {
+                        Some(f) => match f.kind {
+                            pond::FileType::Regular => {
+                                let kind = match components.peek() {
+                                    // if this path component is the last component, we return
+                                    // AlreadyExists even if it's the wrong FileType.
+                                    Some(_) => pond::ErrorKind::NotADirectory,
+                                    // otherwise, we say that it's not a directory (and this path is
+                                    // actually invalid because the middle of it contains a file).
+                                    None => pond::ErrorKind::AlreadyExists,
+                                };
+                                return Err(kind.into());
+                            }
+                            pond::FileType::Directory => ino = f.ino,
+                        },
+                        None => {
+                            let created = self.inner.mkdir(ino, name.to_string())?;
+                            ino = created.ino;
+                        }
+                    }
+                }
+                _ => {
+                    return Err(pond::Error::new(
+                        pond::ErrorKind::Unsupported,
+                        "Only absolute paths are supported",
+                    ));
+                }
+            }
+        }
+
+        Ok(self.inner.getattr(ino)?.clone())
     }
 
     /// Remove a directory from the volume.
@@ -129,8 +171,37 @@ impl VolumeAdapter {
         self.inner.rmdir(parent_ino, &name)
     }
 
-    pub(crate) async fn remove_dir_all(&mut self, _path: String) -> pond::Result<()> {
-        todo!()
+    pub(crate) async fn remove_dir_all(&mut self, path: String) -> pond::Result<()> {
+        let attr = resolve_fileattr(&self.inner, &path).await?;
+        if attr.kind != pond::FileType::Directory {
+            return Err(pond::ErrorKind::NotADirectory.into());
+        }
+
+        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+        self.remove_dir_contents(attr.ino)?;
+        self.inner.rmdir(parent_ino, &name)
+    }
+
+    fn remove_dir_contents(&mut self, ino: Ino) -> pond::Result<()> {
+        let entries: Vec<_> = self
+            .inner
+            .readdir(ino)?
+            .map(|e| (e.name().to_string(), e.attr().clone()))
+            .collect();
+
+        for (name, attr) in entries {
+            match attr.kind {
+                pond::FileType::Directory => {
+                    self.remove_dir_contents(attr.ino)?;
+                    self.inner.rmdir(ino, &name)?;
+                }
+                pond::FileType::Regular => {
+                    self.inner.delete(ino, &name)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Attempts to open a file in read-only mode.
