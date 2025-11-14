@@ -98,24 +98,43 @@ macro_rules! cmds {
 }
 
 cmds! {
-    /// Get the version of the current Volume.
+    /// Gets the version of the currently loaded Volume.
     pub Version => version() -> pond::Version,
-    /// Commit and persist all currently staged changes with the provided version label.
+    /// Commits and persists staged changes with the provided version label.
     pub Commit  => commit(version: String) -> Result<(), pond::Error>,
-    /// Get the FileAttr for the directory or file at the given path.
+    /// Queries metadata about the underlying the directory or file.
     pub Metadata => metadata(path: String) -> pond::Result<FileAttr>,
-    /// Check if the given path exists.
+    /// Checks if the provided path exists. Returns `Ok(true)` if the path points to an existing
+    /// entity.
     pub Exists => exists(path: String) -> pond::Result<bool>,
-    /// ReadDir
+    /// Reads the contents of a directory. Returns a snapshot (vector of entries) of the directory contents.
+    ///
+    /// Takes an optional offset and length for paginated reads, since the contents of the
+    /// directory can be large. The offset is the filename of the last file you received from
+    /// this function.
     pub ReadDir => read_dir(path: String, offset: Option<String>, len: usize) -> pond::Result<Vec<crate::DirEntry>>,
-    /// CreateDir
+    /// Creates a new, empty directory at the provided path.
     pub CreateDir => create_dir(path: String) -> pond::Result<FileAttr>,
+    /// Recursively create a directory and all of its parent components if they are missing.
+    ///
+    /// This operation is not atomic. On error, any parent components created will remain.
     pub CreateDirAll => create_dir_all(path: String) -> pond::Result<FileAttr>,
+    /// Removes an empty directory.
+    ///
+    /// To remove an non-empty directory (and all of its contents), use [`remove_dir_all`].
     pub RemoveDir => remove_dir(path: String) -> pond::Result<()>,
+    /// Removes the directory at this path, after removing all its contents.
     pub RemoveDirAll => remove_dir_all(path: String) -> pond::Result<()>,
+    /// Removes a file.
     pub RemoveFile => remove_file(path: String) -> pond::Result<()>,
     pub Copy => copy(src: String, dst: String) -> pond::Result<()>,
+    /// Renames a file or directory to a new name. For files, this will replace the original file if
+    /// `dst` already exists. For directories, `dst` must not exist or be an empty directory.
+    ///
+    /// This renames within the Volume, it does not cross Volume boundaries.
     pub Rename => rename(src: String, dst: String) -> pond::Result<()>,
+    /// Creates an empty file if it doesn't exist, otherwise it updates the ctime of the existing
+    /// file.
     pub Touch => touch(path: String) -> pond::Result<FileAttr>,
     pub(crate) OpenRoFd => open_read(path: String) -> pond::Result<(pond::Fd, FileAttr)>,
     pub(crate) OpenRwFd => open_read_write(path: String) -> pond::Result<(pond::Fd, FileAttr)>,
@@ -125,13 +144,13 @@ cmds! {
 }
 
 impl Volume {
-    /// Open a file for reading only.
+    /// Opens a file for reading.
     pub async fn open_read(&self, path: String) -> pond::Result<ReadOnlyFile> {
         let (fd, attr) = self.open_ro_fd(path).await?;
         Ok(ReadOnlyFile::new(fd, attr, self.clone()))
     }
 
-    /// Open a file for reading and writing.
+    /// Opens a file for reading and writing.
     ///
     /// If the file is committed, this truncates the file completely, creating a new file.
     pub async fn open_read_write(&self, path: String) -> pond::Result<ReadWriteFile> {
