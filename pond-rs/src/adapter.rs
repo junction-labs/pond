@@ -140,7 +140,9 @@ impl VolumeAdapter {
 
     /// Iterate over the directory entries within the given directory.
     ///
-    /// The return value holds a read-lock on the volume.
+    /// Takes an offset and length to do paginated reads, since the contents of the directory may be
+    /// large. Pass the last filename of the last file you received from this function as the
+    /// offset to resume where the last call left off.
     pub(crate) async fn read_dir(
         &self,
         path: String,
@@ -312,8 +314,8 @@ impl VolumeAdapter {
     }
 
     pub(crate) async fn copy(&mut self, _from: String, _to: String) -> pond::Result<()> {
-        todo!(
-            "do something smart for committed (identical Location) and do something dumb for staged (eager copy)"
+        unimplemented!(
+            "do something smart for committed (identical Location)? and do something dumb for staged (eager copy)?"
         )
     }
 
