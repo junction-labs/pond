@@ -1779,6 +1779,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "pond"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "arbtest",
+ "bytes",
+ "futures",
+ "paste",
+ "pond-core",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pond-core"
 version = "0.1.0"
 dependencies = [
@@ -1822,20 +1836,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
-]
-
-[[package]]
-name = "pond-rs"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "arbtest",
- "bytes",
- "futures",
- "paste",
- "pond-core",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

@@ -3,9 +3,9 @@
 resolver = "2"
 
 members = [
+    "pond",
     "pond-core",
     "pond-fs",
-    "pond-rs",
     "xtask",
 ]
 

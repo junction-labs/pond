@@ -1,5 +1,5 @@
 [package]
-name = "pond-rs"
+name = "pond"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
