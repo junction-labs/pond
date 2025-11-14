@@ -415,7 +415,6 @@ impl Volume {
                     None,
                     Some(Modify::Max(offset + n as u64)),
                 )?;
-
                 Ok(n)
             }
             // no other fds are writable

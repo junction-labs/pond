@@ -11,7 +11,7 @@ futures.workspace = true
 paste.workspace = true
 tokio.workspace = true
 
-pond.workspace = true
+pond-core.workspace = true
 
 [dev-dependencies]
 arbtest.workspace = true

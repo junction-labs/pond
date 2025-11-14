@@ -4,5 +4,5 @@ mod volume;
 
 pub use adapter::DirEntry;
 pub use file::{ReadOnlyFile, ReadWriteFile};
-pub use pond::CacheConfig;
+pub use pond_core::CacheConfig;
 pub use volume::Volume;

@@ -12,7 +12,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use pond::{Client, Version, Volume};
+use pond_core::{Client, Version, Volume};
 
 // TODO: try cargo-fuzz. arbtest is great and simple, but doesn't help us save
 // known-bad seeds or anything like that.
@@ -139,7 +139,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
         .block_on(async {
             let mut volume = client.create_volume().await;
             volume.pack(expected_dir, version).await?;
-            Ok::<_, pond::Error>(())
+            Ok::<_, pond_core::Error>(())
         })
         .unwrap();
 

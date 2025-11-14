@@ -1,21 +1,21 @@
 use std::{io::SeekFrom, pin::Pin};
 
 use futures::FutureExt;
-use pond::FileAttr;
+use pond_core::FileAttr;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::Volume;
 
 pub struct ReadOnlyFile {
-    fd: pond::Fd,
+    fd: pond_core::Fd,
     attr: FileAttr,
     offset: u64,
     handle: Volume,
-    fut: Option<Pin<Box<dyn Future<Output = pond::Result<bytes::Bytes>>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<bytes::Bytes>>>>>,
 }
 
 impl ReadOnlyFile {
-    pub(crate) fn new(fd: pond::Fd, attr: FileAttr, handle: Volume) -> Self {
+    pub(crate) fn new(fd: pond_core::Fd, attr: FileAttr, handle: Volume) -> Self {
         Self {
             fd,
             attr,
@@ -112,16 +112,16 @@ impl AsyncSeek for ReadOnlyFile {
 }
 
 pub struct ReadWriteFile {
-    fd: pond::Fd,
+    fd: pond_core::Fd,
     attr: FileAttr,
     offset: u64,
     handle: Volume,
-    read_fut: Option<Pin<Box<dyn Future<Output = pond::Result<bytes::Bytes>>>>>,
-    write_fut: Option<Pin<Box<dyn Future<Output = pond::Result<usize>>>>>,
+    read_fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<bytes::Bytes>>>>>,
+    write_fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<usize>>>>>,
 }
 
 impl ReadWriteFile {
-    pub(crate) fn new(fd: pond::Fd, attr: FileAttr, handle: Volume) -> Self {
+    pub(crate) fn new(fd: pond_core::Fd, attr: FileAttr, handle: Volume) -> Self {
         Self {
             fd,
             attr,

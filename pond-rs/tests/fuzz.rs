@@ -7,7 +7,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use pond::{Client, Error, ErrorKind, FileAttr, FileType, Ino, Version};
+use pond_core::{Client, Error, ErrorKind, FileAttr, FileType, Ino, Version};
 use pond_rs::{CacheConfig, DirEntry, Volume};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
