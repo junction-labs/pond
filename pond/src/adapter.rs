@@ -1,3 +1,4 @@
+use crate::Path as PondPath;
 use std::{
     path::{Component, Path, PathBuf},
     str::FromStr,
@@ -5,6 +6,38 @@ use std::{
 };
 
 use pond_core::{ErrorKind, FileAttr, FileType, Ino, Version};
+
+/// Options for opening a Pond file. Read access is always set.
+#[derive(Default)]
+pub struct OpenOptions {
+    pub(crate) write: bool,
+    pub(crate) truncate: bool,
+    pub(crate) create: bool,
+}
+
+impl OpenOptions {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Sets the option for write access.
+    pub fn write(mut self, write: bool) -> Self {
+        self.write = write;
+        self
+    }
+
+    /// Sets the option for truncating a previous file.
+    pub fn truncate(mut self, truncate: bool) -> Self {
+        self.truncate = truncate;
+        self
+    }
+
+    /// Sets the option to create a new file, or open it if it already exists.
+    pub fn create(mut self, create: bool) -> Self {
+        self.create = create;
+        self
+    }
+}
 
 /// Adapter for pond_core::Volume that allows it to operate on paths, rather than Ino and names.
 pub(crate) struct VolumeAdapter {
@@ -19,6 +52,7 @@ impl VolumeAdapter {
 
 #[derive(Clone, Debug)]
 pub struct DirEntry {
+    // TODO: crate::path::Path?
     path: PathBuf,
     file_name: String,
     attr: FileAttr,
@@ -122,14 +156,14 @@ impl VolumeAdapter {
     }
 
     /// Fetch metadata of a file if it exists.
-    pub(crate) async fn metadata(&self, path: String) -> pond_core::Result<FileAttr> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
+    pub(crate) async fn metadata(&self, path: crate::path::Path) -> pond_core::Result<FileAttr> {
+        let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         Ok(attr.clone())
     }
 
     /// Check if a file or directory exists.
-    pub(crate) async fn exists(&self, path: String) -> pond_core::Result<bool> {
-        match resolve_fileattr(&self.inner, &path).await {
+    pub(crate) async fn exists(&self, path: crate::path::Path) -> pond_core::Result<bool> {
+        match resolve_fileattr(&self.inner, path.as_str()).await {
             Ok(_) => Ok(true),
             Err(e) => match e.kind() {
                 ErrorKind::NotFound => Ok(false),
@@ -139,8 +173,8 @@ impl VolumeAdapter {
     }
 
     /// Check if the file is staged.
-    pub(crate) async fn is_staged(&self, path: String) -> pond_core::Result<bool> {
-        let ino = resolve_fileattr(&self.inner, &path).await?.ino;
+    pub(crate) async fn is_staged(&self, path: crate::path::Path) -> pond_core::Result<bool> {
+        let ino = resolve_fileattr(&self.inner, path.as_str()).await?.ino;
         self.inner.is_staged(ino)
     }
 
@@ -151,16 +185,16 @@ impl VolumeAdapter {
     /// offset to resume where the last call left off.
     pub(crate) async fn read_dir(
         &self,
-        path: String,
+        path: crate::path::Path,
         offset: Option<String>,
         len: usize,
     ) -> pond_core::Result<Vec<crate::DirEntry>> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
+        let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         if attr.kind != pond_core::FileType::Directory {
             return Err(pond_core::ErrorKind::NotADirectory.into());
         }
 
-        let parent = Path::new(&path);
+        let parent = Path::new(path.as_str());
         let entries = self
             .inner
             .readdir(attr.ino)?
@@ -181,13 +215,20 @@ impl VolumeAdapter {
     }
 
     /// Create a directory in the volume.
-    pub(crate) async fn create_dir(&mut self, path: String) -> pond_core::Result<FileAttr> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+    pub(crate) async fn create_dir(
+        &mut self,
+        path: crate::path::Path,
+    ) -> pond_core::Result<FileAttr> {
+        let (parent_ino, name) =
+            resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
         self.inner.mkdir(parent_ino, name).cloned()
     }
 
-    pub(crate) async fn create_dir_all(&mut self, path: String) -> pond_core::Result<FileAttr> {
-        let path = Path::new(&path);
+    pub(crate) async fn create_dir_all(
+        &mut self,
+        path: crate::path::Path,
+    ) -> pond_core::Result<FileAttr> {
+        let path = Path::new(path.as_str());
 
         let mut ino = self.inner.getattr(pond_core::Ino::Root)?.ino;
         let mut components = path.components().peekable();
@@ -230,18 +271,23 @@ impl VolumeAdapter {
     }
 
     /// Remove a directory from the volume.
-    pub(crate) async fn remove_dir(&mut self, path: String) -> pond_core::Result<()> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+    pub(crate) async fn remove_dir(&mut self, path: crate::path::Path) -> pond_core::Result<()> {
+        let (parent_ino, name) =
+            resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
         self.inner.rmdir(parent_ino, &name)
     }
 
-    pub(crate) async fn remove_dir_all(&mut self, path: String) -> pond_core::Result<()> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
+    pub(crate) async fn remove_dir_all(
+        &mut self,
+        path: crate::path::Path,
+    ) -> pond_core::Result<()> {
+        let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         if attr.kind != pond_core::FileType::Directory {
             return Err(pond_core::ErrorKind::NotADirectory.into());
         }
 
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+        let (parent_ino, name) =
+            resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
         self.remove_dir_contents(attr.ino)?;
         self.inner.rmdir(parent_ino, &name)
     }
@@ -268,42 +314,44 @@ impl VolumeAdapter {
         Ok(())
     }
 
-    pub(crate) async fn create(
-        &mut self,
-        path: String,
-    ) -> pond_core::Result<(pond_core::Fd, FileAttr)> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
-
-        match self.inner.create(parent_ino, name.clone(), true) {
-            Ok((attr, fd)) => Ok((fd, attr.clone())),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub(crate) async fn truncate(&mut self, path: String, len: u64) -> pond_core::Result<()> {
-        let ino = resolve_fileattr(&self.inner, &path).await?.ino;
+    pub(crate) async fn truncate(&mut self, path: PondPath, len: u64) -> pond_core::Result<()> {
+        let ino = resolve_fileattr(&self.inner, path.as_str()).await?.ino;
         self.inner.truncate(ino, len)
     }
 
-    /// Attempts to open a file in read-only mode.
-    pub(crate) async fn open_read(
+    pub(crate) async fn open(
         &mut self,
-        path: String,
+        path: PondPath,
+        option: OpenOptions,
     ) -> pond_core::Result<(pond_core::Fd, FileAttr)> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
-        let attr = attr.clone();
-        let fd = self.inner.open_read(attr.ino).await?;
-        Ok((fd, attr))
-    }
+        if option.create {
+            let (parent_ino, filename) =
+                resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
+            let (fileattr, fd) = self.inner.create(parent_ino, filename, true)?;
+            return Ok((fd, fileattr.clone()));
+        }
 
-    pub(crate) async fn open_read_write(
-        &mut self,
-        path: String,
-    ) -> pond_core::Result<(pond_core::Fd, FileAttr)> {
-        let attr = resolve_fileattr(&self.inner, &path).await?;
+        let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         let attr = attr.clone();
-        let fd = self.inner.open_read_write(attr.ino).await?;
-        Ok((fd, attr))
+        if option.write {
+            let staged = self.inner.is_staged(attr.ino)?;
+            if !staged && !option.truncate {
+                return Err(pond_core::Error::new(
+                    pond_core::ErrorKind::Unsupported,
+                    "Committed files cannot be open for writing without truncating.",
+                ));
+            } else if staged && option.truncate {
+                self.truncate(path.clone(), 0u64).await?;
+            }
+            // !staged && option.truncate is done by default in the lower level volume. no need
+            // to explicitly call truncate.
+
+            let fd = self.inner.open_read_write(attr.ino).await?;
+            Ok((fd, attr))
+        } else {
+            let fd = self.inner.open_read(attr.ino).await?;
+            Ok((fd, attr))
+        }
     }
 
     /// Release an open file.
@@ -334,21 +382,24 @@ impl VolumeAdapter {
     }
 
     /// Remove a file from the volume.
-    pub(crate) async fn remove_file(&mut self, path: String) -> pond_core::Result<()> {
-        let (parent_ino, filename) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+    pub(crate) async fn remove_file(&mut self, path: PondPath) -> pond_core::Result<()> {
+        let (parent_ino, filename) =
+            resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
         self.inner.delete(parent_ino, &filename)
     }
 
-    pub(crate) async fn copy(&mut self, _from: String, _to: String) -> pond_core::Result<()> {
+    pub(crate) async fn copy(&mut self, _from: PondPath, _to: PondPath) -> pond_core::Result<()> {
         unimplemented!(
             "do something smart for committed (identical Location)? and do something dumb for staged (eager copy)?"
         )
     }
 
     /// Move a file from src to dst.
-    pub(crate) async fn rename(&mut self, src: String, dst: String) -> pond_core::Result<()> {
-        let (src_parent, src_filename) = resolve_parent_ino_and_filename(&self.inner, &src).await?;
-        let (dst_parent, dst_filename) = resolve_parent_ino_and_filename(&self.inner, &dst).await?;
+    pub(crate) async fn rename(&mut self, src: PondPath, dst: PondPath) -> pond_core::Result<()> {
+        let (src_parent, src_filename) =
+            resolve_parent_ino_and_filename(&self.inner, src.as_str()).await?;
+        let (dst_parent, dst_filename) =
+            resolve_parent_ino_and_filename(&self.inner, dst.as_str()).await?;
         // this doesnt work, because rename dest shoudnt exist??
         self.inner
             .rename(src_parent, &src_filename, dst_parent, dst_filename)
@@ -357,8 +408,9 @@ impl VolumeAdapter {
     /// Touch a file.
     ///
     /// Creates an empty file if it doesn't exist, updates the ctime otherwise.
-    pub(crate) async fn touch(&mut self, path: String) -> pond_core::Result<FileAttr> {
-        let (parent_ino, name) = resolve_parent_ino_and_filename(&self.inner, &path).await?;
+    pub(crate) async fn touch(&mut self, path: PondPath) -> pond_core::Result<FileAttr> {
+        let (parent_ino, name) =
+            resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
 
         match self.inner.create(parent_ino, name.clone(), true) {
             Ok((attr, fd)) => {

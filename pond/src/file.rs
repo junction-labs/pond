@@ -6,38 +6,6 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::Volume;
 
-/// Options for opening a Pond file. Read access is always set.
-#[derive(Default)]
-pub struct OpenOptions {
-    pub(crate) write: bool,
-    pub(crate) truncate: bool,
-    pub(crate) create: bool,
-}
-
-impl OpenOptions {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    /// Sets the option for write access.
-    pub fn write(mut self, write: bool) -> Self {
-        self.write = write;
-        self
-    }
-
-    /// Sets the option for truncating a previous file.
-    pub fn truncate(mut self, truncate: bool) -> Self {
-        self.truncate = truncate;
-        self
-    }
-
-    /// Sets the option to create a new file, or open it if it already exists.
-    pub fn create(mut self, create: bool) -> Self {
-        self.create = create;
-        self
-    }
-}
-
 pub struct File {
     fd: pond_core::Fd,
     attr: FileAttr,

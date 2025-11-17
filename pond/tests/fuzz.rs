@@ -7,7 +7,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
-use pond::{CacheConfig, DirEntry, Volume};
+use pond::{CacheConfig, DirEntry, OpenOptions, Path as PondPath, Volume};
 use pond_core::{Client, Error, ErrorKind, FileAttr, FileType, Ino, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -97,7 +97,7 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
             }
             volume.touch(path.for_volume()).await.map_err(pond_err)?;
             let mut file = volume
-                .open_read_write(path.for_volume())
+                .open(path.for_volume(), OpenOptions::new().write(true))
                 .await
                 .map_err(pond_err)?;
             file.write_all(data.as_bytes())
@@ -111,7 +111,7 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
                 return Err(std::io::ErrorKind::IsADirectory);
             }
             let mut file = volume
-                .open_read(path.for_volume())
+                .open(path.for_volume(), OpenOptions::default())
                 .await
                 .map_err(pond_err)?;
             let mut buf = Vec::new();
@@ -252,8 +252,8 @@ fn arbitrary_vec<'a, T: Arbitrary<'a>>(u: &mut Unstructured<'a>) -> arbitrary::R
 struct ArbPath(PathBuf);
 
 impl ArbPath {
-    fn for_volume(&self) -> String {
-        format!("/{}", self.0.display())
+    fn for_volume(&self) -> PondPath {
+        format!("/{}", self.0.display()).parse().unwrap()
     }
 }
 
