@@ -200,8 +200,11 @@ impl VolumeAdapter {
             .inner
             .readdir(attr.ino)?
             .filter(|entry| entry.attr().ino.is_regular())
+            // it's hard to pull this None check for offset and conditionally apply this chain
+            // operation because the iter types would be different in either branch.
             .skip_while(|entry| match &offset {
                 Some(offset) => *entry.name() <= **offset,
+                // if offset is none, false doesn't skip anything.
                 None => false,
             })
             .take(len.get())
