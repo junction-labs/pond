@@ -234,8 +234,10 @@ impl Stream for ReadDir {
 
                     self.offset = entries.last().map(|e| e.file_name().to_string());
                     self.buffer = entries.into();
-                    // return one of the entries
-                    let entry = self.buffer.pop_front().expect("batch should be non-empty");
+                    let entry = self
+                        .buffer
+                        .pop_front()
+                        .expect("BUG: batch should be non-empty");
                     Poll::Ready(Some(Ok(entry)))
                 }
                 Poll::Ready(Err(e)) => {
@@ -251,6 +253,9 @@ impl Stream for ReadDir {
                 self.inflight = Some(
                     async move { volume.read_dir_page(path, offset, Self::PAGESIZE).await }.boxed(),
                 );
+
+                // we just created the fut, let them know they can poll it again and the next time
+                // we'll attach the context to the fut
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }

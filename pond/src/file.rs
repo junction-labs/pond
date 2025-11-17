@@ -1,6 +1,6 @@
 use std::{io::SeekFrom, pin::Pin};
 
-use futures::FutureExt;
+use futures::{FutureExt, future::BoxFuture};
 use pond_core::FileAttr;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
@@ -11,8 +11,8 @@ pub struct File {
     attr: FileAttr,
     offset: u64,
     handle: Volume,
-    read_fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<bytes::Bytes>>>>>,
-    write_fut: Option<Pin<Box<dyn Future<Output = pond_core::Result<usize>>>>>,
+    read_fut: Option<BoxFuture<'static, pond_core::Result<bytes::Bytes>>>,
+    write_fut: Option<BoxFuture<'static, pond_core::Result<usize>>>,
 }
 
 impl File {
@@ -70,9 +70,9 @@ impl AsyncRead for File {
                     let fd = self.fd;
                     let offset = self.offset;
                     let size = buf.remaining();
-                    async move { handle.read_at(fd, offset, size).await }
+                    async move { handle.read_at(fd, offset, size).await }.boxed()
                 };
-                self.read_fut = Some(Box::pin(fut));
+                self.read_fut = Some(fut);
 
                 // we just created the fut, let them know they can poll it again and the next time
                 // we'll attach the context to the fut
@@ -137,9 +137,9 @@ impl AsyncWrite for File {
                     let fd = self.fd;
                     let offset = self.offset;
                     let bytes = bytes::Bytes::copy_from_slice(buf);
-                    async move { handle.write_at(fd, offset, bytes).await }
+                    async move { handle.write_at(fd, offset, bytes).await }.boxed()
                 };
-                self.write_fut = Some(Box::pin(fut));
+                self.write_fut = Some(fut);
 
                 // we just created the fut, let them know they can poll it again and the next time
                 // we'll attach the context to the fut
