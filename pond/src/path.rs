@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::str::FromStr;
 
 /// A canonical path to a file within Pond.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -12,8 +12,8 @@ impl Path {
     }
 }
 
-impl fmt::Display for Path {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }

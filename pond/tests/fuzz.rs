@@ -7,6 +7,7 @@ use std::{
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::arbtest;
+use futures::StreamExt;
 use pond::{CacheConfig, DirEntry, OpenOptions, Path as PondPath, Volume};
 use pond_core::{Client, Error, ErrorKind, FileAttr, FileType, Ino, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -126,19 +127,10 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
             .map(OpOutput::Metadata)
             .map_err(pond_err),
         FuzzOp::ReadDir(path) => {
+            let mut stream = volume.read_dir(path.for_volume()).map_err(pond_err)?;
             let mut entries = Vec::new();
-            let mut offset = None;
-            loop {
-                let tmp = volume
-                    .read_dir(path.for_volume(), offset, 3_usize)
-                    .await
-                    .map_err(pond_err)?;
-
-                let Some(e) = tmp.last() else {
-                    break;
-                };
-                offset = Some(e.file_name().to_string());
-                entries.extend(tmp);
+            while let Some(entry) = stream.next().await {
+                entries.push(entry.map_err(pond_err)?);
             }
             Ok(OpOutput::ReadDir(entries))
         }

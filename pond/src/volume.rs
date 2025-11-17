@@ -1,10 +1,17 @@
+use futures::future::BoxFuture;
+use futures::{FutureExt, Stream};
 use pond_core::FileAttr;
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::adapter::OpenOptions;
 use crate::adapter::VolumeAdapter;
 use crate::file::File;
+use crate::path::Path;
 
 #[derive(Clone)]
 pub struct Volume {
@@ -110,12 +117,6 @@ cmds! {
     /// Checks if the provided path exists and is staged. Returns `Ok(true)` if the path points
     /// to an existing entity and that entity is staged.
     pub IsStaged => is_staged(path: crate::path::Path) -> pond_core::Result<bool>,
-    /// Reads the contents of a directory. Returns a snapshot (vector of entries) of the directory contents.
-    ///
-    /// Takes an optional offset and length for paginated reads, since the contents of the
-    /// directory can be large. The offset is the filename of the last file you received from
-    /// this function.
-    pub ReadDir => read_dir(path: crate::path::Path, offset: Option<String>, len: usize) -> pond_core::Result<Vec<crate::DirEntry>>,
     /// Creates a new, empty directory at the provided path.
     pub CreateDir => create_dir(path: crate::path::Path) -> pond_core::Result<FileAttr>,
     /// Recursively create a directory and all of its parent components if they are missing.
@@ -139,6 +140,7 @@ cmds! {
     /// Creates an empty file if it doesn't exist, otherwise it updates the ctime of the existing
     /// file.
     pub Touch => touch(path: crate::path::Path) -> pond_core::Result<FileAttr>,
+    pub(crate) ReadDirPage => read_dir_page(path: crate::path::Path, offset: Option<String>, len: NonZeroUsize) -> pond_core::Result<Vec<crate::DirEntry>>,
     pub(crate) OpenFd => open(path: crate::path::Path, option: OpenOptions) -> pond_core::Result<(pond_core::Fd, FileAttr)>,
     pub(crate) ReleaseFd => release(fd: pond_core::Fd) -> pond_core::Result<()>,
     pub(crate) ReadAt => read_at(fd: pond_core::Fd, offset: u64, size: usize) -> pond_core::Result<bytes::Bytes>,
@@ -146,6 +148,14 @@ cmds! {
 }
 
 impl Volume {
+    /// Reads directory entries as a stream of [`crate::DirEntry`] values.
+    ///
+    /// Lazily reads the directories in pages. Does not start reading pages until the first call to
+    /// ReadDir::next() is made.
+    pub fn read_dir(&self, path: crate::path::Path) -> pond_core::Result<ReadDir> {
+        Ok(ReadDir::new(self.clone(), path))
+    }
+
     /// Open or create a file according to the given OpenOptions.
     pub async fn open(
         &self,
@@ -165,6 +175,85 @@ impl Volume {
         match self.cmds.try_send(cmd) {
             Ok(()) => Ok(()),
             Err(_) => Err(fd),
+        }
+    }
+}
+
+/// Stream of directory entries retrieved from a [`Volume`].
+///
+/// This stream fetches entries in batches from the backend and yields them one by one.
+pub struct ReadDir {
+    volume: Volume,
+    path: Path,
+    buffer: VecDeque<crate::DirEntry>,
+    offset: Option<String>,
+    finished: bool,
+    inflight: Option<BoxFuture<'static, pond_core::Result<Vec<crate::DirEntry>>>>,
+}
+
+impl ReadDir {
+    const PAGESIZE: NonZeroUsize = std::num::NonZero::new(32).unwrap();
+
+    fn new(volume: Volume, path: Path) -> Self {
+        Self {
+            volume,
+            path,
+            buffer: VecDeque::new(),
+            offset: None,
+            finished: false,
+            inflight: None,
+        }
+    }
+}
+
+impl Stream for ReadDir {
+    type Item = pond_core::Result<crate::DirEntry>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // stream is already exhausted.
+        if self.finished {
+            return Poll::Ready(None);
+        }
+
+        // there're still entries within our buffer
+        if let Some(entry) = self.buffer.pop_front() {
+            return Poll::Ready(Some(Ok(entry)));
+        }
+
+        // fetch more entries
+        match self.inflight.as_mut() {
+            Some(fut) => match fut.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(entries)) => {
+                    self.inflight = None;
+
+                    if entries.is_empty() {
+                        self.finished = true;
+                        return Poll::Ready(None);
+                    }
+
+                    self.offset = entries.last().map(|e| e.file_name().to_string());
+                    self.buffer = entries.into();
+                    // return one of the entries
+                    let entry = self.buffer.pop_front().expect("batch should be non-empty");
+                    Poll::Ready(Some(Ok(entry)))
+                }
+                Poll::Ready(Err(e)) => {
+                    self.inflight = None;
+                    self.finished = true;
+                    Poll::Ready(Some(Err(e)))
+                }
+            },
+            None => {
+                let volume = self.volume.clone();
+                let path = self.path.clone();
+                let offset = self.offset.take();
+                self.inflight = Some(
+                    async move { volume.read_dir_page(path, offset, Self::PAGESIZE).await }.boxed(),
+                );
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
         }
     }
 }

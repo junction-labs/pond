@@ -1,5 +1,6 @@
 use crate::Path as PondPath;
 use std::{
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     str::FromStr,
     time::SystemTime,
@@ -183,11 +184,11 @@ impl VolumeAdapter {
     /// Takes an offset and length to do paginated reads, since the contents of the directory may be
     /// large. Pass the last filename of the last file you received from this function as the
     /// offset to resume where the last call left off.
-    pub(crate) async fn read_dir(
+    pub(crate) async fn read_dir_page(
         &self,
         path: crate::path::Path,
         offset: Option<String>,
-        len: usize,
+        len: NonZeroUsize,
     ) -> pond_core::Result<Vec<crate::DirEntry>> {
         let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         if attr.kind != pond_core::FileType::Directory {
@@ -203,7 +204,7 @@ impl VolumeAdapter {
                 Some(offset) => *entry.name() <= **offset,
                 None => false,
             })
-            .take(len)
+            .take(len.get())
             .map(|entry| crate::DirEntry {
                 path: parent.join(entry.name()),
                 file_name: entry.name().to_string(),
