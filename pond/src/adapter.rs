@@ -328,15 +328,18 @@ impl VolumeAdapter {
         path: PondPath,
         option: OpenOptions,
     ) -> pond_core::Result<(pond_core::Fd, FileAttr)> {
-        if option.create {
-            let (parent_ino, filename) =
-                resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
-            let (fileattr, fd) = self.inner.create(parent_ino, filename, true)?;
-            return Ok((fd, fileattr.clone()));
-        }
+        let attr = match resolve_fileattr(&self.inner, path.as_str()).await {
+            Ok(attr) => attr.clone(),
+            // file doesn't exist, but option.create is set -- create it!
+            Err(e) if e.kind() == pond_core::ErrorKind::NotFound && option.create => {
+                let (parent_ino, filename) =
+                    resolve_parent_ino_and_filename(&self.inner, path.as_str()).await?;
+                let (fileattr, fd) = self.inner.create(parent_ino, filename, true)?;
+                return Ok((fd, fileattr.clone()));
+            }
+            Err(e) => return Err(e),
+        };
 
-        let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
-        let attr = attr.clone();
         if option.write {
             let staged = self.inner.is_staged(attr.ino)?;
             if !staged && !option.truncate {

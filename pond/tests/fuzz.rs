@@ -101,13 +101,11 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
                 }
                 Err(e) => return Err(pond_err(e)),
             }
-            volume
-                .touch(path.for_volume())
-                .unwrap()
-                .await
-                .map_err(pond_err)?;
             let mut file = volume
-                .open(path.for_volume(), OpenOptions::new().write(true))
+                .open(
+                    path.for_volume(),
+                    OpenOptions::new().write(true).create(true),
+                )
                 .await
                 .map_err(pond_err)?;
             file.write_all(data.as_bytes())
