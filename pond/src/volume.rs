@@ -26,7 +26,7 @@ impl Volume {
         location: impl AsRef<str>,
         cache_config: pond_core::CacheConfig,
     ) -> pond_core::Result<Self> {
-        let volume = pond_core::Client::open(location)?
+        let volume = pond_core::Client::create(location)?
             .with_cache_config(cache_config)
             .create_volume()
             .await;

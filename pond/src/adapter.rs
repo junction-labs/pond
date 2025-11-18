@@ -104,14 +104,23 @@ async fn resolve_fileattr<'a>(
     let path = Path::new(path);
 
     let mut attr = volume.getattr(Ino::Root)?;
+    // bag of pointers that is only used for error message construction
+    let mut cur_path = Vec::new();
     for component in path.components() {
         match component {
-            Component::RootDir => continue,
+            Component::RootDir => {
+                cur_path.push("");
+                continue;
+            }
             Component::Normal(os_str) => {
                 let name = from_os_str(os_str)?;
-                attr = volume
-                    .lookup(attr.ino, name)?
-                    .ok_or(pond_core::ErrorKind::NotFound)?;
+                cur_path.push(name);
+                attr = volume.lookup(attr.ino, name)?.ok_or_else(|| {
+                    pond_core::Error::new(
+                        crate::ErrorKind::NotFound,
+                        format!("'{}' does not exist", cur_path.join("/")),
+                    )
+                })?;
             }
             _ => {
                 return Err(pond_core::Error::new(
