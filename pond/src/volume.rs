@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::DirEntry;
 use crate::adapter::OpenOptions;
 use crate::adapter::VolumeAdapter;
 use crate::file::File;
@@ -47,8 +48,26 @@ async fn dispatch_loop(mut volume: VolumeAdapter, mut cmds: mpsc::Receiver<Cmd>)
     }
 }
 
+macro_rules! cmd_arg_ty {
+    (crate::path::Path) => {
+        impl crate::path::IntoPath
+    };
+    ($arg_ty:ty) => {
+        impl Into<$arg_ty>
+    };
+}
+
+macro_rules! cmd_convert_arg {
+    ($arg_name:ident, crate::path::Path) => {
+        $arg_name.into_path()
+    };
+    ($arg_name:ident, $arg_ty:ty) => {
+        Ok::<$arg_ty, pond_core::Error>($arg_name.into())
+    };
+}
+
 /// Generates some boilerplate needed to support the communicating sequential processes (CSP)
-/// model to make pond_core::Volume thread-safe.
+/// model to make `[pond_core::Volume]` thread-safe.
 macro_rules! cmds {
     ($(
         $(#[$id_attr:meta])* $vis:vis $variant:ident => $method:ident(
@@ -81,12 +100,12 @@ macro_rules! cmds {
             $(
                 paste::paste! {
                     $(#[$id_attr])*
-                    $vis async fn [<$variant:snake>](
+                    $vis fn [<$variant:snake>](
                         &self,
-                        $($arg_name: impl Into<$arg_ty>),*
-                    ) -> $result_ty {
+                        $($arg_name: cmd_arg_ty!($arg_ty)),*
+                    ) -> pond_core::Result<impl Future<Output = $result_ty> + 'static> {
                         $(
-                            let $arg_name = $arg_name.into();
+                            let $arg_name = cmd_convert_arg!($arg_name, $arg_ty)?;
                         )*
                         let (tx, rx) = oneshot::channel();
                         let cmd = Cmd::$variant {
@@ -95,8 +114,11 @@ macro_rules! cmds {
                             )*
                             resp: tx,
                         };
-                        let _ = self.cmds.send(cmd).await;
-                        rx.await.expect("volume exited unexpectedly")
+                        let cmds = self.cmds.clone();
+                        Ok(async move {
+                            let _ = cmds.send(cmd).await;
+                            rx.await.expect("volume exited unexpectedly")
+                        })
                     }
                 }
             )*
@@ -140,7 +162,7 @@ cmds! {
     /// Creates an empty file if it doesn't exist, otherwise it updates the ctime of the existing
     /// file.
     pub Touch => touch(path: crate::path::Path) -> pond_core::Result<FileAttr>,
-    pub(crate) ReadDirPage => read_dir_page(path: crate::path::Path, offset: Option<String>, len: NonZeroUsize) -> pond_core::Result<Vec<crate::DirEntry>>,
+    pub(crate) ReadDirPage => read_dir_page(path: crate::path::Path, offset: Option<String>, len: NonZeroUsize) -> pond_core::Result<Vec<DirEntry>>,
     pub(crate) OpenFd => open(path: crate::path::Path, option: OpenOptions) -> pond_core::Result<(pond_core::Fd, FileAttr)>,
     pub(crate) ReleaseFd => release(fd: pond_core::Fd) -> pond_core::Result<()>,
     pub(crate) ReadAt => read_at(fd: pond_core::Fd, offset: u64, size: usize) -> pond_core::Result<bytes::Bytes>,
@@ -148,21 +170,23 @@ cmds! {
 }
 
 impl Volume {
-    /// Reads directory entries as a stream of [`crate::DirEntry`] values.
+    /// Reads directory entries as a stream of [`DirEntry`] values.
     ///
-    /// Lazily reads the directories in pages. Does not start reading pages until the first call to
-    /// ReadDir::next() is made.
-    pub fn read_dir(&self, path: crate::path::Path) -> pond_core::Result<ReadDir> {
+    /// Lazily reads the directories in pages. Does not start fetching pages until the first call to
+    /// next() is made.
+    pub fn read_dir(&self, path: impl crate::path::IntoPath) -> pond_core::Result<ReadDir> {
+        let path = path.into_path()?;
         Ok(ReadDir::new(self.clone(), path))
     }
 
-    /// Open or create a file according to the given OpenOptions.
+    /// Open or create a file according to the given [`OpenOptions`].
     pub async fn open(
         &self,
-        path: crate::path::Path,
+        path: impl crate::path::IntoPath,
         option: OpenOptions,
     ) -> pond_core::Result<File> {
-        let (fd, attr) = self.open_fd(path, option).await?;
+        let path = path.into_path()?;
+        let (fd, attr) = self.open_fd(path, option)?.await?;
         Ok(File::new(fd, attr, self.clone()))
     }
 
@@ -185,10 +209,10 @@ impl Volume {
 pub struct ReadDir {
     volume: Volume,
     path: Path,
-    buffer: VecDeque<crate::DirEntry>,
+    buffer: VecDeque<DirEntry>,
     offset: Option<String>,
     finished: bool,
-    inflight: Option<BoxFuture<'static, pond_core::Result<Vec<crate::DirEntry>>>>,
+    inflight: Option<BoxFuture<'static, pond_core::Result<Vec<DirEntry>>>>,
 }
 
 impl ReadDir {
@@ -207,7 +231,7 @@ impl ReadDir {
 }
 
 impl Stream for ReadDir {
-    type Item = pond_core::Result<crate::DirEntry>;
+    type Item = pond_core::Result<DirEntry>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // stream is already exhausted.
@@ -247,11 +271,11 @@ impl Stream for ReadDir {
                 }
             },
             None => {
-                let volume = self.volume.clone();
-                let path = self.path.clone();
                 let offset = self.offset.take();
                 self.inflight = Some(
-                    async move { volume.read_dir_page(path, offset, Self::PAGESIZE).await }.boxed(),
+                    self.volume
+                        .read_dir_page(self.path.clone(), offset, Self::PAGESIZE)?
+                        .boxed(),
                 );
 
                 // we just created the fut, let them know they can poll it again and the next time

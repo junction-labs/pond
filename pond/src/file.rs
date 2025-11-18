@@ -36,8 +36,9 @@ impl Drop for File {
         match self.handle.try_release_fd(self.fd) {
             Ok(()) => (),
             Err(fd) => {
-                let handle = self.handle.clone();
-                tokio::spawn(async move { handle.release_fd(fd).await });
+                tokio::spawn(self.handle.release_fd(fd).expect(
+                    "BUG: release_fd does not do any input validation before returning the future",
+                ));
             }
         }
     }
@@ -65,13 +66,11 @@ impl AsyncRead for File {
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
             None => {
-                let fut = {
-                    let handle = self.handle.clone();
-                    let fd = self.fd;
-                    let offset = self.offset;
-                    let size = buf.remaining();
-                    async move { handle.read_at(fd, offset, size).await }.boxed()
-                };
+                let fut = self
+                    .handle
+                    .read_at(self.fd, self.offset, buf.remaining())
+                    .map_err(std::io::Error::other)?
+                    .boxed();
                 self.read_fut = Some(fut);
 
                 // we just created the fut, let them know they can poll it again and the next time
@@ -137,7 +136,7 @@ impl AsyncWrite for File {
                     let fd = self.fd;
                     let offset = self.offset;
                     let bytes = bytes::Bytes::copy_from_slice(buf);
-                    async move { handle.write_at(fd, offset, bytes).await }.boxed()
+                    async move { handle.write_at(fd, offset, bytes).unwrap().await }.boxed()
                 };
                 self.write_fut = Some(fut);
 

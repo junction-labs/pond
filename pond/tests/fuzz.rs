@@ -64,31 +64,36 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
     match op {
         FuzzOp::CreateDir(path) => volume
             .create_dir(path.for_volume())
+            .unwrap()
             .await
             .map(OpOutput::Metadata)
             .map_err(pond_err),
         FuzzOp::RemoveDir(path) => volume
             .remove_dir(path.for_volume())
+            .unwrap()
             .await
             .map(|_| OpOutput::None)
             .map_err(pond_err),
         FuzzOp::CreateDirAll(path) => volume
             .create_dir_all(path.for_volume())
+            .unwrap()
             .await
             .map(OpOutput::Metadata)
             .map_err(pond_err),
         FuzzOp::RemoveDirAll(path) => volume
             .remove_dir_all(path.for_volume())
+            .unwrap()
             .await
             .map(|_| OpOutput::None)
             .map_err(pond_err),
         FuzzOp::RemoveFile(path) => volume
             .remove_file(path.for_volume())
+            .unwrap()
             .await
             .map(|_| OpOutput::None)
             .map_err(pond_err),
         FuzzOp::Write(path, data) => {
-            match volume.remove_file(path.for_volume()).await {
+            match volume.remove_file(path.for_volume()).unwrap().await {
                 Ok(_) => {}
                 Err(e) if matches!(e.kind(), ErrorKind::NotFound) => {}
                 Err(e) if matches!(e.kind(), ErrorKind::IsADirectory) => {
@@ -96,7 +101,11 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
                 }
                 Err(e) => return Err(pond_err(e)),
             }
-            volume.touch(path.for_volume()).await.map_err(pond_err)?;
+            volume
+                .touch(path.for_volume())
+                .unwrap()
+                .await
+                .map_err(pond_err)?;
             let mut file = volume
                 .open(path.for_volume(), OpenOptions::new().write(true))
                 .await
@@ -107,7 +116,11 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
             Ok(OpOutput::Write(data.len()))
         }
         FuzzOp::Read(path) => {
-            let meta = volume.metadata(path.for_volume()).await.map_err(pond_err)?;
+            let meta = volume
+                .metadata(path.for_volume())
+                .unwrap()
+                .await
+                .map_err(pond_err)?;
             if matches!(meta.kind, FileType::Directory) {
                 return Err(std::io::ErrorKind::IsADirectory);
             }
@@ -123,6 +136,7 @@ async fn apply_volume(volume: &Volume, op: &FuzzOp) -> Result<OpOutput, std::io:
         }
         FuzzOp::Metadata(path) => volume
             .metadata(path.for_volume())
+            .unwrap()
             .await
             .map(OpOutput::Metadata)
             .map_err(pond_err),

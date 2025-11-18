@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::str::FromStr;
 
 /// A canonical path to a file within Pond.
@@ -66,5 +67,30 @@ impl TryFrom<String> for Path {
             ));
         }
         Ok(Self { raw: s })
+    }
+}
+
+pub trait IntoPath {
+    fn into_path(self) -> pond_core::Result<Path>;
+}
+
+impl IntoPath for Path {
+    fn into_path(self) -> pond_core::Result<Path> {
+        Ok(self)
+    }
+}
+
+impl IntoPath for &Path {
+    fn into_path(self) -> pond_core::Result<Path> {
+        Ok(self.clone())
+    }
+}
+
+impl<T> IntoPath for T
+where
+    T: TryInto<Path, Error = pond_core::Error>,
+{
+    fn into_path(self) -> pond_core::Result<Path> {
+        self.try_into()
     }
 }
