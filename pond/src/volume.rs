@@ -59,7 +59,7 @@ macro_rules! cmd_arg_ty {
 
 macro_rules! cmd_convert_arg {
     ($arg_name:ident, crate::path::Path) => {
-        $arg_name.into_path()
+        $arg_name.try_into_path()
     };
     ($arg_name:ident, $arg_ty:ty) => {
         Ok::<$arg_ty, pond_core::Error>($arg_name.into())
@@ -175,7 +175,7 @@ impl Volume {
     /// Lazily reads the directories in pages. Does not start fetching pages until the first call to
     /// next() is made.
     pub fn read_dir(&self, path: impl crate::path::IntoPath) -> pond_core::Result<ReadDir> {
-        let path = path.into_path()?;
+        let path = path.try_into_path()?;
         Ok(ReadDir::new(self.clone(), path))
     }
 
@@ -185,7 +185,7 @@ impl Volume {
         path: impl crate::path::IntoPath,
         option: OpenOptions,
     ) -> pond_core::Result<File> {
-        let path = path.into_path()?;
+        let path = path.try_into_path()?;
         let (fd, attr) = self.open_fd(path, option)?.await?;
         Ok(File::new(fd, attr, self.clone()))
     }
@@ -207,12 +207,12 @@ impl Volume {
 ///
 /// This stream fetches entries in batches from the backend and yields them one by one.
 pub struct ReadDir {
-    volume: Volume,
+    handle: Volume,
     path: Path,
     buffer: VecDeque<DirEntry>,
     offset: Option<String>,
-    finished: bool,
-    inflight: Option<BoxFuture<'static, pond_core::Result<Vec<DirEntry>>>>,
+    done: bool,
+    fut: Option<BoxFuture<'static, pond_core::Result<Vec<DirEntry>>>>,
 }
 
 impl ReadDir {
@@ -220,12 +220,12 @@ impl ReadDir {
 
     fn new(volume: Volume, path: Path) -> Self {
         Self {
-            volume,
+            handle: volume,
             path,
             buffer: VecDeque::new(),
             offset: None,
-            finished: false,
-            inflight: None,
+            done: false,
+            fut: None,
         }
     }
 }
@@ -235,7 +235,7 @@ impl Stream for ReadDir {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // stream is already exhausted.
-        if self.finished {
+        if self.done {
             return Poll::Ready(None);
         }
 
@@ -245,14 +245,14 @@ impl Stream for ReadDir {
         }
 
         // fetch more entries
-        match self.inflight.as_mut() {
+        match self.fut.as_mut() {
             Some(fut) => match fut.poll_unpin(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(entries)) => {
-                    self.inflight = None;
+                    self.fut = None;
 
                     if entries.is_empty() {
-                        self.finished = true;
+                        self.done = true;
                         return Poll::Ready(None);
                     }
 
@@ -265,15 +265,15 @@ impl Stream for ReadDir {
                     Poll::Ready(Some(Ok(entry)))
                 }
                 Poll::Ready(Err(e)) => {
-                    self.inflight = None;
-                    self.finished = true;
+                    self.fut = None;
+                    self.done = true;
                     Poll::Ready(Some(Err(e)))
                 }
             },
             None => {
                 let offset = self.offset.take();
-                self.inflight = Some(
-                    self.volume
+                self.fut = Some(
+                    self.handle
                         .read_dir_page(self.path.clone(), offset, Self::PAGESIZE)?
                         .boxed(),
                 );

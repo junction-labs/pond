@@ -71,17 +71,17 @@ impl TryFrom<String> for Path {
 }
 
 pub trait IntoPath {
-    fn into_path(self) -> pond_core::Result<Path>;
+    fn try_into_path(self) -> pond_core::Result<Path>;
 }
 
 impl IntoPath for Path {
-    fn into_path(self) -> pond_core::Result<Path> {
+    fn try_into_path(self) -> pond_core::Result<Path> {
         Ok(self)
     }
 }
 
 impl IntoPath for &Path {
-    fn into_path(self) -> pond_core::Result<Path> {
+    fn try_into_path(self) -> pond_core::Result<Path> {
         Ok(self.clone())
     }
 }
@@ -90,7 +90,7 @@ impl<T> IntoPath for T
 where
     T: TryInto<Path, Error = pond_core::Error>,
 {
-    fn into_path(self) -> pond_core::Result<Path> {
+    fn try_into_path(self) -> pond_core::Result<Path> {
         self.try_into()
     }
 }
