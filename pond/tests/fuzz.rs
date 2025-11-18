@@ -357,11 +357,9 @@ fn fileattr_eq(a: &FileAttr, b: &FileAttr) -> bool {
 }
 
 fn pond_direntry(entry: std::fs::DirEntry) -> DirEntry {
-    let file_name = entry.file_name().into_string().unwrap();
     let meta = entry.metadata().unwrap();
     DirEntry::new(
         entry.path(),
-        file_name,
         FileAttr {
             ino: Ino::None,
             size: meta.len(),

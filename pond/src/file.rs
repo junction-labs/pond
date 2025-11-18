@@ -6,6 +6,7 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::Volume;
 
+/// A File handle for a file within Pond.
 pub struct File {
     fd: pond_core::Fd,
     attr: FileAttr,
@@ -161,10 +162,4 @@ impl AsyncWrite for File {
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
-}
-
-#[cfg(test)]
-mod test {
-    // write a test where you open a readonly fd and try to write to it.
-    // is there a way to tell the user that they're going to open a staged file?
 }

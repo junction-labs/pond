@@ -8,6 +8,19 @@ pub struct Path {
 }
 
 impl Path {
+    pub fn file_name(&self) -> &str {
+        std::path::Path::new(&self.raw)
+            .file_name()
+            .and_then(|name| name.to_str())
+            // all rust strings are valid OsStrs, but the opposite is not true. but we started with
+            // a rust string, so we should be able to convert it back fine.
+            .expect("BUG: raw string should be utf-8 valid and a canonical path")
+    }
+
+    pub fn path(&self) -> &str {
+        &self.raw
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.raw
     }
@@ -20,7 +33,7 @@ impl std::fmt::Display for Path {
 }
 
 /// Returns true if `s` is a path that is in canonical form. Canonical paths are absolute (i.e.
-/// start at the root) and don't contain any references (e.g. `.` or `..`).
+/// start at the root) and do not contain any references (e.g. `.` or `..`).
 fn is_canonical(s: &str) -> bool {
     if s.is_empty() || !s.starts_with('/') {
         return false;
@@ -32,6 +45,17 @@ fn is_canonical(s: &str) -> bool {
             std::path::Component::RootDir | std::path::Component::Normal(..)
         )
     })
+}
+
+impl From<std::path::PathBuf> for Path {
+    fn from(p: std::path::PathBuf) -> Self {
+        Path {
+            raw: p
+                .into_os_string()
+                .into_string()
+                .expect("BUG: all paths should be valid utf-8"),
+        }
+    }
 }
 
 impl FromStr for Path {

@@ -53,27 +53,24 @@ impl VolumeAdapter {
 
 #[derive(Clone, Debug)]
 pub struct DirEntry {
-    // TODO: crate::path::Path?
-    path: PathBuf,
-    file_name: String,
+    path: crate::path::Path,
     attr: FileAttr,
 }
 
 impl DirEntry {
-    pub fn new(path: PathBuf, file_name: String, attr: FileAttr) -> Self {
+    pub fn new(path: PathBuf, attr: FileAttr) -> Self {
         Self {
-            path,
-            file_name,
+            path: path.into(),
             attr,
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> &str {
+        self.path.path()
     }
 
     pub fn file_name(&self) -> &str {
-        &self.file_name
+        self.path.file_name()
     }
 
     pub fn file_type(&self) -> FileType {
@@ -189,7 +186,7 @@ impl VolumeAdapter {
         path: crate::path::Path,
         offset: Option<String>,
         len: NonZeroUsize,
-    ) -> pond_core::Result<Vec<crate::DirEntry>> {
+    ) -> pond_core::Result<Vec<DirEntry>> {
         let attr = resolve_fileattr(&self.inner, path.as_str()).await?;
         if attr.kind != pond_core::FileType::Directory {
             return Err(pond_core::ErrorKind::NotADirectory.into());
@@ -208,9 +205,8 @@ impl VolumeAdapter {
                 None => false,
             })
             .take(len.get())
-            .map(|entry| crate::DirEntry {
-                path: parent.join(entry.name()),
-                file_name: entry.name().to_string(),
+            .map(|entry| DirEntry {
+                path: parent.join(entry.name()).into(),
                 attr: entry.attr().clone(),
             })
             .collect();
