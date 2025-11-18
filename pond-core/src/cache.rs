@@ -3,9 +3,12 @@ use std::{fmt::Display, ops::Range, sync::Arc};
 
 use crate::{Error, error::ErrorKind, metrics::RecordLatencyGuard, scoped_timer};
 
+/// Config that controls cache and read behavior for a Volume.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Upper bound for the size of the cache in bytes.
     pub max_cache_size_bytes: u64,
+    /// Size of each cache entry in bytes.
     pub chunk_size_bytes: u64,
     /// Size of readahead in bytes. if you read a byte at index i, we will
     /// pre-fetch the bytes within interval [i, i + size) in the background.

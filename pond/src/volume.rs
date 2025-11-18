@@ -14,18 +14,42 @@ use crate::adapter::VolumeAdapter;
 use crate::file::File;
 use crate::path::Path;
 
+/// Thread-safe handle to a Pond volume.
 #[derive(Clone)]
 pub struct Volume {
     cmds: mpsc::Sender<Cmd>,
 }
 
 impl Volume {
+    /// Creates a new Pond volume at the given location.
+    pub async fn new(
+        location: impl AsRef<str>,
+        cache_config: pond_core::CacheConfig,
+    ) -> pond_core::Result<Self> {
+        let volume = pond_core::Client::open(location)?
+            .with_cache_config(cache_config)
+            .create_volume()
+            .await;
+        let path_volume = crate::adapter::VolumeAdapter::new(volume);
+
+        // interfacing with pond_core::Volume through a channel, following the Communicating Sequential
+        // Processes (CSP) pattern. this serializes all operations to pond_core::Volume making it
+        // thread-safe (which pond_core::Volume isn't).
+        let (tx, rx) = mpsc::channel(16);
+        let _handle = tokio::spawn(dispatch_loop(path_volume, rx));
+
+        Ok(Self { cmds: tx })
+    }
+
+    /// Loads an existing Pond volume at the given location.
+    ///
+    /// If no explicit version is given, loads the **lexographically greatest** version.
     pub async fn load(
-        volume: impl AsRef<str>,
+        location: impl AsRef<str>,
         version: Option<pond_core::Version>,
         cache_config: pond_core::CacheConfig,
     ) -> pond_core::Result<Self> {
-        let volume = pond_core::Client::open(volume)?
+        let volume = pond_core::Client::open(location)?
             .with_cache_config(cache_config)
             .load_volume(&version)
             .await?;
@@ -131,7 +155,7 @@ cmds! {
     pub Version => version() -> pond_core::Version,
     /// Commits and persists staged changes with the provided version label.
     pub Commit  => commit(version: String) -> Result<(), pond_core::Error>,
-    /// Queries metadata about the underlying the directory or file.
+    /// Queries metadata about the underlying directory or file.
     pub Metadata => metadata(path: crate::path::Path) -> pond_core::Result<FileAttr>,
     /// Checks if the provided path exists. Returns `Ok(true)` if the path points to an existing
     /// entity.

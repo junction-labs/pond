@@ -51,6 +51,7 @@ impl VolumeAdapter {
     }
 }
 
+/// Describes an entry within a directory.
 #[derive(Clone, Debug)]
 pub struct DirEntry {
     path: crate::path::Path,

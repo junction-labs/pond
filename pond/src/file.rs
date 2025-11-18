@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::Volume;
 
-/// A File handle for a file within Pond.
+/// A File handle for a file within Pond. Not thread-safe.
 pub struct File {
     fd: pond_core::Fd,
     attr: FileAttr,

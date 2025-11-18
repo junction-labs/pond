@@ -122,6 +122,7 @@ impl From<u64> for Ino {
     }
 }
 
+/// Attributes for a file within a Pond volume.
 #[derive(Debug, Clone)]
 pub struct FileAttr {
     /// Inode number
