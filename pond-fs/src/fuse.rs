@@ -118,7 +118,7 @@ impl fuser::Filesystem for Pond {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let iter = fs_try!(reply, self.volume.readdir(ino.into()));
+        let iter = fs_try!(reply, self.volume.readdir(ino.into(), None));
         let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
 
         for (i, entry) in iter.enumerate().skip(offset) {

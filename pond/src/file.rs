@@ -73,7 +73,6 @@ impl AsyncRead for File {
                     .map_err(std::io::Error::other)?
                     .boxed();
                 self.read_fut = Some(fut);
-
                 // we just created the fut, let them know they can poll it again and the next time
                 // we'll attach the context to the fut
                 cx.waker().wake_by_ref();

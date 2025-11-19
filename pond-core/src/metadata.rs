@@ -777,6 +777,22 @@ impl VolumeMetadata {
         })
     }
 
+    /// Iterate over the entries in a directory, but with a filename offset. Returns an iterator of
+    /// `(filename, attr)` pairs where the first pair's filename must be greater than the offset.
+    pub(crate) fn readdir_with_offset<'a>(
+        &'a self,
+        ino: Ino,
+        offset: String,
+    ) -> crate::Result<ReadDir<'a>> {
+        let parents = self.dir_path(ino)?;
+        Ok(ReadDir {
+            data: &self.data,
+            locations: &self.locations,
+            range: self.dirs.range(entry_range_with_offset(ino, offset)?),
+            parents,
+        })
+    }
+
     fn dir_path(&'_ self, ino: Ino) -> crate::Result<Vec<&'_ str>> {
         let mut parents = VecDeque::new();
         let mut current_ino = ino;
@@ -941,6 +957,18 @@ fn entry_range(ino: Ino) -> crate::Result<std::ops::Range<EntryKey<'static>>> {
     let start: EntryKey = (ino, "").into();
     let end: EntryKey = (ino.add(1)?, "").into();
     Ok(start..end)
+}
+
+fn entry_range_with_offset(
+    ino: Ino,
+    offset: String,
+) -> crate::Result<impl std::ops::RangeBounds<EntryKey<'static>>> {
+    let start: EntryKey = (ino, offset).into();
+    let end: EntryKey = (ino.add(1)?, "").into();
+    Ok((
+        std::ops::Bound::Excluded(start),
+        std::ops::Bound::Excluded(end),
+    ))
 }
 
 /// The iterator returned from [readdir][Volume::readdir].

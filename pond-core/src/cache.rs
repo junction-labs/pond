@@ -154,23 +154,24 @@ impl ChunkCache {
         // range, instead of at the start of an aligned chunk. using Bytes::slice
         // here means we're just taking a ref-counted view into the cache and not
         // actually copying the range.
-        if let Some(first_chunk) = chunks.first_mut() {
-            let chunk_offset = read_offsets[0];
-            let slice_start = (offset - chunk_offset) as usize;
-            *first_chunk = first_chunk.slice(slice_start..);
+        let mut remaining = len;
+        for (idx, chunk) in chunks.iter_mut().enumerate() {
+            let chunk_offset = read_offsets[idx];
+            let mut start = 0usize;
+            if idx == 0 {
+                start = (offset - chunk_offset) as usize;
+            }
+            let available = chunk.len().saturating_sub(start);
+            if available == 0 {
+                *chunk = chunk.slice(0..0);
+                continue;
+            }
+            let take = usize::try_from(remaining.min(available as u64)).unwrap_or(available);
+            let end = start + take;
+            *chunk = chunk.slice(start..end);
+            remaining -= take as u64;
         }
-        // trim the last chunk so that it ends at the end of the requested range,
-        // or the end of the object - whichever is shorter - instead of ending
-        // at a chunk alignment boundary.
-        //
-        // slicing Bytes means that we're taking a ref-counted view into the cache
-        // instead of making a copy of the range.
-        if let Some(last_chunk) = chunks.last_mut() {
-            let chunk_offset = read_offsets[read_offsets.len() - 1];
-            let object_end = offset + len;
-            let slice_end = std::cmp::min((object_end - chunk_offset) as usize, last_chunk.len());
-            *last_chunk = last_chunk.slice(..slice_end);
-        }
+        debug_assert_eq!(remaining, 0, "cache returned fewer bytes than requested");
 
         Ok(chunks)
     }

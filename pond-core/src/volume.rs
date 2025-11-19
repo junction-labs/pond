@@ -209,9 +209,21 @@ impl Volume {
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = DirEntry<'_>>> {
-        let iter = self.meta.readdir(ino)?;
-        Ok(iter)
+    pub fn readdir(
+        &self,
+        ino: Ino,
+        offset: Option<String>,
+    ) -> Result<impl Iterator<Item = DirEntry<'_>>> {
+        match offset {
+            Some(offset) => {
+                let iter = self.meta.readdir_with_offset(ino, offset)?;
+                Ok(iter)
+            }
+            None => {
+                let iter = self.meta.readdir(ino)?;
+                Ok(iter)
+            }
+        }
     }
 
     pub fn create(

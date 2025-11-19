@@ -205,15 +205,8 @@ impl VolumeAdapter {
         let parent = Path::new(path.as_str());
         let entries = self
             .inner
-            .readdir(attr.ino)?
+            .readdir(attr.ino, offset)?
             .filter(|entry| entry.attr().ino.is_regular())
-            // it's hard to pull this None check for offset and conditionally apply this chain
-            // operation because the iter types would be different in either branch.
-            .skip_while(|entry| match &offset {
-                Some(offset) => *entry.name() <= **offset,
-                // if offset is none, false doesn't skip anything.
-                None => false,
-            })
             .take(len.get())
             .map(|entry| DirEntry {
                 path: parent.join(entry.name()).into(),
@@ -305,7 +298,7 @@ impl VolumeAdapter {
     fn remove_dir_contents(&mut self, ino: Ino) -> pond_core::Result<()> {
         let entries: Vec<_> = self
             .inner
-            .readdir(ino)?
+            .readdir(ino, None)?
             .map(|e| (e.name().to_string(), e.attr().clone()))
             .collect();
 
