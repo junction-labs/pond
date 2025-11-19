@@ -1,0 +1,26 @@
+[package]
+name = "pond-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap.workspace = true
+backon.workspace = true
+bytes.workspace = true
+flatbuffers.workspace = true
+foyer.workspace = true
+foyer-memory.workspace = true
+futures.workspace = true
+metrics.workspace = true
+object_store.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tempfile.workspace = true
+url.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+arbtest.workspace = true
+arbitrary.workspace = true
+rand.workspace = true

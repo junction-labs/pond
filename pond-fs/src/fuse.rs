@@ -1,4 +1,4 @@
-use pond::{ErrorKind, Fd, Ino, Volume};
+use pond_core::{ErrorKind, Fd, Ino, Volume};
 use std::ffi::OsStr;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -36,19 +36,19 @@ trait AsErrno {
     fn as_errno(&self) -> libc::c_int;
 }
 
-impl AsErrno for pond::ErrorKind {
+impl AsErrno for pond_core::ErrorKind {
     fn as_errno(&self) -> libc::c_int {
         match self {
-            pond::ErrorKind::IsADirectory => libc::EISDIR,
-            pond::ErrorKind::NotADirectory => libc::ENOTDIR,
-            pond::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
-            pond::ErrorKind::AlreadyExists => libc::EEXIST,
-            pond::ErrorKind::NotFound => libc::ENOENT,
-            pond::ErrorKind::PermissionDenied => libc::EPERM,
-            pond::ErrorKind::InvalidData => libc::EINVAL,
-            pond::ErrorKind::TimedOut => libc::ETIMEDOUT,
-            pond::ErrorKind::Unsupported => libc::ENOTSUP,
-            pond::ErrorKind::Other | _ => libc::EIO,
+            pond_core::ErrorKind::IsADirectory => libc::EISDIR,
+            pond_core::ErrorKind::NotADirectory => libc::ENOTDIR,
+            pond_core::ErrorKind::DirectoryNotEmpty => libc::ENOTEMPTY,
+            pond_core::ErrorKind::AlreadyExists => libc::EEXIST,
+            pond_core::ErrorKind::NotFound => libc::ENOENT,
+            pond_core::ErrorKind::PermissionDenied => libc::EPERM,
+            pond_core::ErrorKind::InvalidData => libc::EINVAL,
+            pond_core::ErrorKind::TimedOut => libc::ETIMEDOUT,
+            pond_core::ErrorKind::Unsupported => libc::ENOTSUP,
+            pond_core::ErrorKind::Other | _ => libc::EIO,
         }
     }
 }
@@ -58,7 +58,7 @@ macro_rules! fs_try {
         match $e {
             Ok(v) => v,
             Err(err) => {
-                let err: pond::Error = err.into();
+                let err: pond_core::Error = err.into();
                 tracing::error!("{err}");
                 $reply.error(err.kind().as_errno());
                 return;
@@ -67,7 +67,7 @@ macro_rules! fs_try {
     };
 }
 
-fn from_os_str(s: &OsStr) -> pond::Result<&str> {
+fn from_os_str(s: &OsStr) -> pond_core::Result<&str> {
     s.to_str().ok_or_else(|| ErrorKind::InvalidData.into())
 }
 
@@ -118,7 +118,7 @@ impl fuser::Filesystem for Pond {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let iter = fs_try!(reply, self.volume.readdir(ino.into()));
+        let iter = fs_try!(reply, self.volume.readdir(ino.into(), None));
         let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
 
         for (i, entry) in iter.enumerate().skip(offset) {
@@ -377,7 +377,7 @@ impl fuser::Filesystem for Pond {
     }
 }
 
-fn fuse_attr(uid: u32, gid: u32, attr: &pond::FileAttr) -> fuser::FileAttr {
+fn fuse_attr(uid: u32, gid: u32, attr: &pond_core::FileAttr) -> fuser::FileAttr {
     // directories get rwxr-xr-x and files get rw-r--r--
     let perm = if attr.is_directory() { 0o744 } else { 0o644 };
     // root gets 2 links and everything else just has one. it doesn't really
@@ -407,10 +407,10 @@ fn fuse_attr(uid: u32, gid: u32, attr: &pond::FileAttr) -> fuser::FileAttr {
     }
 }
 
-fn fuse_kind(kind: pond::FileType) -> fuser::FileType {
+fn fuse_kind(kind: pond_core::FileType) -> fuser::FileType {
     match kind {
-        pond::FileType::Regular => fuser::FileType::RegularFile,
-        pond::FileType::Directory => fuser::FileType::Directory,
+        pond_core::FileType::Regular => fuser::FileType::RegularFile,
+        pond_core::FileType::Directory => fuser::FileType::Directory,
     }
 }
 

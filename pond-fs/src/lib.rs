@@ -12,7 +12,7 @@ use nix::{
     sys::{signal::Signal, wait::waitpid},
     unistd::ForkResult,
 };
-use pond::{Client, FileType, Ino, Version, Volume};
+use pond_core::{Client, FileType, Ino, Version, Volume};
 use std::{
     fs::File,
     io::{Read, Write},

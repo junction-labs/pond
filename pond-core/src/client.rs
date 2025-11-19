@@ -7,9 +7,7 @@ use crate::{
 pub struct Client {
     store: crate::storage::Storage,
     metrics_snapshot_fn: Option<Box<dyn Fn() -> Vec<u8> + Send>>,
-    cache_size: u64,
-    chunk_size: u64,
-    readahead: u64,
+    cache_config: CacheConfig,
 }
 
 impl Client {
@@ -20,12 +18,7 @@ impl Client {
         Ok(Client {
             store,
             metrics_snapshot_fn: None,
-            // 256 MiB
-            cache_size: 256 * 1024 * 1024,
-            // 16 MiB
-            chunk_size: 16 * 1024 * 1024,
-            // 64 MiB
-            readahead: 32 * 1024 * 1024,
+            cache_config: CacheConfig::default(),
         })
     }
 
@@ -39,12 +32,7 @@ impl Client {
         Ok(Client {
             store,
             metrics_snapshot_fn: None,
-            // 256 MiB
-            cache_size: 256 * 1024 * 1024,
-            // 16 MiB
-            chunk_size: 16 * 1024 * 1024,
-            // 64 MiB
-            readahead: 32 * 1024 * 1024,
+            cache_config: CacheConfig::default(),
         })
     }
 
@@ -55,18 +43,23 @@ impl Client {
         self
     }
 
+    pub fn with_cache_config(mut self, config: CacheConfig) -> Self {
+        self.cache_config = config;
+        self
+    }
+
     pub fn with_cache_size(mut self, size: u64) -> Self {
-        self.cache_size = size;
+        self.cache_config.max_cache_size_bytes = size;
         self
     }
 
     pub fn with_chunk_size(mut self, size: u64) -> Self {
-        self.chunk_size = size;
+        self.cache_config.chunk_size_bytes = size;
         self
     }
 
     pub fn with_readahead(mut self, size: u64) -> Self {
-        self.readahead = size;
+        self.cache_config.readahead_size_bytes = size;
         self
     }
 
@@ -84,14 +77,7 @@ impl Client {
             None => &self.store.latest_version().await?,
         };
         let metadata = self.store.load_version(version).await?;
-        let cache = ChunkCache::new(
-            CacheConfig {
-                max_cache_size_bytes: self.cache_size,
-                chunk_size_bytes: self.chunk_size,
-                readahead_size_bytes: self.readahead,
-            },
-            self.store.clone(),
-        );
+        let cache = ChunkCache::new(self.cache_config.clone(), self.store.clone());
 
         Ok(Volume::new(
             metadata,
@@ -104,14 +90,7 @@ impl Client {
     /// Create a new volume.
     pub async fn create_volume(&mut self) -> Volume {
         let metadata = VolumeMetadata::empty();
-        let cache = ChunkCache::new(
-            CacheConfig {
-                max_cache_size_bytes: self.cache_size,
-                chunk_size_bytes: self.chunk_size,
-                readahead_size_bytes: self.readahead,
-            },
-            self.store.clone(),
-        );
+        let cache = ChunkCache::new(self.cache_config.clone(), self.store.clone());
 
         Volume::new(
             metadata,
