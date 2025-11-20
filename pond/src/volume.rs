@@ -12,7 +12,7 @@ use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{BufReader, Read},
     os::unix::fs::FileExt,
     path::Path,
@@ -61,7 +61,7 @@ enum FileDescriptor {
         range: ByteRange,
     },
     Staged {
-        file: File,
+        file: Arc<File>,
     },
     Version,
     Commit,
@@ -215,7 +215,11 @@ impl Volume {
             ByteRange::empty(),
         )?;
 
-        let fd = new_fd(&mut self.fds, attr.ino, FileDescriptor::Staged { file })?;
+        let fd = new_fd(
+            &mut self.fds,
+            attr.ino,
+            FileDescriptor::Staged { file: file.into() },
+        )?;
         Ok((attr, fd))
     }
 
@@ -265,15 +269,13 @@ impl Volume {
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = File::options()
-                        .read(true)
-                        .write(true)
-                        .open(path)
-                        .map_err(|e| {
-                            Error::with_source(e.kind().into(), "failed to open staged file", e)
-                        })?;
+                    let file = open_file(path, true).await?;
 
-                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
+                    new_fd(
+                        &mut self.fds,
+                        ino,
+                        FileDescriptor::Staged { file: file.into() },
+                    )
                 }
                 Some((Location::Committed { .. }, ..)) => {
                     // truncate the file (by assigning it a brand new staged file) if it's
@@ -290,7 +292,11 @@ impl Volume {
                         Some(Modify::Set((0, 0).into())),
                     )?;
                     // only create the fd once the file is open and metadata is valid
-                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
+                    new_fd(
+                        &mut self.fds,
+                        ino,
+                        FileDescriptor::Staged { file: file.into() },
+                    )
                 }
                 None => Err(ErrorKind::NotFound.into()),
             },
@@ -314,10 +320,12 @@ impl Volume {
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = File::open(path).map_err(|e| {
-                        Error::with_source(e.kind().into(), "failed to open staged file", e)
-                    })?;
-                    new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
+                    let file = open_file(path, false).await?;
+                    new_fd(
+                        &mut self.fds,
+                        ino,
+                        FileDescriptor::Staged { file: file.into() },
+                    )
                 }
                 Some((Location::Committed { key }, range)) => {
                     let key = Arc::new(self.store.child_path(key));
@@ -360,9 +368,7 @@ impl Volume {
             }
             Some(FileDescriptor::Staged { file, .. }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "staged");
-                read_file_at(file, offset, buf).map_err(|e| {
-                    Error::with_source(e.kind().into(), "failed to read staged file", e)
-                })
+                read_file_at(file.clone(), offset, buf).await
             }
             None => Err(ErrorKind::NotFound.into()),
         }
@@ -403,10 +409,7 @@ impl Volume {
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
                 scoped_timer!("pond_volume_write_latency_secs");
-                let n = write_file_at(file, offset, data).map_err(|e| {
-                    let kind = e.kind().into();
-                    Error::with_source(kind, "failed to write staged file", e)
-                })?;
+                let n = write_file_at(file.clone(), offset, data).await?;
                 self.modify(
                     fd.ino,
                     SystemTime::now(),
@@ -557,12 +560,40 @@ impl Volume {
     }
 }
 
-fn read_file_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-    file.read_at(buf, offset)
+macro_rules! try_sync {
+    ($sync: expr, $context: literal) => {
+        tokio::task::spawn_blocking(move || $sync)
+            .await
+            .map_err(|e| Error::with_source(ErrorKind::Other, $context, e))?
+    };
 }
 
-fn write_file_at(file: &File, offset: u64, buf: &[u8]) -> std::io::Result<usize> {
-    file.write_at(buf, offset)
+/// Opens a std::fs::File for reading (and writing if `write` is set).
+async fn open_file(path: &Path, write: bool) -> Result<File> {
+    let copy = path.to_path_buf();
+    try_sync!(
+        File::options().read(true).write(write).open(copy),
+        "join error for std::fs::File::open"
+    )
+    .map_err(|e| Error::with_source(e.kind().into(), "failed to open staged file", e))
+}
+
+async fn read_file_at(file: Arc<File>, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    let bytes = bytes::BytesMut::zeroed(buf.len());
+    let mut copy = bytes.clone();
+
+    let n = try_sync!(file.read_at(&mut copy, offset), "join error for read_at")
+        .map_err(|e| Error::with_source(e.kind().into(), "failed to read staged file", e))?;
+
+    buf[..n].copy_from_slice(&bytes[..n]);
+    Ok(n)
+}
+
+async fn write_file_at(file: Arc<File>, offset: u64, buf: &[u8]) -> Result<usize> {
+    let copy = buf.to_vec();
+    let n = try_sync!(file.write_at(&copy, offset), "join error for write_at")
+        .map_err(|e| Error::with_source(e.kind().into(), "failed to write staged file", e))?;
+    Ok(n)
 }
 
 fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
@@ -632,9 +663,7 @@ impl<'a> StagedVolume<'a> {
         for (attr, path) in self.inner.meta.iter_staged() {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let file = File::open(path).map_err(|e| {
-                    Error::with_source(e.kind().into(), "failed to open staged file", e)
-                })?;
+                let file = open_file(path, false).await?;
                 let mut reader = BufReader::new(file).take(attr.size);
 
                 loop {
