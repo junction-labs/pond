@@ -12,7 +12,6 @@ use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
     io::{BufReader, Read},
     os::unix::fs::FileExt,
     path::Path,
@@ -61,7 +60,7 @@ enum FileDescriptor {
         range: ByteRange,
     },
     Staged {
-        file: Arc<File>,
+        file: Arc<std::fs::File>,
     },
     Version,
     Commit,
@@ -569,27 +568,36 @@ macro_rules! try_sync {
 }
 
 /// Opens a std::fs::File for reading (and writing if `write` is set).
-async fn open_file(path: &Path, write: bool) -> Result<File> {
+async fn open_file(path: &Path, write: bool) -> Result<std::fs::File> {
     let copy = path.to_path_buf();
     try_sync!(
-        File::options().read(true).write(write).open(copy),
+        std::fs::File::options().read(true).write(write).open(copy),
         "join error for std::fs::File::open"
     )
     .map_err(|e| Error::with_source(e.kind().into(), "failed to open staged file", e))
 }
 
-async fn read_file_at(file: Arc<File>, offset: u64, buf: &mut [u8]) -> Result<usize> {
-    let bytes = bytes::BytesMut::zeroed(buf.len());
-    let mut copy = bytes.clone();
+async fn read_file_at(file: Arc<std::fs::File>, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    let size = buf.len();
+    let bytes = try_sync!(
+        {
+            let mut bytes = bytes::BytesMut::zeroed(size);
+            let n = file.read_at(&mut bytes, offset)?;
+            bytes.truncate(n);
+            Ok(bytes.freeze())
+        },
+        "join error for read_at"
+    )
+    .map_err(|e: std::io::Error| {
+        Error::with_source(e.kind().into(), "failed to read staged file", e)
+    })?;
 
-    let n = try_sync!(file.read_at(&mut copy, offset), "join error for read_at")
-        .map_err(|e| Error::with_source(e.kind().into(), "failed to read staged file", e))?;
-
-    buf[..n].copy_from_slice(&bytes[..n]);
+    let n = bytes.len();
+    buf[..n].copy_from_slice(&bytes);
     Ok(n)
 }
 
-async fn write_file_at(file: Arc<File>, offset: u64, buf: &[u8]) -> Result<usize> {
+async fn write_file_at(file: Arc<std::fs::File>, offset: u64, buf: &[u8]) -> Result<usize> {
     let copy = buf.to_vec();
     let n = try_sync!(file.write_at(&copy, offset), "join error for write_at")
         .map_err(|e| Error::with_source(e.kind().into(), "failed to write staged file", e))?;
