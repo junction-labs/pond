@@ -60,6 +60,8 @@ enum FileDescriptor {
         range: ByteRange,
     },
     Staged {
+        // Note: we could keep a bytes::Bytes around to re-use as a buffer when reading from and
+        // writing to this file to avoid the overhead of allocations.
         file: Arc<std::fs::File>,
     },
     Version,
@@ -560,10 +562,16 @@ impl Volume {
 }
 
 macro_rules! try_sync {
-    ($sync: expr, $context: literal) => {
-        tokio::task::spawn_blocking(move || $sync)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::Other, $context, e))?
+    ($sync: expr, $join_err_cx: literal, $expr_err_cx: literal) => {
+        match tokio::task::spawn_blocking(move || $sync).await {
+            Ok(Ok(rv)) => Ok(rv),
+            Ok(Err(e)) => Err(Error::with_source(e.kind().into(), $expr_err_cx, e)),
+            Err(e) => Err(Error::with_source(
+                ErrorKind::Other,
+                concat!("spawn_blocking failed for ", $join_err_cx),
+                e,
+            )),
+        }
     };
 }
 
@@ -572,9 +580,9 @@ async fn open_file(path: &Path, write: bool) -> Result<std::fs::File> {
     let copy = path.to_path_buf();
     try_sync!(
         std::fs::File::options().read(true).write(write).open(copy),
-        "join error for std::fs::File::open"
+        "std::fs::File::open",
+        "failed to open staged file"
     )
-    .map_err(|e| Error::with_source(e.kind().into(), "failed to open staged file", e))
 }
 
 async fn read_file_at(file: Arc<std::fs::File>, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -584,24 +592,28 @@ async fn read_file_at(file: Arc<std::fs::File>, offset: u64, buf: &mut [u8]) -> 
             let mut bytes = bytes::BytesMut::zeroed(size);
             let n = file.read_at(&mut bytes, offset)?;
             bytes.truncate(n);
-            Ok(bytes.freeze())
+            Ok::<_, std::io::Error>(bytes.freeze())
         },
-        "join error for read_at"
-    )
-    .map_err(|e: std::io::Error| {
-        Error::with_source(e.kind().into(), "failed to read staged file", e)
-    })?;
+        "os::unix::fs::FileExt::read_at",
+        "failed to read staged file"
+    )?;
 
     let n = bytes.len();
+    assert!(
+        n <= size,
+        "we should not have read more from the file than our buffer allows"
+    );
     buf[..n].copy_from_slice(&bytes);
     Ok(n)
 }
 
 async fn write_file_at(file: Arc<std::fs::File>, offset: u64, buf: &[u8]) -> Result<usize> {
     let copy = buf.to_vec();
-    let n = try_sync!(file.write_at(&copy, offset), "join error for write_at")
-        .map_err(|e| Error::with_source(e.kind().into(), "failed to write staged file", e))?;
-    Ok(n)
+    try_sync!(
+        file.write_at(&copy, offset),
+        "os::unix::fs::FileExt::write_at",
+        "failed to write staged file"
+    )
 }
 
 fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
