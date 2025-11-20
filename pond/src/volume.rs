@@ -12,12 +12,13 @@ use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::{
     collections::BTreeMap,
-    io::SeekFrom,
+    fs::File,
+    io::{BufReader, Read},
+    os::unix::fs::FileExt,
     path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 // TODO: We should use our own Path type abstraction here. std::fs::Path
 // is pretty close to right but offers a bunch of system methods (like canonicalize)
@@ -60,7 +61,7 @@ enum FileDescriptor {
         range: ByteRange,
     },
     Staged {
-        file: tokio::fs::File,
+        file: File,
     },
     Version,
     Commit,
@@ -264,11 +265,10 @@ impl Volume {
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = tokio::fs::File::options()
+                    let file = File::options()
                         .read(true)
                         .write(true)
                         .open(path)
-                        .await
                         .map_err(|e| {
                             Error::with_source(e.kind().into(), "failed to open staged file", e)
                         })?;
@@ -314,7 +314,7 @@ impl Volume {
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => match self.meta.location(ino) {
                 Some((Location::Staged { path }, _)) => {
-                    let file = tokio::fs::File::open(path).await.map_err(|e| {
+                    let file = File::open(path).map_err(|e| {
                         Error::with_source(e.kind().into(), "failed to open staged file", e)
                     })?;
                     new_fd(&mut self.fds, ino, FileDescriptor::Staged { file })
@@ -332,10 +332,10 @@ impl Volume {
         }
     }
 
-    pub async fn read_at(&mut self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        match self.fds.get_mut(&fd) {
+        match self.fds.get(&fd) {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
             Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
@@ -360,7 +360,7 @@ impl Volume {
             }
             Some(FileDescriptor::Staged { file, .. }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "staged");
-                read_at(file, offset, buf).await.map_err(|e| {
+                read_file_at(file, offset, buf).map_err(|e| {
                     Error::with_source(e.kind().into(), "failed to read staged file", e)
                 })
             }
@@ -403,7 +403,7 @@ impl Volume {
             // write directly into a staged file
             Some(FileDescriptor::Staged { file, .. }) => {
                 scoped_timer!("pond_volume_write_latency_secs");
-                let n = write_at(file, offset, data).await.map_err(|e| {
+                let n = write_file_at(file, offset, data).map_err(|e| {
                     let kind = e.kind().into();
                     Error::with_source(kind, "failed to write staged file", e)
                 })?;
@@ -557,24 +557,12 @@ impl Volume {
     }
 }
 
-async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
-    file: &mut R,
-    offset: u64,
-    buf: &mut [u8],
-) -> std::io::Result<usize> {
-    file.seek(SeekFrom::Start(offset)).await?;
-    let n = file.read(buf).await?;
-    Ok(n)
+fn read_file_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    file.read_at(buf, offset)
 }
 
-async fn write_at<W: AsyncWrite + AsyncSeek + Unpin>(
-    file: &mut W,
-    offset: u64,
-    buf: &[u8],
-) -> std::io::Result<usize> {
-    file.seek(SeekFrom::Start(offset)).await?;
-    let n = file.write(buf).await?;
-    Ok(n)
+fn write_file_at(file: &File, offset: u64, buf: &[u8]) -> std::io::Result<usize> {
+    file.write_at(buf, offset)
 }
 
 fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
@@ -607,13 +595,6 @@ macro_rules! try_mpu {
     ($mpu:expr, $context:literal) => {
         $mpu.await
             .map_err(|e| Error::with_source((&e).into(), $context, e))?
-    };
-}
-
-macro_rules! try_io {
-    ($io: expr, $context: literal) => {
-        $io.await
-            .map_err(|e| Error::with_source(e.kind().into(), $context, e))?
     };
 }
 
@@ -651,18 +632,19 @@ impl<'a> StagedVolume<'a> {
         for (attr, path) in self.inner.meta.iter_staged() {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let file = try_io!(tokio::fs::File::open(path), "failed to open staged file");
-                let mut reader = tokio::io::BufReader::new(file).take(attr.size);
+                let file = File::open(path).map_err(|e| {
+                    Error::with_source(e.kind().into(), "failed to open staged file", e)
+                })?;
+                let mut reader = BufReader::new(file).take(attr.size);
 
                 loop {
                     // to avoid going over Self::MPU_UPLOAD_SIZE, limit how many bytes we read
                     // once we're close to the limit. this helps us push up perfectly aligned parts
                     // for the multipart upload.
                     let limit = Self::READ_BUF_SIZE.min(buf.capacity());
-                    let n = try_io!(
-                        reader.read(&mut read_buf[..limit]),
-                        "failed to read staged file"
-                    );
+                    let n = reader.read(&mut read_buf[..limit]).map_err(|e| {
+                        Error::with_source(e.kind().into(), "failed to read staged file", e)
+                    })?;
 
                     if n == 0 {
                         break;

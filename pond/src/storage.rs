@@ -1,6 +1,6 @@
 use futures::TryFutureExt;
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem};
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 use tempfile::TempDir;
 use url::Url;
 
@@ -182,14 +182,14 @@ impl Storage {
 }
 
 impl Storage {
-    pub(crate) fn tempfile(&self) -> Result<(std::path::PathBuf, tokio::fs::File)> {
+    pub(crate) fn tempfile(&self) -> Result<(std::path::PathBuf, File)> {
         let f = tempfile::Builder::new()
             .disable_cleanup(true)
             .tempfile_in(&*self.temp_dir)
             .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempfile", e))?;
 
-        let (f, path) = f.into_parts();
-        Ok((path.to_path_buf(), tokio::fs::File::from_std(f)))
+        let (file, path) = f.into_parts();
+        Ok((path.to_path_buf(), file))
     }
 
     pub(crate) async fn list_versions(&self) -> Result<Vec<Version>> {
