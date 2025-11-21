@@ -442,6 +442,16 @@ impl Volume {
             ));
         }
 
+        if !self.fds.is_empty() {
+            let num_open_fds = self.fds.len();
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "all open files must be closed before committing. files open: {num_open_fds}"
+                ),
+            ));
+        }
+
         let mut staged = StagedVolume::new(self);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
