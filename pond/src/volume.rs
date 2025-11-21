@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, Error, FileAttr, Ino, Location, OwnedDirEntry, Result,
+    ByteRange, Error, FileAttr, FileType, Ino, Location, OwnedDirEntry, Result,
     cache::{CacheConfig, ChunkCache},
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -488,14 +488,57 @@ fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
     Ok(amt)
 }
 
+pub struct WalkVolume<'a> {
+    guard: RwLockReadGuard<'a, VolumeMetadata>,
+    stack: Vec<std::vec::IntoIter<OwnedDirEntry>>,
+}
+
+impl<'a> WalkVolume<'a> {
+    fn new(guard: RwLockReadGuard<'a, VolumeMetadata>, ino: Ino) -> Result<Self> {
+        let entries = guard
+            .readdir(ino)?
+            .map(OwnedDirEntry::from)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            guard,
+            stack: vec![entries.into_iter()],
+        })
+    }
+
+    fn push_dir_entries(&mut self, ino: Ino) -> Result<()> {
+        let entries = self
+            .guard
+            .readdir(ino)?
+            .map(OwnedDirEntry::from)
+            .collect::<Vec<_>>();
+        self.stack.push(entries.into_iter());
+        Ok(())
+    }
+}
+
+impl<'a> Iterator for WalkVolume<'a> {
+    type Item = Result<OwnedDirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let iter = self.stack.last_mut()?;
+            if let Some(entry) = iter.next() {
+                if entry.attr().kind == FileType::Directory
+                    && let Err(e) = self.push_dir_entries(entry.attr().ino)
+                {
+                    return Some(Err(e));
+                }
+                return Some(Ok(entry));
+            } else {
+                self.stack.pop();
+            }
+        }
+    }
+}
+
 impl Volume {
-    pub fn walk(&self, ino: Ino) -> Result<impl Iterator<Item = Result<OwnedDirEntry>>> {
-        let guard = self.metadata();
-        let entries: Vec<Result<OwnedDirEntry>> = guard
-            .walk(ino)?
-            .map(|res| res.map(OwnedDirEntry::from))
-            .collect();
-        Ok(entries.into_iter())
+    pub fn walk(&self, ino: Ino) -> Result<WalkVolume<'_>> {
+        WalkVolume::new(self.metadata(), ino)
     }
 
     /// Pack a local directory into a Pond volume.
