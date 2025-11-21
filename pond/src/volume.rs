@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
+    ByteRange, Error, FileAttr, Ino, Location, OwnedDirEntry, Result,
     cache::{CacheConfig, ChunkCache},
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -10,6 +10,7 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -53,7 +54,7 @@ impl From<Fd> for u64 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum FileDescriptor {
     Committed {
         key: Arc<object_store::path::Path>,
@@ -74,9 +75,9 @@ enum FileDescriptor {
 }
 
 pub struct Volume {
-    meta: VolumeMetadata,
+    meta: Arc<RwLock<VolumeMetadata>>,
     cache: ChunkCache,
-    fds: BTreeMap<Fd, FileDescriptor>,
+    fds: Arc<RwLock<BTreeMap<Fd, FileDescriptor>>>,
     store: crate::storage::Storage,
     metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
 }
@@ -95,24 +96,24 @@ impl Volume {
         });
 
         Self {
-            meta,
+            meta: Arc::new(RwLock::new(meta)),
             cache,
-            fds: Default::default(),
+            fds: Arc::new(RwLock::new(BTreeMap::new())),
             store,
             metrics_snapshot,
         }
     }
 
-    pub(crate) fn metadata(&self) -> &VolumeMetadata {
-        &self.meta
+    pub(crate) fn metadata(&self) -> RwLockReadGuard<'_, VolumeMetadata> {
+        self.meta.read()
     }
 
-    pub(crate) fn metadata_mut(&mut self) -> &mut VolumeMetadata {
-        &mut self.meta
+    pub(crate) fn metadata_mut(&self) -> RwLockWriteGuard<'_, VolumeMetadata> {
+        self.meta.write()
     }
 
     pub(crate) fn modify(
-        &mut self,
+        &self,
         ino: Ino,
         mtime: SystemTime,
         ctime: Option<SystemTime>,
@@ -122,14 +123,16 @@ impl Volume {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.meta.modify(ino, mtime, ctime, location, range)?;
+                self.meta
+                    .write()
+                    .modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
         }
     }
 
-    pub fn version(&self) -> &Version {
-        self.metadata().version()
+    pub fn version(&self) -> Version {
+        self.metadata().version().clone()
     }
 
     pub fn object_store_description(&self) -> String {
@@ -145,91 +148,90 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.meta.to_bytes()
+        let meta = self.metadata();
+        meta.to_bytes()
     }
 
     pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
-        self.meta.to_bytes_with_version(version)
+        let meta = self.metadata();
+        meta.to_bytes_with_version(version)
     }
 
-    pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
+    pub fn getattr(&self, ino: Ino) -> Result<FileAttr> {
         scoped_timer!("pond_volume_getattr_latency_secs");
-        match self.meta.getattr(ino) {
-            Some(attr) => Ok(attr),
+        match self.metadata().getattr(ino) {
+            Some(attr) => Ok(attr.clone()),
             None => Err(ErrorKind::NotFound.into()),
         }
     }
 
     pub fn setattr(
-        &mut self,
+        &self,
         ino: Ino,
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
-    ) -> Result<&FileAttr> {
-        self.meta.setattr(ino, mtime, ctime)
+    ) -> Result<FileAttr> {
+        let mut meta = self.metadata_mut();
+        meta.setattr(ino, mtime, ctime).cloned()
     }
 
-    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
+    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<FileAttr>> {
         scoped_timer!("pond_volume_lookup_latency_secs");
-        let attr = self.meta.lookup(parent, name)?;
-        Ok(attr)
+        let meta = self.metadata();
+        Ok(meta.lookup(parent, name)?.cloned())
     }
 
-    pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr> {
-        self.meta.mkdir(parent, name)
+    pub fn mkdir(&self, parent: Ino, name: String) -> Result<FileAttr> {
+        let mut meta = self.metadata_mut();
+        meta.mkdir(parent, name).cloned()
     }
 
-    pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.rmdir(parent, name)?;
+    pub fn rmdir(&self, parent: Ino, name: &str) -> Result<()> {
+        self.metadata_mut().rmdir(parent, name)?;
         Ok(())
     }
 
-    pub fn rename(
-        &mut self,
-        parent: Ino,
-        name: &str,
-        newparent: Ino,
-        newname: String,
-    ) -> Result<()> {
-        self.meta.rename(parent, name, newparent, newname)?;
+    pub fn rename(&self, parent: Ino, name: &str, newparent: Ino, newname: String) -> Result<()> {
+        self.metadata_mut()
+            .rename(parent, name, newparent, newname)?;
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = DirEntry<'_>>> {
-        let iter = self.meta.readdir(ino)?;
-        Ok(iter)
+    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = OwnedDirEntry>> {
+        let guard = self.metadata();
+        let entries: Vec<OwnedDirEntry> = guard.readdir(ino)?.map(OwnedDirEntry::from).collect();
+        Ok(entries.into_iter())
     }
 
-    pub fn create(
-        &mut self,
-        parent: Ino,
-        name: String,
-        exclusive: bool,
-    ) -> Result<(&FileAttr, Fd)> {
+    pub fn create(&self, parent: Ino, name: String, exclusive: bool) -> Result<(FileAttr, Fd)> {
         let (path, file) = self.store.tempfile()?;
 
-        let attr = self.meta.create(
-            parent,
-            name,
-            exclusive,
-            Location::Staged { path },
-            ByteRange::empty(),
-        )?;
+        let attr = {
+            let mut meta = self.metadata_mut();
+            meta.create(
+                parent,
+                name,
+                exclusive,
+                Location::Staged { path },
+                ByteRange::empty(),
+            )?
+            .clone()
+        };
 
         let fd = new_fd(
-            &mut self.fds,
+            &self.fds,
             attr.ino,
             FileDescriptor::Staged { file: file.into() },
         )?;
         Ok((attr, fd))
     }
 
-    pub fn delete(&mut self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.delete(parent, name)?;
+    pub fn delete(&self, parent: Ino, name: &str) -> Result<()> {
+        self.metadata_mut().delete(parent, name)?;
         Ok(())
     }
 
-    pub fn truncate(&mut self, ino: Ino, size: u64) -> Result<()> {
+    pub fn truncate(&self, ino: Ino, size: u64) -> Result<()> {
         self.modify(
             ino,
             SystemTime::now(),
@@ -263,92 +265,98 @@ impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
     /// Opening a Fd with write permissions will always truncate the file.
-    pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
+    pub async fn open_read_write(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::COMMIT => new_fd(&mut self.fds, ino, FileDescriptor::Commit),
-            Ino::CLEAR_CACHE => new_fd(&mut self.fds, ino, FileDescriptor::ClearCache),
+            Ino::COMMIT => new_fd(&self.fds, ino, FileDescriptor::Commit),
+            Ino::CLEAR_CACHE => new_fd(&self.fds, ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
-            ino => match self.meta.location(ino) {
-                Some((Location::Staged { path }, _)) => {
-                    let file = open_file(path, true).await?;
+            ino => {
+                let location = {
+                    let meta = self.metadata();
+                    meta.location(ino)
+                        .map(|(location, range)| (location.clone(), *range))
+                };
+                match location {
+                    Some((Location::Staged { path }, _)) => {
+                        let file = open_file(&path, true).await?;
 
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
+                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                    }
+                    Some((Location::Committed { .. }, ..)) => {
+                        // truncate the file (by assigning it a brand new staged file) if it's
+                        // committed. the alternative would be to keep a copy of the committed
+                        // file locally as a staged file, which can be expensive if it's a large file.
+                        let (path, file) = self.store.tempfile()?;
+                        let staged = Location::Staged { path };
+                        // modify metadata next
+                        self.modify(
+                            ino,
+                            SystemTime::now(),
+                            None,
+                            Some(staged),
+                            Some(Modify::Set((0, 0).into())),
+                        )?;
+                        // only create the fd once the file is open and metadata is valid
+                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                    }
+                    None => Err(ErrorKind::NotFound.into()),
                 }
-                Some((Location::Committed { .. }, ..)) => {
-                    // truncate the file (by assigning it a brand new staged file) if it's
-                    // committed. the alternative would be to keep a copy of the committed
-                    // file locally as a staged file, which can be expensive if it's a large file.
-                    let (path, file) = self.store.tempfile()?;
-                    let staged = Location::Staged { path };
-                    // modify metadata next
-                    self.modify(
-                        ino,
-                        SystemTime::now(),
-                        None,
-                        Some(staged),
-                        Some(Modify::Set((0, 0).into())),
-                    )?;
-                    // only create the fd once the file is open and metadata is valid
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
-                }
-                None => Err(ErrorKind::NotFound.into()),
-            },
+            }
         }
     }
 
-    pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
+    pub async fn open_read(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
+            Ino::VERSION => new_fd(&self.fds, ino, FileDescriptor::Version),
             Ino::PROM_METRICS => {
                 let data = match &self.metrics_snapshot {
                     Some(metrics) => metrics.load().clone(),
                     None => Default::default(),
                 };
                 new_fd(
-                    &mut self.fds,
+                    &self.fds,
                     ino,
                     FileDescriptor::PromMetrics { snapshot: data },
                 )
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
-            ino => match self.meta.location(ino) {
-                Some((Location::Staged { path }, _)) => {
-                    let file = open_file(path, false).await?;
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
+            ino => {
+                let location = {
+                    let meta = self.metadata();
+                    meta.location(ino)
+                        .map(|(location, range)| (location.clone(), *range))
+                };
+
+                match location {
+                    Some((Location::Staged { path }, _)) => {
+                        let file = open_file(&path, false).await?;
+                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                    }
+                    Some((Location::Committed { key }, range)) => {
+                        let key = Arc::new(self.store.child_path(key.as_ref()));
+                        new_fd(&self.fds, ino, FileDescriptor::Committed { key, range })
+                    }
+                    None => Err(ErrorKind::NotFound.into()),
                 }
-                Some((Location::Committed { key }, range)) => {
-                    let key = Arc::new(self.store.child_path(key));
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Committed { key, range: *range },
-                    )
-                }
-                None => Err(ErrorKind::NotFound.into()),
-            },
+            }
         }
     }
 
     pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        match self.fds.get(&fd) {
+        let descriptor = { self.fds.read().get(&fd).cloned() };
+
+        match descriptor {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
-            Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
-            Some(FileDescriptor::PromMetrics { snapshot }) => read_from_buf(snapshot, offset, buf),
+            Some(FileDescriptor::Version) => {
+                let version = self.version();
+                read_version(&version, offset, buf)
+            }
+            Some(FileDescriptor::PromMetrics { snapshot }) => {
+                read_from_buf(snapshot.as_ref(), offset, buf)
+            }
             Some(FileDescriptor::Committed { key, range }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "committed");
                 // FIXME: readahead needs to know the extent of the location -
@@ -361,10 +369,7 @@ impl Volume {
                     return Ok(0);
                 }
                 let blob_offset = range.offset + offset;
-                let bytes: Vec<Bytes> = self
-                    .cache
-                    .get_at(key.clone(), blob_offset, read_len)
-                    .await?;
+                let bytes: Vec<Bytes> = self.cache.get_at(key, blob_offset, read_len).await?;
                 Ok(copy_into(buf, &bytes))
             }
             Some(FileDescriptor::Staged { file, .. }) => {
@@ -375,10 +380,12 @@ impl Volume {
         }
     }
 
-    pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
+    pub async fn write_at(&self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
 
-        match self.fds.get_mut(&fd) {
+        let descriptor = { self.fds.read().get(&fd).cloned() };
+
+        match descriptor {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
                 Ok(data.len())
@@ -427,14 +434,14 @@ impl Volume {
         }
     }
 
-    pub async fn release(&mut self, fd: Fd) -> Result<()> {
-        match self.fds.remove(&fd) {
+    pub async fn release(&self, fd: Fd) -> Result<()> {
+        match self.fds.write().remove(&fd) {
             Some(_) => Ok(()),
             None => Err(ErrorKind::NotFound.into()),
         }
     }
 
-    pub async fn commit(&mut self, version: Version) -> Result<()> {
+    pub async fn commit(&self, version: Version) -> Result<()> {
         if self.store.exists(&version).await? {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
@@ -445,6 +452,7 @@ impl Volume {
         // don't allow staged files to be open
         if self
             .fds
+            .read()
             .iter()
             .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
         {
@@ -454,7 +462,7 @@ impl Volume {
             ));
         }
 
-        let mut staged = StagedVolume::new(self);
+        let staged = StagedVolume::new(self);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
         staged.persist(version).await?;
@@ -481,12 +489,17 @@ fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
 }
 
 impl Volume {
-    pub fn walk(&self, ino: Ino) -> Result<impl Iterator<Item = Result<DirEntry<'_>>>> {
-        self.meta.walk(ino)
+    pub fn walk(&self, ino: Ino) -> Result<impl Iterator<Item = Result<OwnedDirEntry>>> {
+        let guard = self.metadata();
+        let entries: Vec<Result<OwnedDirEntry>> = guard
+            .walk(ino)?
+            .map(|res| res.map(OwnedDirEntry::from))
+            .collect();
+        Ok(entries.into_iter())
     }
 
     /// Pack a local directory into a Pond volume.
-    pub async fn pack(&mut self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
+    pub async fn pack(&self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
         if self.store.exists(&version).await? {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
@@ -642,7 +655,12 @@ fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
 // FIXME: this needs to allocate and check for remaining fds instead of just
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
-fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor) -> Result<Fd> {
+fn new_fd(
+    fd_set: &RwLock<BTreeMap<Fd, FileDescriptor>>,
+    ino: Ino,
+    d: FileDescriptor,
+) -> Result<Fd> {
+    let mut fd_set = fd_set.write();
     let next_fh = fd_set
         .keys()
         .last()
@@ -662,11 +680,11 @@ macro_rules! try_mpu {
 }
 
 struct StagedVolume<'a> {
-    inner: &'a mut Volume,
+    inner: &'a Volume,
 }
 
 impl<'a> StagedVolume<'a> {
-    fn new(inner: &'a mut Volume) -> Self {
+    fn new(inner: &'a Volume) -> Self {
         Self { inner }
     }
 
@@ -692,10 +710,17 @@ impl<'a> StagedVolume<'a> {
 
         let mut buf = BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE);
         let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
-        for (attr, path) in self.inner.meta.iter_staged() {
+        let staged_files: Vec<(FileAttr, std::path::PathBuf)> = {
+            let meta = self.inner.metadata();
+            meta.iter_staged()
+                .map(|(attr, path)| (attr.clone(), path.clone()))
+                .collect()
+        };
+
+        for (attr, path) in staged_files {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let file = open_file(path, false).await?;
+                let file = open_file(&path, false).await?;
                 let mut reader = BufReader::new(file).take(attr.size);
 
                 loop {
@@ -753,10 +778,10 @@ impl<'a> StagedVolume<'a> {
     }
 
     /// Relocate all staged files to dest.
-    fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
+    fn modify(&self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
         let now = SystemTime::now();
         for (ino, byte_range) in ranges {
-            self.inner.meta.modify(
+            self.inner.modify(
                 ino,
                 now,
                 Some(now),
@@ -766,7 +791,7 @@ impl<'a> StagedVolume<'a> {
         }
 
         // deduplicate and clean up all hanging staged Locations
-        self.inner.meta.clean_staged_locations(dest);
+        self.inner.metadata_mut().clean_staged_locations(dest);
 
         Ok(())
     }
@@ -798,7 +823,7 @@ impl<'a> StagedVolume<'a> {
 
         match res {
             Ok(_) => {
-                self.inner.meta.set_version(version);
+                self.inner.metadata_mut().set_version(version);
                 Ok(())
             }
             // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
@@ -882,12 +907,12 @@ mod tests {
         }
     }
 
-    async fn assert_write(volume: &mut Volume, fd: Fd, contents: &'static str) {
+    async fn assert_write(volume: &Volume, fd: Fd, contents: &'static str) {
         volume.write_at(fd, 0, contents.as_bytes()).await.unwrap();
         volume.release(fd).await.unwrap();
     }
 
-    async fn assert_read(volume: &mut Volume, name: &'static str, contents: &'static str) {
+    async fn assert_read(volume: &Volume, name: &'static str, contents: &'static str) {
         let attr = volume.lookup(Ino::Root, name).unwrap().unwrap();
         let mut buf = vec![0u8; attr.size as usize];
         let fd = volume.open_read(attr.ino).await.unwrap();
@@ -907,11 +932,11 @@ mod tests {
             .unwrap();
 
         // create a volume with three files, all of which are 5 bytes long.
-        let (mut volume, inos) = runtime.block_on(async {
+        let (volume, inos) = runtime.block_on(async {
             let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-            let mut volume = client.create_volume().await;
+            let volume = client.create_volume().await;
 
-            let mut create = async |name, bs| {
+            let create = async |name, bs| {
                 let (attr, fd) = volume
                     .create(Ino::Root, std::primitive::str::to_string(name), true)
                     .unwrap();
@@ -954,47 +979,56 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume().await;
+        let volume = client.create_volume().await;
 
         // clean volume -- this is not staged
-        assert!(!volume.meta.is_staged());
+        {
+            let meta = volume.metadata();
+            assert!(!meta.is_staged());
+        }
 
         // creating two files, it should be a staged volume now.
         let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
         let attr1 = attr1.clone();
-        assert_write(&mut volume, fd1, "hello").await;
+        assert_write(&volume, fd1, "hello").await;
         let (attr2, fd2) = volume.create(Ino::Root, "world.txt".into(), true).unwrap();
         let attr2 = attr2.clone();
-        assert_write(&mut volume, fd2, "world").await;
+        assert_write(&volume, fd2, "world").await;
 
-        assert!(volume.meta.is_staged());
-        for attr in [&attr1, &attr2] {
-            assert!(matches!(
-                volume.meta.location(attr.ino),
-                Some((Location::Staged { .. }, _))
-            ));
+        {
+            let meta = volume.metadata();
+            assert!(meta.is_staged());
+            for attr in [&attr1, &attr2] {
+                assert!(matches!(
+                    meta.location(attr.ino),
+                    Some((Location::Staged { .. }, _))
+                ));
+            }
         }
 
         // commit!!!
         let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
-        assert_write(&mut volume, commit_fd, "next-version").await;
+        assert_write(&volume, commit_fd, "next-version").await;
 
         // after commit, both files are no longer staged
-        assert!(!volume.meta.is_staged());
-        for attr in [&attr1, &attr2] {
-            assert!(matches!(
-                volume.meta.location(attr.ino),
-                Some((Location::Committed { .. }, _))
-            ));
+        {
+            let meta = volume.metadata();
+            assert!(!meta.is_staged());
+            for attr in [&attr1, &attr2] {
+                assert!(matches!(
+                    meta.location(attr.ino),
+                    Some((Location::Committed { .. }, _))
+                ));
+            }
         }
 
         // read the new volume, assert that the committed files have the
         // right contents, and check the version is bumped as expected
-        let mut next_volume = client.load_volume(&None).await.unwrap();
-        let next_version: &str = next_volume.meta.version().as_ref();
-        assert_eq!(next_version, "next-version",);
-        assert_read(&mut next_volume, "hello.txt", "hello").await;
-        assert_read(&mut next_volume, "world.txt", "world").await;
+        let next_volume = client.load_volume(&None).await.unwrap();
+        let next_version = next_volume.version().to_string();
+        assert_eq!(next_version, "next-version");
+        assert_read(&next_volume, "hello.txt", "hello").await;
+        assert_read(&next_volume, "world.txt", "world").await;
     }
 
     #[tokio::test]
@@ -1004,13 +1038,13 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume().await;
+        let volume = client.create_volume().await;
 
         // creating a file, but holding the fd (not releasing it)
         let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
         let attr = attr.clone();
         assert!(matches!(
-            volume.meta.location(attr.ino),
+            volume.meta.read().location(attr.ino),
             Some((Location::Staged { .. }, _))
         ));
 
@@ -1038,7 +1072,7 @@ mod tests {
         let _f3 = volume.open_read_write(Ino::COMMIT).await.unwrap();
         let _f4 = volume.open_read(attr.ino).await.unwrap();
         // this is ok, because none of them are staged
-        assert!(!volume.fds.is_empty());
+        assert!(!volume.fds.read().is_empty());
         volume
             .commit(Version::from_static("next-version"))
             .await

@@ -13,6 +13,7 @@ foyer-memory.workspace = true
 futures.workspace = true
 metrics.workspace = true
 object_store.workspace = true
+parking_lot.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }

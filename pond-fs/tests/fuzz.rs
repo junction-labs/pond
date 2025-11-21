@@ -137,7 +137,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     // pack it to the pack_dir
     runtime
         .block_on(async {
-            let mut volume = client.create_volume().await;
+            let volume = client.create_volume().await;
             volume.pack(expected_dir, version).await?;
             Ok::<_, pond::Error>(())
         })
@@ -264,7 +264,7 @@ fn test_commit(
     // we have all the data from before the commit and nothing
     // from after it.
     let volume = runtime.block_on(client.load_volume(&None)).unwrap();
-    assert_eq!(volume.version(), &Version::from_static("v1"));
+    assert_eq!(volume.version(), Version::from_static("v1"));
 
     let mount = spawn_mount(mount_dir, volume);
     let expected = read_entries(expected_dir);
