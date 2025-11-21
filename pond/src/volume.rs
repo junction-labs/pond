@@ -442,12 +442,19 @@ impl Volume {
             ));
         }
 
-        if !self.fds.is_empty() {
-            let num_open_fds = self.fds.len();
+        // the two conditions we're ok with:
+        // (1) no open fds, e.g. self.fds is empty
+        // (2) self.fds has exactly one fd: the commit fd
+        let is_commit_only_fd = matches!(
+            self.fds.first_key_value(),
+            Some((_, FileDescriptor::Commit))
+        ) && self.fds.len() == 1;
+        if !self.fds.is_empty() && !is_commit_only_fd {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 format!(
-                    "all open files must be closed before committing. files open: {num_open_fds}"
+                    "all open files must be closed before committing, with the exception of the commit file. num open files: {}",
+                    self.fds.len() - (is_commit_only_fd as usize)
                 ),
             ));
         }
@@ -842,6 +849,7 @@ fn should_retry(e: &object_store::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::Client;
 
@@ -915,6 +923,7 @@ mod tests {
                     .unwrap();
                 let ino = attr.ino;
                 volume.write_at(fd, 0, bs).await.unwrap();
+                volume.release(fd).await.unwrap();
                 ino
             };
 
@@ -937,6 +946,7 @@ mod tests {
             runtime.block_on(async {
                 let fd = volume.open_read(*ino).await.unwrap();
                 volume.read_at(fd, offset, &mut buf).await.unwrap();
+                volume.release(fd).await.unwrap();
             });
 
             Ok(())
@@ -991,5 +1001,54 @@ mod tests {
         assert_eq!(next_version, "next-version",);
         assert_read(&mut next_volume, "hello.txt", "hello").await;
         assert_read(&mut next_volume, "world.txt", "world").await;
+    }
+
+    #[tokio::test]
+    async fn commit_with_open_fd() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let volume_path = tempdir.path().join("store");
+        std::fs::create_dir_all(&volume_path).unwrap();
+
+        let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
+        let mut volume = client.create_volume().await;
+
+        // creating a file, but holding the fd (not releasing it)
+        let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let attr = attr.clone();
+
+        assert!(volume.meta.is_staged());
+        assert!(matches!(
+            volume.meta.location(attr.ino),
+            Some((Location::Staged { .. }, _))
+        ));
+
+        // commit using commit fd!
+        let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
+        assert_eq!(
+            volume
+                .write_at(commit_fd, 0, "next-version".as_bytes())
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        volume.release(commit_fd).await.unwrap();
+
+        // now without the commit fd, should be the same error
+        assert_eq!(
+            volume
+                .commit(Version::from_static("next-version"))
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+
+        // close it and we're okay to commit
+        volume.release(fd).await.unwrap();
+        volume
+            .commit(Version::from_static("next-version"))
+            .await
+            .unwrap();
     }
 }
