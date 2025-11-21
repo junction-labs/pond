@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, Error, FileAttr, FileType, Ino, Location, OwnedDirEntry, Result,
+    ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, Result,
     cache::{CacheConfig, ChunkCache},
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -191,9 +191,13 @@ impl Volume {
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = OwnedDirEntry>> {
+    pub fn readdir(
+        &self,
+        ino: Ino,
+        offset: Option<String>,
+    ) -> Result<impl Iterator<Item = DirEntry>> {
         let guard = self.metadata();
-        let entries: Vec<OwnedDirEntry> = guard.readdir(ino)?.map(OwnedDirEntry::from).collect();
+        let entries: Vec<DirEntry> = guard.readdir(ino, offset)?.map(DirEntry::from).collect();
         Ok(entries.into_iter())
     }
 
@@ -482,14 +486,14 @@ fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
 
 pub struct WalkVolume<'a> {
     guard: RwLockReadGuard<'a, VolumeMetadata>,
-    stack: Vec<std::vec::IntoIter<OwnedDirEntry>>,
+    stack: Vec<std::vec::IntoIter<DirEntry>>,
 }
 
 impl<'a> WalkVolume<'a> {
     fn new(guard: RwLockReadGuard<'a, VolumeMetadata>, ino: Ino) -> Result<Self> {
         let entries = guard
-            .readdir(ino)?
-            .map(OwnedDirEntry::from)
+            .readdir(ino, None)?
+            .map(DirEntry::from)
             .collect::<Vec<_>>();
         Ok(Self {
             guard,
@@ -500,8 +504,8 @@ impl<'a> WalkVolume<'a> {
     fn push_dir_entries(&mut self, ino: Ino) -> Result<()> {
         let entries = self
             .guard
-            .readdir(ino)?
-            .map(OwnedDirEntry::from)
+            .readdir(ino, None)?
+            .map(DirEntry::from)
             .collect::<Vec<_>>();
         self.stack.push(entries.into_iter());
         Ok(())
@@ -509,7 +513,7 @@ impl<'a> WalkVolume<'a> {
 }
 
 impl<'a> Iterator for WalkVolume<'a> {
-    type Item = Result<OwnedDirEntry>;
+    type Item = Result<DirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -529,6 +533,8 @@ impl<'a> Iterator for WalkVolume<'a> {
 }
 
 impl Volume {
+    /// Returns a guarded iterator over the entire volume. The guard ensures that iteration is done
+    /// over a consistent view of the Volume.
     pub fn walk(&self, ino: Ino) -> Result<WalkVolume<'_>> {
         WalkVolume::new(self.metadata(), ino)
     }

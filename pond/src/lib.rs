@@ -15,7 +15,7 @@ pub use location::Location;
 pub use metadata::Version;
 pub use volume::{Fd, Volume};
 
-use std::time::SystemTime;
+use std::{path::PathBuf, time::SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -146,7 +146,7 @@ impl FileAttr {
 }
 
 #[derive(Debug, Clone)]
-pub struct DirEntry<'a> {
+pub struct DirEntryRef<'a> {
     name: &'a str,
     parents: Vec<&'a str>,
     attr: &'a FileAttr,
@@ -154,7 +154,7 @@ pub struct DirEntry<'a> {
     data: &'a metadata::EntryData,
 }
 
-impl<'a> DirEntry<'a> {
+impl<'a> DirEntryRef<'a> {
     pub fn name(&self) -> &str {
         self.name
     }
@@ -187,18 +187,25 @@ impl<'a> DirEntry<'a> {
     }
 }
 
-/// Owned equivalent of `DirEntry` that does not borrow from the underlying volume.
+/// Owned equivalent of [`DirEntryRef`] that does not borrow from the underlying volume.
 #[derive(Debug, Clone)]
-pub struct OwnedDirEntry {
-    name: String,
-    parents: Vec<String>,
+pub struct DirEntry {
+    // TODO: swap this out for camino Utf8PathBuf
+    path: PathBuf,
     attr: FileAttr,
     location: Option<(Location, ByteRange)>,
 }
 
-impl OwnedDirEntry {
+impl DirEntry {
     pub fn name(&self) -> &str {
-        &self.name
+        self.path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .expect("should be a valid utf-8 string")
+    }
+
+    pub fn path(&self) -> &str {
+        self.path.to_str().expect("should be a valid utf-8 string")
     }
 
     pub fn attr(&self) -> &FileAttr {
@@ -206,15 +213,7 @@ impl OwnedDirEntry {
     }
 
     pub fn location(&self) -> Option<(&Location, ByteRange)> {
-        self.location
-            .as_ref()
-            .map(|(loc, range)| (loc, *range))
-    }
-
-    pub fn path(&self) -> String {
-        let mut path = self.parents.clone();
-        path.push(self.name.clone());
-        path.join("/")
+        self.location.as_ref().map(|(loc, range)| (loc, *range))
     }
 
     pub fn is_regular(&self) -> bool {
@@ -222,12 +221,13 @@ impl OwnedDirEntry {
     }
 }
 
-impl<'a> From<DirEntry<'a>> for OwnedDirEntry {
-    fn from(entry: DirEntry<'a>) -> Self {
+impl<'a> From<DirEntryRef<'a>> for DirEntry {
+    fn from(entry: DirEntryRef<'a>) -> Self {
         let location = entry.location().map(|(loc, range)| (loc.clone(), range));
+        let mut path: PathBuf = entry.parents.iter().collect();
+        path.push(entry.name());
         Self {
-            name: entry.name().to_string(),
-            parents: entry.parents.iter().map(|p| p.to_string()).collect(),
+            path,
             attr: entry.attr().clone(),
             location,
         }

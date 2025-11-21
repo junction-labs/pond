@@ -1,5 +1,9 @@
 use pond::{ErrorKind, Fd, Ino, Volume};
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::time::Duration;
 use std::time::SystemTime;
 use tracing::instrument;
@@ -10,6 +14,7 @@ pub struct Pond {
     uid: u32,
     gid: u32,
     kernel_cache_timeout: Duration,
+    readdir_offsets: HashMap<(Ino, i64), String>,
 }
 
 impl Pond {
@@ -28,6 +33,7 @@ impl Pond {
             uid,
             gid,
             kernel_cache_timeout,
+            readdir_offsets: Default::default(),
         }
     }
 }
@@ -119,16 +125,40 @@ impl fuser::Filesystem for Pond {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let iter = fs_try!(reply, self.volume.readdir(ino.into()));
-        let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
+        // translate the offset into the filename where the last readdir left off before its buffer
+        // was full.
+        let offset = {
+            if offset == 0 {
+                None
+            } else {
+                let fname = fs_try!(
+                    reply,
+                    self.readdir_offsets
+                        // TODO: is it idempotent? should it be?
+                        .remove(&(ino.into(), offset))
+                        .ok_or_else(|| pond::Error::new(
+                            pond::ErrorKind::InvalidData,
+                            format!("bad offset passed to readdir: {offset}"),
+                        ))
+                );
+                Some(fname)
+            }
+        };
 
-        for (i, entry) in iter.enumerate().skip(offset) {
+        let iter = fs_try!(reply, self.volume.readdir(ino.into(), offset)).peekable();
+        let mut last_offset = None;
+        for entry in iter {
             let attr = entry.attr();
             let name = entry.name();
-            let is_full = reply.add(attr.ino.into(), (i + 1) as i64, fuse_kind(attr.kind), name);
+            let hash = hash(name);
+            let is_full = reply.add(attr.ino.into(), hash, fuse_kind(attr.kind), name);
             if is_full {
+                if let Some((hash, name)) = last_offset {
+                    self.readdir_offsets.insert((ino.into(), hash), name);
+                }
                 break;
             }
+            last_offset = Some((hash, name.to_string()));
         }
         reply.ok();
     }
@@ -450,4 +480,10 @@ fn getuid() -> u32 {
 // getgid is always successful
 fn getgid() -> u32 {
     unsafe { libc::getgid() }
+}
+
+fn hash(s: &str) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as i64
 }
