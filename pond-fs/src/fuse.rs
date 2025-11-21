@@ -87,7 +87,7 @@ impl fuser::Filesystem for Pond {
         match fs_try!(reply, self.volume.lookup(parent.into(), name)) {
             Some(attr) => reply.entry(
                 &self.kernel_cache_timeout,
-                &fuse_attr(self.uid, self.gid, attr),
+                &fuse_attr(self.uid, self.gid, &attr),
                 0,
             ),
             None => reply.error(libc::ENOENT),
@@ -105,7 +105,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.getattr(ino.into()));
         reply.attr(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
         );
     }
 
@@ -146,7 +146,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.mkdir(parent.into(), name.to_string()));
         reply.entry(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
             0,
         );
     }
@@ -216,7 +216,7 @@ impl fuser::Filesystem for Pond {
         );
         reply.created(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
             0,
             fd.into(),
             0,
@@ -343,7 +343,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.getattr(ino));
         reply.attr(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
         );
     }
 

@@ -261,7 +261,7 @@ pub fn create(
     let version = Version::from_str(version.as_ref())?;
 
     runtime.block_on(async {
-        let mut volume = client.create_volume().await;
+        let volume = client.create_volume().await;
         volume.pack(dir, version).await?;
         Ok(())
     })

@@ -187,6 +187,53 @@ impl<'a> DirEntry<'a> {
     }
 }
 
+/// Owned equivalent of `DirEntry` that does not borrow from the underlying volume.
+#[derive(Debug, Clone)]
+pub struct OwnedDirEntry {
+    name: String,
+    parents: Vec<String>,
+    attr: FileAttr,
+    location: Option<(Location, ByteRange)>,
+}
+
+impl OwnedDirEntry {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn attr(&self) -> &FileAttr {
+        &self.attr
+    }
+
+    pub fn location(&self) -> Option<(&Location, ByteRange)> {
+        self.location
+            .as_ref()
+            .map(|(loc, range)| (loc, *range))
+    }
+
+    pub fn path(&self) -> String {
+        let mut path = self.parents.clone();
+        path.push(self.name.clone());
+        path.join("/")
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.attr.ino.is_regular()
+    }
+}
+
+impl<'a> From<DirEntry<'a>> for OwnedDirEntry {
+    fn from(entry: DirEntry<'a>) -> Self {
+        let location = entry.location().map(|(loc, range)| (loc.clone(), range));
+        Self {
+            name: entry.name().to_string(),
+            parents: entry.parents.iter().map(|p| p.to_string()).collect(),
+            attr: entry.attr().clone(),
+            location,
+        }
+    }
+}
+
 // TODO: add checksums/etags here?
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
