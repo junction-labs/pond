@@ -123,8 +123,7 @@ impl Volume {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.meta
-                    .write()
+                self.metadata_mut()
                     .modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
@@ -148,13 +147,11 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let meta = self.metadata();
-        meta.to_bytes()
+        self.metadata().to_bytes()
     }
 
     pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
-        let meta = self.metadata();
-        meta.to_bytes_with_version(version)
+        self.metadata().to_bytes_with_version(version)
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<FileAttr> {
@@ -171,19 +168,16 @@ impl Volume {
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
     ) -> Result<FileAttr> {
-        let mut meta = self.metadata_mut();
-        meta.setattr(ino, mtime, ctime).cloned()
+        self.metadata_mut().setattr(ino, mtime, ctime).cloned()
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<FileAttr>> {
         scoped_timer!("pond_volume_lookup_latency_secs");
-        let meta = self.metadata();
-        Ok(meta.lookup(parent, name)?.cloned())
+        Ok(self.metadata().lookup(parent, name)?.cloned())
     }
 
     pub fn mkdir(&self, parent: Ino, name: String) -> Result<FileAttr> {
-        let mut meta = self.metadata_mut();
-        meta.mkdir(parent, name).cloned()
+        self.metadata_mut().mkdir(parent, name).cloned()
     }
 
     pub fn rmdir(&self, parent: Ino, name: &str) -> Result<()> {
@@ -271,11 +265,10 @@ impl Volume {
             Ino::CLEAR_CACHE => new_fd(&self.fds, ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let location = {
-                    let meta = self.metadata();
-                    meta.location(ino)
-                        .map(|(location, range)| (location.clone(), *range))
-                };
+                let location = self
+                    .metadata()
+                    .location(ino)
+                    .map(|(location, range)| (location.clone(), *range));
                 match location {
                     Some((Location::Staged { path }, _)) => {
                         let file = open_file(&path, true).await?;
@@ -321,11 +314,10 @@ impl Volume {
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let location = {
-                    let meta = self.metadata();
-                    meta.location(ino)
-                        .map(|(location, range)| (location.clone(), *range))
-                };
+                let location = self
+                    .metadata()
+                    .location(ino)
+                    .map(|(location, range)| (location.clone(), *range));
 
                 match location {
                     Some((Location::Staged { path }, _)) => {
@@ -754,8 +746,9 @@ impl<'a> StagedVolume<'a> {
         let mut buf = BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE);
         let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
         let staged_files: Vec<(FileAttr, std::path::PathBuf)> = {
-            let meta = self.inner.metadata();
-            meta.iter_staged()
+            self.inner
+                .metadata()
+                .iter_staged()
                 .map(|(attr, path)| (attr.clone(), path.clone()))
                 .collect()
         };
@@ -1025,10 +1018,7 @@ mod tests {
         let volume = client.create_volume().await;
 
         // clean volume -- this is not staged
-        {
-            let meta = volume.metadata();
-            assert!(!meta.is_staged());
-        }
+        assert!(!volume.metadata().is_staged());
 
         // creating two files, it should be a staged volume now.
         let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
