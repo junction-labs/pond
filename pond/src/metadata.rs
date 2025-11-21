@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
+use crate::{ByteRange, DirEntryRef, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
 // TODO: we duplicate file/dir names as strings in data values and entry keys.
 // have to figure out how to intern somewhere if we want to stop, and probably
@@ -754,12 +754,20 @@ impl VolumeMetadata {
     /// `(filename, attr)` pairs.
     ///
     /// Iterator order is not guaranteed to be stable.
-    pub(crate) fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
+    pub(crate) fn readdir<'a>(
+        &'a self,
+        ino: Ino,
+        offset: Option<String>,
+    ) -> crate::Result<ReadDir<'a>> {
         let parents = self.dir_path(ino)?;
+        let range = match offset {
+            Some(offset) => self.dirs.range(entry_range_with_offset(ino, offset)?),
+            None => self.dirs.range(entry_range(ino)?),
+        };
         Ok(ReadDir {
             data: &self.data,
             locations: &self.locations,
-            range: self.dirs.range(entry_range(ino)?),
+            range,
             parents,
         })
     }
@@ -943,6 +951,18 @@ fn entry_range(ino: Ino) -> crate::Result<std::ops::Range<EntryKey<'static>>> {
     Ok(start..end)
 }
 
+fn entry_range_with_offset(
+    ino: Ino,
+    offset: String,
+) -> crate::Result<impl std::ops::RangeBounds<EntryKey<'static>>> {
+    let start: EntryKey = (ino, offset).into();
+    let end: EntryKey = (ino.add(1)?, "").into();
+    Ok((
+        std::ops::Bound::Excluded(start),
+        std::ops::Bound::Excluded(end),
+    ))
+}
+
 /// The iterator returned from [readdir][Volume::readdir].
 pub(crate) struct ReadDir<'a> {
     data: &'a BTreeMap<Ino, Entry>,
@@ -952,7 +972,7 @@ pub(crate) struct ReadDir<'a> {
 }
 
 impl<'a> Iterator for ReadDir<'a> {
-    type Item = DirEntry<'a>;
+    type Item = DirEntryRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(EntryKey(_), ino)| {
@@ -961,7 +981,7 @@ impl<'a> Iterator for ReadDir<'a> {
                 .get(ino)
                 .unwrap_or_else(|| panic!("BUG: invalid dirent: ino={ino:?}"));
 
-            DirEntry {
+            DirEntryRef {
                 name: &dent.name,
                 parents: self.parents.clone(),
                 attr: &dent.attr,
@@ -987,7 +1007,7 @@ impl<'a> Iterator for WalkIter<'a> {
     // TODO: it's a big gnarly to be cloning and returning the ancestors path
     // every time but the lifetime on returning a slice referencing self
     // is a pain to express.
-    type Item = crate::Result<DirEntry<'a>>;
+    type Item = crate::Result<DirEntryRef<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.readdirs.is_empty() {
@@ -1191,8 +1211,8 @@ mod test {
     fn readdir_nospecial(
         v: &VolumeMetadata,
         ino: Ino,
-    ) -> crate::Result<impl Iterator<Item = DirEntry<'_>>> {
-        Ok(v.readdir(ino)?.filter(|e| e.attr.ino.is_regular()))
+    ) -> crate::Result<impl Iterator<Item = DirEntryRef<'_>>> {
+        Ok(v.readdir(ino, None)?.filter(|e| e.attr.ino.is_regular()))
     }
 
     #[test]
@@ -1284,7 +1304,11 @@ mod test {
             .collect();
         assert_eq!(vec!["a"], names);
         // should be empty
-        let names: Vec<_> = volume.readdir(a.ino).unwrap().map(|e| e.name).collect();
+        let names: Vec<_> = volume
+            .readdir(a.ino, None)
+            .unwrap()
+            .map(|e| e.name)
+            .collect();
         assert!(names.is_empty());
     }
 
@@ -1365,7 +1389,7 @@ mod test {
         );
         assert_eq!(
             volume
-                .readdir(a.ino)
+                .readdir(a.ino, None)
                 .unwrap()
                 .map(|e| e.path())
                 .collect::<Vec<_>>(),
@@ -1373,7 +1397,7 @@ mod test {
         );
         assert_eq!(
             volume
-                .readdir(b.ino)
+                .readdir(b.ino, None)
                 .unwrap()
                 .map(|e| e.path())
                 .collect::<Vec<_>>(),
