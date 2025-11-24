@@ -10,7 +10,7 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::RwLock;
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -499,26 +499,28 @@ fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
     Ok(amt)
 }
 
-pub struct WalkVolume<'a> {
-    guard: RwLockReadGuard<'a, VolumeMetadata>,
+pub struct WalkVolume {
+    meta: Arc<RwLock<VolumeMetadata>>,
     stack: Vec<std::vec::IntoIter<DirEntry>>,
 }
 
-impl<'a> WalkVolume<'a> {
-    fn new(guard: RwLockReadGuard<'a, VolumeMetadata>, ino: Ino) -> Result<Self> {
-        let entries = guard
+impl WalkVolume {
+    fn new(meta: Arc<RwLock<VolumeMetadata>>, ino: Ino) -> Result<Self> {
+        let entries = meta
+            .read()
             .readdir(ino, None)?
             .map(DirEntry::from)
             .collect::<Vec<_>>();
         Ok(Self {
-            guard,
+            meta,
             stack: vec![entries.into_iter()],
         })
     }
 
     fn push_dir_entries(&mut self, ino: Ino) -> Result<()> {
         let entries = self
-            .guard
+            .meta
+            .read()
             .readdir(ino, None)?
             .map(DirEntry::from)
             .collect::<Vec<_>>();
@@ -527,7 +529,7 @@ impl<'a> WalkVolume<'a> {
     }
 }
 
-impl<'a> Iterator for WalkVolume<'a> {
+impl Iterator for WalkVolume {
     type Item = Result<DirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -550,8 +552,8 @@ impl<'a> Iterator for WalkVolume<'a> {
 impl Volume {
     /// Returns a guarded iterator over the entire volume. The guard ensures that iteration is done
     /// over a consistent view of the Volume.
-    pub fn walk(&self, ino: Ino) -> Result<WalkVolume<'_>> {
-        WalkVolume::new(self.meta.read(), ino)
+    pub fn walk(&self, ino: Ino) -> Result<WalkVolume> {
+        WalkVolume::new(self.meta.clone(), ino)
     }
 
     /// Pack a local directory into a Pond volume.
