@@ -8,13 +8,17 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tracing::instrument;
 
+type FilenameHash = i64;
+
+const READDIR_BATCH: usize = 64;
+
 pub struct Pond {
     volume: Volume,
     runtime: tokio::runtime::Runtime,
     uid: u32,
     gid: u32,
     kernel_cache_timeout: Duration,
-    readdir_offsets: HashMap<(Ino, i64), String>,
+    readdir_offsets: HashMap<(Ino, FilenameHash), String>,
 }
 
 impl Pond {
@@ -122,43 +126,61 @@ impl fuser::Filesystem for Pond {
         _req: &fuser::Request<'_>,
         ino: u64,
         _fh: u64,
-        offset: i64,
+        offset: FilenameHash,
         mut reply: fuser::ReplyDirectory,
     ) {
         // translate the offset into the filename where the last readdir left off before its buffer
-        // was full.
-        let offset = {
-            if offset == 0 {
-                None
-            } else {
-                let fname = fs_try!(
-                    reply,
-                    self.readdir_offsets
-                        // TODO: is it idempotent? should it be?
-                        .remove(&(ino.into(), offset))
-                        .ok_or_else(|| pond::Error::new(
-                            pond::ErrorKind::InvalidData,
-                            format!("bad offset passed to readdir: {offset}"),
-                        ))
-                );
-                Some(fname)
-            }
+        // was full. keep the cookie around so we can fall back to it if nothing new was returned.
+        let mut token: Option<String> = if offset == 0 {
+            None
+        } else {
+            let name = fs_try!(
+                reply,
+                // note that we aren't removing it here. this means that the map grows over the
+                // lifetime of the mount. this allows uses to call readdir with the same offset
+                // multiple times, whereas removing it would cause subsequent calls to fail
+                // completely. if this becomes a problem, we can revisit removing the entry here or
+                // having a TTL map.
+                self.readdir_offsets
+                    .get(&(ino.into(), offset))
+                    .ok_or_else(|| pond::Error::new(
+                        pond::ErrorKind::InvalidData,
+                        format!("bad offset passed to readdir: {offset}"),
+                    ))
+            );
+            Some(name.clone())
         };
 
-        let iter = fs_try!(reply, self.volume.readdir(ino.into(), offset)).peekable();
-        let mut last_offset = None;
-        for entry in iter {
-            let attr = entry.attr();
-            let name = entry.name();
-            let hash = hash(name);
-            let is_full = reply.add(attr.ino.into(), hash, fuse_kind(attr.kind), name);
-            if is_full {
-                if let Some((hash, name)) = last_offset {
-                    self.readdir_offsets.insert((ino.into(), hash), name);
+        'outer: loop {
+            let chunk_iter = fs_try!(
+                reply,
+                self.volume
+                    .readdir(ino.into(), token.clone(), READDIR_BATCH,)
+            );
+
+            let mut num_entries = 0;
+            for entry in chunk_iter {
+                num_entries += 1;
+                let name = entry.name();
+                let attr = entry.attr();
+
+                let full_buffer =
+                    reply.add(attr.ino.into(), hash(name), fuse_kind(attr.kind), name);
+                if full_buffer {
+                    break 'outer;
                 }
+
+                token = Some(name.to_string());
+            }
+
+            // if this emits less than the READDIR_BATCH we asked for, we've reached EOF.
+            if num_entries < READDIR_BATCH {
                 break;
             }
-            last_offset = Some((hash, name.to_string()));
+        }
+
+        if let Some(name) = token {
+            self.readdir_offsets.insert((ino.into(), hash(&name)), name);
         }
         reply.ok();
     }
@@ -482,7 +504,7 @@ fn getgid() -> u32 {
     unsafe { libc::getgid() }
 }
 
-fn hash(s: &str) -> i64 {
+fn hash(s: &str) -> FilenameHash {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish() as i64

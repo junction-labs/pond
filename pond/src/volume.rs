@@ -195,9 +195,14 @@ impl Volume {
         &self,
         ino: Ino,
         offset: Option<String>,
+        size: usize,
     ) -> Result<impl Iterator<Item = DirEntry>> {
         let guard = self.metadata();
-        let entries: Vec<DirEntry> = guard.readdir(ino, offset)?.map(DirEntry::from).collect();
+        let entries: Vec<DirEntry> = guard
+            .readdir(ino, offset)?
+            .take(size)
+            .map(DirEntry::from)
+            .collect();
         Ok(entries.into_iter())
     }
 
