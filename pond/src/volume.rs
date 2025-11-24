@@ -10,7 +10,7 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockReadGuard};
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -74,6 +74,8 @@ enum FileDescriptor {
     },
 }
 
+// NOTE: When locking both meta and fds for modification, meta should always be locked first to
+//       avoid deadlocks!
 pub struct Volume {
     meta: Arc<RwLock<VolumeMetadata>>,
     cache: ChunkCache,
@@ -104,18 +106,6 @@ impl Volume {
         }
     }
 
-    pub(crate) fn metadata(&self) -> RwLockReadGuard<'_, VolumeMetadata> {
-        self.meta.read()
-    }
-
-    pub(crate) fn metadata_mut(&self) -> RwLockWriteGuard<'_, VolumeMetadata> {
-        self.meta.write()
-    }
-
-    fn get_fd(&self, fd: &Fd) -> Option<FileDescriptor> {
-        self.fds.read().get(fd).cloned()
-    }
-
     pub(crate) fn modify(
         &self,
         ino: Ino,
@@ -127,7 +117,8 @@ impl Volume {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.metadata_mut()
+                self.meta
+                    .write()
                     .modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
@@ -135,7 +126,7 @@ impl Volume {
     }
 
     pub fn version(&self) -> Version {
-        self.metadata().version().clone()
+        self.meta.read().version().clone()
     }
 
     pub fn object_store_description(&self) -> String {
@@ -151,16 +142,16 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.metadata().to_bytes()
+        self.meta.read().to_bytes()
     }
 
     pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
-        self.metadata().to_bytes_with_version(version)
+        self.meta.read().to_bytes_with_version(version)
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<FileAttr> {
         scoped_timer!("pond_volume_getattr_latency_secs");
-        match self.metadata().getattr(ino) {
+        match self.meta.read().getattr(ino) {
             Some(attr) => Ok(attr.clone()),
             None => Err(ErrorKind::NotFound.into()),
         }
@@ -172,26 +163,25 @@ impl Volume {
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
     ) -> Result<FileAttr> {
-        self.metadata_mut().setattr(ino, mtime, ctime).cloned()
+        self.meta.write().setattr(ino, mtime, ctime).cloned()
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<FileAttr>> {
         scoped_timer!("pond_volume_lookup_latency_secs");
-        Ok(self.metadata().lookup(parent, name)?.cloned())
+        Ok(self.meta.read().lookup(parent, name)?.cloned())
     }
 
     pub fn mkdir(&self, parent: Ino, name: String) -> Result<FileAttr> {
-        self.metadata_mut().mkdir(parent, name).cloned()
+        self.meta.write().mkdir(parent, name).cloned()
     }
 
     pub fn rmdir(&self, parent: Ino, name: &str) -> Result<()> {
-        self.metadata_mut().rmdir(parent, name)?;
+        self.meta.write().rmdir(parent, name)?;
         Ok(())
     }
 
     pub fn rename(&self, parent: Ino, name: &str, newparent: Ino, newname: String) -> Result<()> {
-        self.metadata_mut()
-            .rename(parent, name, newparent, newname)?;
+        self.meta.write().rename(parent, name, newparent, newname)?;
         Ok(())
     }
 
@@ -201,8 +191,8 @@ impl Volume {
         offset: Option<String>,
         size: usize,
     ) -> Result<impl Iterator<Item = DirEntry>> {
-        let guard = self.metadata();
-        let entries: Vec<DirEntry> = guard
+        let metadata = self.meta.read();
+        let entries: Vec<DirEntry> = metadata
             .readdir(ino, offset)?
             .take(size)
             .map(DirEntry::from)
@@ -214,8 +204,8 @@ impl Volume {
         let (path, file) = self.store.tempfile()?;
 
         let attr = {
-            let mut guard = self.metadata_mut();
-            guard
+            let mut metadata = self.meta.write();
+            metadata
                 .create(
                     parent,
                     name,
@@ -227,7 +217,7 @@ impl Volume {
         };
 
         let fd = new_fd(
-            &self.fds,
+            &mut self.fds.write(),
             attr.ino,
             FileDescriptor::Staged { file: file.into() },
         )?;
@@ -235,7 +225,7 @@ impl Volume {
     }
 
     pub fn delete(&self, parent: Ino, name: &str) -> Result<()> {
-        self.metadata_mut().delete(parent, name)?;
+        self.meta.write().delete(parent, name)?;
         Ok(())
     }
 
@@ -273,21 +263,26 @@ impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
     /// Opening a Fd with write permissions will always truncate the file.
+    // known false positive: https://github.com/rust-lang/rust-clippy/issues/6446
+    #[allow(clippy::await_holding_lock)]
     pub async fn open_read_write(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::COMMIT => new_fd(&self.fds, ino, FileDescriptor::Commit),
-            Ino::CLEAR_CACHE => new_fd(&self.fds, ino, FileDescriptor::ClearCache),
+            Ino::COMMIT => new_fd(&mut self.fds.write(), ino, FileDescriptor::Commit),
+            Ino::CLEAR_CACHE => new_fd(&mut self.fds.write(), ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let guard = self
-                    .metadata()
-                    .location(ino)
-                    .map(|(location, range)| (location.clone(), *range));
-                match guard {
+                let mut metadata_guard = self.meta.write();
+                match metadata_guard.location(ino) {
                     Some((Location::Staged { path }, _)) => {
+                        let path = path.clone();
+                        std::mem::drop(metadata_guard); // guard is dropped here before the await
                         let file = open_file(&path, true).await?;
 
-                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                        new_fd(
+                            &mut self.fds.write(),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
                     }
                     Some((Location::Committed { .. }, ..)) => {
                         // truncate the file (by assigning it a brand new staged file) if it's
@@ -296,7 +291,7 @@ impl Volume {
                         let (path, file) = self.store.tempfile()?;
                         let staged = Location::Staged { path };
                         // modify metadata next
-                        self.modify(
+                        metadata_guard.modify(
                             ino,
                             SystemTime::now(),
                             None,
@@ -304,7 +299,11 @@ impl Volume {
                             Some(Modify::Set((0, 0).into())),
                         )?;
                         // only create the fd once the file is open and metadata is valid
-                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                        new_fd(
+                            &mut self.fds.write(),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
                     }
                     None => Err(ErrorKind::NotFound.into()),
                 }
@@ -312,35 +311,43 @@ impl Volume {
         }
     }
 
+    // known false positive: https://github.com/rust-lang/rust-clippy/issues/6446
+    #[allow(clippy::await_holding_lock)]
     pub async fn open_read(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::VERSION => new_fd(&self.fds, ino, FileDescriptor::Version),
+            Ino::VERSION => new_fd(&mut self.fds.write(), ino, FileDescriptor::Version),
             Ino::PROM_METRICS => {
                 let data = match &self.metrics_snapshot {
                     Some(metrics) => metrics.load().clone(),
                     None => Default::default(),
                 };
                 new_fd(
-                    &self.fds,
+                    &mut self.fds.write(),
                     ino,
                     FileDescriptor::PromMetrics { snapshot: data },
                 )
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let guard = self
-                    .metadata()
-                    .location(ino)
-                    .map(|(location, range)| (location.clone(), *range));
-
-                match guard {
+                let metadata_guard = self.meta.read();
+                match metadata_guard.location(ino) {
                     Some((Location::Staged { path }, _)) => {
+                        let path = path.clone();
+                        std::mem::drop(metadata_guard); // guard is dropped here before the await
                         let file = open_file(&path, false).await?;
-                        new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
+                        new_fd(
+                            &mut self.fds.write(),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
                     }
                     Some((Location::Committed { key }, range)) => {
                         let key = Arc::new(self.store.child_path(key.as_ref()));
-                        new_fd(&self.fds, ino, FileDescriptor::Committed { key, range })
+                        new_fd(
+                            &mut self.fds.write(),
+                            ino,
+                            FileDescriptor::Committed { key, range: *range },
+                        )
                     }
                     None => Err(ErrorKind::NotFound.into()),
                 }
@@ -351,7 +358,7 @@ impl Volume {
     pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        let descriptor = self.get_fd(&fd);
+        let descriptor = self.fds.read().get(&fd).cloned();
         match descriptor {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
@@ -388,7 +395,7 @@ impl Volume {
     pub async fn write_at(&self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
 
-        let descriptor = self.get_fd(&fd);
+        let descriptor = self.fds.read().get(&fd).cloned();
         match descriptor {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
@@ -544,7 +551,7 @@ impl Volume {
     /// Returns a guarded iterator over the entire volume. The guard ensures that iteration is done
     /// over a consistent view of the Volume.
     pub fn walk(&self, ino: Ino) -> Result<WalkVolume<'_>> {
-        WalkVolume::new(self.metadata(), ino)
+        WalkVolume::new(self.meta.read(), ino)
     }
 
     /// Pack a local directory into a Pond volume.
@@ -577,7 +584,7 @@ impl Volume {
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
                     .collect();
-                self.metadata_mut().mkdir_all(Ino::Root, dirs)?;
+                self.meta.write().mkdir_all(Ino::Root, dirs)?;
             }
             // for a file:
             //
@@ -599,7 +606,7 @@ impl Volume {
                     let dirs = dir
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy().to_string());
-                    self.metadata_mut().mkdir_all(Ino::Root, dirs)?.ino
+                    self.meta.write().mkdir_all(Ino::Root, dirs)?.ino
                 } else {
                     Ino::Root
                 };
@@ -621,7 +628,7 @@ impl Volume {
                         )
                     })?
                     .len();
-                self.metadata_mut().create(
+                self.meta.write().create(
                     dir_ino,
                     name.to_string_lossy().to_string(),
                     true,
@@ -704,12 +711,7 @@ fn copy_into(mut buf: &mut [u8], bytes: &[Bytes]) -> usize {
 // FIXME: this needs to allocate and check for remaining fds instead of just
 // trying to increment every time and crashing. it's u64 so we probably won't
 // hit it for a while but that's jank
-fn new_fd(
-    fd_set: &RwLock<BTreeMap<Fd, FileDescriptor>>,
-    ino: Ino,
-    d: FileDescriptor,
-) -> Result<Fd> {
-    let mut fd_set = fd_set.write();
+fn new_fd(fd_set: &mut BTreeMap<Fd, FileDescriptor>, ino: Ino, d: FileDescriptor) -> Result<Fd> {
     let next_fh = fd_set
         .keys()
         .last()
@@ -761,7 +763,8 @@ impl<'a> StagedVolume<'a> {
         let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
         let staged_files: Vec<(FileAttr, std::path::PathBuf)> = {
             self.inner
-                .metadata()
+                .meta
+                .read()
                 .iter_staged()
                 .map(|(attr, path)| (attr.clone(), path.clone()))
                 .collect()
@@ -841,7 +844,7 @@ impl<'a> StagedVolume<'a> {
         }
 
         // deduplicate and clean up all hanging staged Locations
-        self.inner.metadata_mut().clean_staged_locations(dest);
+        self.inner.meta.write().clean_staged_locations(dest);
 
         Ok(())
     }
@@ -873,7 +876,7 @@ impl<'a> StagedVolume<'a> {
 
         match res {
             Ok(_) => {
-                self.inner.metadata_mut().set_version(version);
+                self.inner.meta.write().set_version(version);
                 Ok(())
             }
             // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
@@ -1032,7 +1035,7 @@ mod tests {
         let volume = client.create_volume().await;
 
         // clean volume -- this is not staged
-        assert!(!volume.metadata().is_staged());
+        assert!(!volume.meta.read().is_staged());
 
         // creating two files, it should be a staged volume now.
         let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
@@ -1043,7 +1046,7 @@ mod tests {
         assert_write(&volume, fd2, "world").await;
 
         {
-            let meta = volume.metadata();
+            let meta = volume.meta.read();
             assert!(meta.is_staged());
             for attr in [&attr1, &attr2] {
                 assert!(matches!(
@@ -1059,7 +1062,7 @@ mod tests {
 
         // after commit, both files are no longer staged
         {
-            let meta = volume.metadata();
+            let meta = volume.meta.read();
             assert!(!meta.is_staged());
             for attr in [&attr1, &attr2] {
                 assert!(matches!(
