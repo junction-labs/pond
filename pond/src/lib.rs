@@ -9,13 +9,14 @@ mod metrics;
 mod storage;
 mod volume;
 
+use camino::Utf8PathBuf;
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
 pub use metadata::Version;
 pub use volume::{Fd, Volume};
 
-use std::{path::PathBuf, time::SystemTime};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -190,22 +191,18 @@ impl<'a> DirEntryRef<'a> {
 /// Owned equivalent of [`DirEntryRef`] that does not borrow from the underlying volume.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
-    // TODO: swap this out for camino Utf8PathBuf
-    path: PathBuf,
+    path: Utf8PathBuf,
     attr: FileAttr,
     location: Option<(Location, ByteRange)>,
 }
 
 impl DirEntry {
     pub fn name(&self) -> &str {
-        self.path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .expect("should be a valid utf-8 string")
+        self.path.file_name().expect("BUG: path ends in '..'")
     }
 
     pub fn path(&self) -> &str {
-        self.path.to_str().expect("should be a valid utf-8 string")
+        self.path.as_str()
     }
 
     pub fn attr(&self) -> &FileAttr {
@@ -224,7 +221,7 @@ impl DirEntry {
 impl<'a> From<DirEntryRef<'a>> for DirEntry {
     fn from(entry: DirEntryRef<'a>) -> Self {
         let location = entry.location().map(|(loc, range)| (loc.clone(), range));
-        let mut path: PathBuf = entry.parents.iter().collect();
+        let mut path: Utf8PathBuf = entry.parents.iter().collect();
         path.push(entry.name());
         Self {
             path,
