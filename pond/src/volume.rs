@@ -442,20 +442,15 @@ impl Volume {
             ));
         }
 
-        // the two conditions we're ok with:
-        // (1) no open fds, e.g. self.fds is empty
-        // (2) self.fds has exactly one fd: the commit fd
-        let is_commit_only_fd = matches!(
-            self.fds.first_key_value(),
-            Some((_, FileDescriptor::Commit))
-        ) && self.fds.len() == 1;
-        if !self.fds.is_empty() && !is_commit_only_fd {
+        // don't allow staged files to be open
+        if self
+            .fds
+            .iter()
+            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
+        {
             return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "all open files must be closed before committing, with the exception of the commit file. num open files: {}",
-                    self.fds.len() - (is_commit_only_fd as usize)
-                ),
+                ErrorKind::ResourceBusy,
+                "all open staged files must be closed before committing",
             ));
         }
 
@@ -1004,7 +999,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_with_open_fd() {
+    async fn commit_with_open_fds() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let volume_path = tempdir.path().join("store");
         std::fs::create_dir_all(&volume_path).unwrap();
@@ -1015,37 +1010,36 @@ mod tests {
         // creating a file, but holding the fd (not releasing it)
         let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
         let attr = attr.clone();
-
-        assert!(volume.meta.is_staged());
         assert!(matches!(
             volume.meta.location(attr.ino),
             Some((Location::Staged { .. }, _))
         ));
 
-        // commit using commit fd!
-        let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
-        assert_eq!(
-            volume
-                .write_at(commit_fd, 0, "next-version".as_bytes())
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidData
-        );
-        volume.release(commit_fd).await.unwrap();
-
-        // now without the commit fd, should be the same error
+        // commit fails because we have a staged fd open
         assert_eq!(
             volume
                 .commit(Version::from_static("next-version"))
                 .await
                 .unwrap_err()
                 .kind(),
-            ErrorKind::InvalidData
+            ErrorKind::ResourceBusy
         );
 
         // close it and we're okay to commit
         volume.release(fd).await.unwrap();
+        volume
+            .commit(Version::from_static("next-next-version"))
+            .await
+            .unwrap();
+
+        // open the file we just committed, along with a bunch of random special files
+        let _f0 = volume.open_read(Ino::VERSION).await.unwrap();
+        let _f1 = volume.open_read(Ino::PROM_METRICS).await.unwrap();
+        let _f2 = volume.open_read_write(Ino::CLEAR_CACHE).await.unwrap();
+        let _f3 = volume.open_read_write(Ino::COMMIT).await.unwrap();
+        let _f4 = volume.open_read(attr.ino).await.unwrap();
+        // this is ok, because none of them are staged
+        assert!(!volume.fds.is_empty());
         volume
             .commit(Version::from_static("next-version"))
             .await

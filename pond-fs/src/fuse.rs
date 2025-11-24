@@ -47,6 +47,7 @@ impl AsErrno for pond::ErrorKind {
             pond::ErrorKind::PermissionDenied => libc::EPERM,
             pond::ErrorKind::InvalidData => libc::EINVAL,
             pond::ErrorKind::TimedOut => libc::ETIMEDOUT,
+            pond::ErrorKind::ResourceBusy => libc::EBUSY,
             pond::ErrorKind::Unsupported => libc::ENOTSUP,
             pond::ErrorKind::Other | _ => libc::EIO,
         }
