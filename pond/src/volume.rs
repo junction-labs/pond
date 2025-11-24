@@ -112,6 +112,10 @@ impl Volume {
         self.meta.write()
     }
 
+    fn get_fd(&self, fd: &Fd) -> Option<FileDescriptor> {
+        self.fds.read().get(fd).cloned()
+    }
+
     pub(crate) fn modify(
         &self,
         ino: Ino,
@@ -210,15 +214,16 @@ impl Volume {
         let (path, file) = self.store.tempfile()?;
 
         let attr = {
-            let mut meta = self.metadata_mut();
-            meta.create(
-                parent,
-                name,
-                exclusive,
-                Location::Staged { path },
-                ByteRange::empty(),
-            )?
-            .clone()
+            let mut guard = self.metadata_mut();
+            guard
+                .create(
+                    parent,
+                    name,
+                    exclusive,
+                    Location::Staged { path },
+                    ByteRange::empty(),
+                )?
+                .clone()
         };
 
         let fd = new_fd(
@@ -274,11 +279,11 @@ impl Volume {
             Ino::CLEAR_CACHE => new_fd(&self.fds, ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let location = self
+                let guard = self
                     .metadata()
                     .location(ino)
                     .map(|(location, range)| (location.clone(), *range));
-                match location {
+                match guard {
                     Some((Location::Staged { path }, _)) => {
                         let file = open_file(&path, true).await?;
 
@@ -323,12 +328,12 @@ impl Volume {
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let location = self
+                let guard = self
                     .metadata()
                     .location(ino)
                     .map(|(location, range)| (location.clone(), *range));
 
-                match location {
+                match guard {
                     Some((Location::Staged { path }, _)) => {
                         let file = open_file(&path, false).await?;
                         new_fd(&self.fds, ino, FileDescriptor::Staged { file: file.into() })
@@ -346,8 +351,7 @@ impl Volume {
     pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        let descriptor = { self.fds.read().get(&fd).cloned() };
-
+        let descriptor = self.get_fd(&fd);
         match descriptor {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
@@ -384,8 +388,7 @@ impl Volume {
     pub async fn write_at(&self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
 
-        let descriptor = { self.fds.read().get(&fd).cloned() };
-
+        let descriptor = self.get_fd(&fd);
         match descriptor {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
