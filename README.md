@@ -200,6 +200,7 @@ modifying `/etc/fuse.conf` and uncommenting the `user_allow_other` parameter.
 - [ ] A Rust API for access without FUSE
 - [ ] A Python API and `fsspec` bindings for access without FUSE
 - [ ] Reloading without remounting
+- [ ] Garbage collection of stale staged files
 
 ## Contributing
 

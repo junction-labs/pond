@@ -620,10 +620,26 @@ fn apply_op(
         }
         FuzzOp::Commit(version) => {
             let path = root.join(".commit");
-            if root.join(".commit").exists() {
-                tri!(std::fs::write(path, version));
+            if path.exists() {
+                commit_with_retry(&path, version)?;
             }
             Ok(OpOutput::None)
         }
     }
+}
+
+fn commit_with_retry(path: &Path, version: &str) -> std::io::Result<()> {
+    const ATTEMPTS: usize = 3;
+
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::write(path, version) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == ErrorKind::ResourceBusy && attempt < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(())
 }

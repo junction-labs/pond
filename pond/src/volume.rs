@@ -442,6 +442,18 @@ impl Volume {
             ));
         }
 
+        // don't allow staged files to be open
+        if self
+            .fds
+            .iter()
+            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
+        {
+            return Err(Error::new(
+                ErrorKind::ResourceBusy,
+                "all open staged files must be closed before committing",
+            ));
+        }
+
         let mut staged = StagedVolume::new(self);
         let (dest, ranges) = staged.upload().await?;
         staged.modify(dest, ranges)?;
@@ -905,6 +917,7 @@ mod tests {
                     .unwrap();
                 let ino = attr.ino;
                 volume.write_at(fd, 0, bs).await.unwrap();
+                volume.release(fd).await.unwrap();
                 ino
             };
 
@@ -927,6 +940,7 @@ mod tests {
             runtime.block_on(async {
                 let fd = volume.open_read(*ino).await.unwrap();
                 volume.read_at(fd, offset, &mut buf).await.unwrap();
+                volume.release(fd).await.unwrap();
             });
 
             Ok(())
@@ -981,5 +995,53 @@ mod tests {
         assert_eq!(next_version, "next-version",);
         assert_read(&mut next_volume, "hello.txt", "hello").await;
         assert_read(&mut next_volume, "world.txt", "world").await;
+    }
+
+    #[tokio::test]
+    async fn commit_with_open_fds() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let volume_path = tempdir.path().join("store");
+        std::fs::create_dir_all(&volume_path).unwrap();
+
+        let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
+        let mut volume = client.create_volume().await;
+
+        // creating a file, but holding the fd (not releasing it)
+        let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let attr = attr.clone();
+        assert!(matches!(
+            volume.meta.location(attr.ino),
+            Some((Location::Staged { .. }, _))
+        ));
+
+        // commit fails because we have a staged fd open
+        assert_eq!(
+            volume
+                .commit(Version::from_static("next-version"))
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ResourceBusy
+        );
+
+        // close it and we're okay to commit
+        volume.release(fd).await.unwrap();
+        volume
+            .commit(Version::from_static("next-next-version"))
+            .await
+            .unwrap();
+
+        // open the file we just committed, along with a bunch of random special files
+        let _f0 = volume.open_read(Ino::VERSION).await.unwrap();
+        let _f1 = volume.open_read(Ino::PROM_METRICS).await.unwrap();
+        let _f2 = volume.open_read_write(Ino::CLEAR_CACHE).await.unwrap();
+        let _f3 = volume.open_read_write(Ino::COMMIT).await.unwrap();
+        let _f4 = volume.open_read(attr.ino).await.unwrap();
+        // this is ok, because none of them are staged
+        assert!(!volume.fds.is_empty());
+        volume
+            .commit(Version::from_static("next-version"))
+            .await
+            .unwrap();
     }
 }

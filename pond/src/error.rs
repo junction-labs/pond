@@ -29,6 +29,9 @@ pub enum ErrorKind {
     #[error("Timed out")]
     TimedOut,
 
+    #[error("Resource busy")]
+    ResourceBusy,
+
     #[error("Unsupported operation")]
     Unsupported,
 
@@ -107,6 +110,7 @@ impl From<std::io::ErrorKind> for ErrorKind {
             std::io::ErrorKind::IsADirectory => ErrorKind::IsADirectory,
             std::io::ErrorKind::DirectoryNotEmpty => ErrorKind::DirectoryNotEmpty,
             std::io::ErrorKind::InvalidInput => ErrorKind::InvalidData,
+            std::io::ErrorKind::ResourceBusy => ErrorKind::ResourceBusy,
             std::io::ErrorKind::TimedOut => ErrorKind::TimedOut,
             std::io::ErrorKind::Unsupported => ErrorKind::Unsupported,
             _ => ErrorKind::Other,
