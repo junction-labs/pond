@@ -631,19 +631,15 @@ fn apply_op(
 fn commit_with_retry(path: &Path, version: &str) -> std::io::Result<()> {
     const ATTEMPTS: usize = 3;
 
-    // save the last attempt for outside the loop
-    for _ in 0..ATTEMPTS - 1 {
+    for attempt in 1..=ATTEMPTS {
         match std::fs::write(path, version) {
             Ok(()) => return Ok(()),
-            Err(err) if err.kind() == ErrorKind::ResourceBusy => {
+            Err(err) if err.kind() == ErrorKind::ResourceBusy && attempt < ATTEMPTS => {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(err) => return Err(err),
         }
     }
-
-    // final attempt
-    std::fs::write(path, version)?;
 
     Ok(())
 }
