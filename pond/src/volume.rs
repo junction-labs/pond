@@ -844,7 +844,6 @@ fn should_retry(e: &object_store::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::Client;
 
