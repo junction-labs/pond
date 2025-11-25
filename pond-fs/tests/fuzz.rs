@@ -137,7 +137,7 @@ fn test_pack(expected_dir: &Path, actual_dir: &Path, pack_dir: &Path, entries: V
     // pack it to the pack_dir
     runtime
         .block_on(async {
-            let volume = client.create_volume().await;
+            let mut volume = client.create_volume().await;
             volume.pack(expected_dir, version).await?;
             Ok::<_, pond::Error>(())
         })

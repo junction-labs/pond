@@ -186,6 +186,17 @@ impl<'a> DirEntryRef<'a> {
     pub fn is_regular(&self) -> bool {
         self.attr.ino.is_regular()
     }
+
+    pub(crate) fn to_owned(&self) -> DirEntry {
+        let location = self.location().map(|(loc, range)| (loc.clone(), range));
+        let mut path: Utf8PathBuf = self.parents.iter().collect();
+        path.push(self.name());
+        DirEntry {
+            path,
+            attr: self.attr().clone(),
+            location,
+        }
+    }
 }
 
 /// Owned equivalent of [`DirEntryRef`] that does not borrow from the underlying volume.
@@ -215,19 +226,6 @@ impl DirEntry {
 
     pub fn is_regular(&self) -> bool {
         self.attr.ino.is_regular()
-    }
-}
-
-impl<'a> From<DirEntryRef<'a>> for DirEntry {
-    fn from(entry: DirEntryRef<'a>) -> Self {
-        let location = entry.location().map(|(loc, range)| (loc.clone(), range));
-        let mut path: Utf8PathBuf = entry.parents.iter().collect();
-        path.push(entry.name());
-        Self {
-            path,
-            attr: entry.attr().clone(),
-            location,
-        }
     }
 }
 

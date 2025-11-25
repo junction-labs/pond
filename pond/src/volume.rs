@@ -10,7 +10,7 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -195,7 +195,7 @@ impl Volume {
         let entries: Vec<DirEntry> = metadata
             .readdir(ino, offset)?
             .take(size)
-            .map(DirEntry::from)
+            .map(|e| e.to_owned())
             .collect();
         Ok(entries.into_iter())
     }
@@ -214,6 +214,11 @@ impl Volume {
                     ByteRange::empty(),
                 )?
                 .clone()
+            // we drop the write lock on metadata here -- the metadata and fd updates are
+            // decoupled anyway, so right now a failed new_fd call doesn't cause us to undo the
+            // metadata change. if we implemented transaction-like behavior, then it would be more
+            // useful to hold both locks at the same time but as-is there's no reason to hold the
+            // metadata for longer.
         };
 
         let fd = new_fd(
@@ -263,15 +268,17 @@ impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
     /// Opening a Fd with write permissions will always truncate the file.
-    // known false positive: https://github.com/rust-lang/rust-clippy/issues/6446
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "https://github.com/rust-lang/rust-clippy/issues/6446"
+    )]
     pub async fn open_read_write(&self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::COMMIT => new_fd(&mut self.fds.write(), ino, FileDescriptor::Commit),
             Ino::CLEAR_CACHE => new_fd(&mut self.fds.write(), ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let mut metadata_guard = self.meta.write();
+                let metadata_guard = self.meta.upgradable_read();
                 match metadata_guard.location(ino) {
                     Some((Location::Staged { path }, _)) => {
                         let path = path.clone();
@@ -290,8 +297,9 @@ impl Volume {
                         // file locally as a staged file, which can be expensive if it's a large file.
                         let (path, file) = self.store.tempfile()?;
                         let staged = Location::Staged { path };
-                        // modify metadata next
-                        metadata_guard.modify(
+                        // upgrade the lock to a write lock and modify metadata next. the write
+                        // guard gets dropped after we modify since we don't assign it to anything.
+                        RwLockUpgradableReadGuard::upgrade(metadata_guard).modify(
                             ino,
                             SystemTime::now(),
                             None,
@@ -311,8 +319,10 @@ impl Volume {
         }
     }
 
-    // known false positive: https://github.com/rust-lang/rust-clippy/issues/6446
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "https://github.com/rust-lang/rust-clippy/issues/6446"
+    )]
     pub async fn open_read(&self, ino: Ino) -> Result<Fd> {
         match ino {
             Ino::VERSION => new_fd(&mut self.fds.write(), ino, FileDescriptor::Version),
@@ -343,10 +353,12 @@ impl Volume {
                     }
                     Some((Location::Committed { key }, range)) => {
                         let key = Arc::new(self.store.child_path(key.as_ref()));
+                        let range = *range;
+                        std::mem::drop(metadata_guard);
                         new_fd(
                             &mut self.fds.write(),
                             ino,
-                            FileDescriptor::Committed { key, range: *range },
+                            FileDescriptor::Committed { key, range },
                         )
                     }
                     None => Err(ErrorKind::NotFound.into()),
@@ -509,7 +521,7 @@ impl WalkVolume {
         let entries = meta
             .read()
             .readdir(ino, None)?
-            .map(DirEntry::from)
+            .map(|e| e.to_owned())
             .collect::<Vec<_>>();
         Ok(Self {
             meta,
@@ -522,7 +534,7 @@ impl WalkVolume {
             .meta
             .read()
             .readdir(ino, None)?
-            .map(DirEntry::from)
+            .map(|e| e.to_owned())
             .collect::<Vec<_>>();
         self.stack.push(entries.into_iter());
         Ok(())
@@ -557,7 +569,7 @@ impl Volume {
     }
 
     /// Pack a local directory into a Pond volume.
-    pub async fn pack(&self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
+    pub async fn pack(&mut self, dir: impl AsRef<Path>, version: Version) -> crate::Result<()> {
         if self.store.exists(&version).await? {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
