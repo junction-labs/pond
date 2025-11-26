@@ -264,7 +264,7 @@ fn test_commit(
     // we have all the data from before the commit and nothing
     // from after it.
     let volume = runtime.block_on(client.load_volume(&None)).unwrap();
-    assert_eq!(volume.version(), &Version::from_static("v1"));
+    assert_eq!(volume.version(), Version::from_static("v1"));
 
     let mount = spawn_mount(mount_dir, volume);
     let expected = read_entries(expected_dir);
