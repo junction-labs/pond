@@ -200,8 +200,14 @@ impl Volume {
         Ok(entries.into_iter())
     }
 
-    pub fn create(&self, parent: Ino, name: String, exclusive: bool) -> Result<(FileAttr, Fd)> {
-        let (path, file) = self.store.tempfile()?;
+    pub async fn create(
+        &self,
+        parent: Ino,
+        name: String,
+        exclusive: bool,
+    ) -> Result<(FileAttr, Fd)> {
+        let path = self.store.new_staged_filepath()?;
+        let file = open_file(path.as_path(), OpenMode::Create).await?;
 
         let attr = {
             let mut metadata = self.meta.write();
@@ -283,7 +289,7 @@ impl Volume {
                     Some((Location::Staged { path }, _)) => {
                         let path = path.clone();
                         std::mem::drop(metadata_guard); // guard is dropped here before the await
-                        let file = open_file(&path, true).await?;
+                        let file = open_file(&path, OpenMode::ReadWrite).await?;
 
                         new_fd(
                             &mut self.fds.write(),
@@ -295,8 +301,8 @@ impl Volume {
                         // truncate the file (by assigning it a brand new staged file) if it's
                         // committed. the alternative would be to keep a copy of the committed
                         // file locally as a staged file, which can be expensive if it's a large file.
-                        let (path, file) = self.store.tempfile()?;
-                        let staged = Location::Staged { path };
+                        let path = self.store.new_staged_filepath()?;
+                        let staged = Location::Staged { path: path.clone() };
                         // upgrade the lock to a write lock and modify metadata next. the write
                         // guard gets dropped after we modify since we don't assign it to anything.
                         RwLockUpgradableReadGuard::upgrade(metadata_guard).modify(
@@ -306,6 +312,7 @@ impl Volume {
                             Some(staged),
                             Some(Modify::Set((0, 0).into())),
                         )?;
+                        let file = open_file(&path, OpenMode::Create).await?;
                         // only create the fd once the file is open and metadata is valid
                         new_fd(
                             &mut self.fds.write(),
@@ -344,7 +351,7 @@ impl Volume {
                     Some((Location::Staged { path }, _)) => {
                         let path = path.clone();
                         std::mem::drop(metadata_guard); // guard is dropped here before the await
-                        let file = open_file(&path, false).await?;
+                        let file = open_file(&path, OpenMode::Read).await?;
                         new_fd(
                             &mut self.fds.write(),
                             ino,
@@ -670,11 +677,26 @@ macro_rules! try_sync {
     };
 }
 
-/// Opens a std::fs::File for reading (and writing if `write` is set).
-async fn open_file(path: &Path, write: bool) -> Result<std::fs::File> {
+#[derive(Copy, Clone)]
+enum OpenMode {
+    Read,
+    ReadWrite,
+    Create,
+}
+
+/// Opens a std::fs::File for reading and optionally writing.
+async fn open_file(path: &Path, mode: OpenMode) -> Result<std::fs::File> {
     let copy = path.to_path_buf();
+
+    let mut options = std::fs::File::options();
+    match mode {
+        OpenMode::Read => options.read(true),
+        OpenMode::ReadWrite => options.read(true).write(true),
+        OpenMode::Create => options.read(true).write(true).create(true).truncate(true),
+    };
+
     try_sync!(
-        std::fs::File::options().read(true).write(write).open(copy),
+        options.open(copy),
         "std::fs::File::open",
         "failed to open staged file"
     )
@@ -787,7 +809,7 @@ impl<'a> StagedVolume<'a> {
         for (attr, path) in staged_files {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let file = open_file(&path, false).await?;
+                let file = open_file(&path, OpenMode::Read).await?;
                 let mut reader = BufReader::new(file).take(attr.size);
 
                 loop {
@@ -1006,6 +1028,7 @@ mod tests {
             let create = async |name, bs| {
                 let (attr, fd) = volume
                     .create(Ino::Root, std::primitive::str::to_string(name), true)
+                    .await
                     .unwrap();
                 let ino = attr.ino;
                 volume.write_at(fd, 0, bs).await.unwrap();
@@ -1052,10 +1075,16 @@ mod tests {
         assert!(!volume.meta.read().is_staged());
 
         // creating two files, it should be a staged volume now.
-        let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let (attr1, fd1) = volume
+            .create(Ino::Root, "hello.txt".into(), true)
+            .await
+            .unwrap();
         let attr1 = attr1.clone();
         assert_write(&volume, fd1, "hello").await;
-        let (attr2, fd2) = volume.create(Ino::Root, "world.txt".into(), true).unwrap();
+        let (attr2, fd2) = volume
+            .create(Ino::Root, "world.txt".into(), true)
+            .await
+            .unwrap();
         let attr2 = attr2.clone();
         assert_write(&volume, fd2, "world").await;
 
@@ -1105,7 +1134,10 @@ mod tests {
         let volume = client.create_volume().await;
 
         // creating a file, but holding the fd (not releasing it)
-        let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let (attr, fd) = volume
+            .create(Ino::Root, "hello.txt".into(), true)
+            .await
+            .unwrap();
         let attr = attr.clone();
         assert!(matches!(
             volume.meta.read().location(attr.ino),

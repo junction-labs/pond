@@ -1,6 +1,7 @@
 use futures::TryFutureExt;
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem};
-use std::{fs::File, sync::Arc};
+use rand::distr::{Alphanumeric, SampleString};
+use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
 
@@ -182,14 +183,12 @@ impl Storage {
 }
 
 impl Storage {
-    pub(crate) fn tempfile(&self) -> Result<(std::path::PathBuf, File)> {
-        let f = tempfile::Builder::new()
-            .disable_cleanup(true)
-            .tempfile_in(&*self.temp_dir)
-            .map_err(|e| Error::with_source(e.kind().into(), "failed to create tempfile", e))?;
-
-        let (file, path) = f.into_parts();
-        Ok((path.to_path_buf(), file))
+    pub(crate) fn new_staged_filepath(&self) -> Result<std::path::PathBuf> {
+        // note: we don't check for collisions here. there's 62^64 possible filenames to be
+        // generated, and that number is large enough that we realistically should never have a
+        // collision ...
+        let filename = Alphanumeric.sample_string(&mut rand::rng(), 64);
+        Ok(self.temp_dir.path().join(filename))
     }
 
     pub(crate) async fn list_versions(&self) -> Result<Vec<Version>> {

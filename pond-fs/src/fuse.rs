@@ -265,7 +265,8 @@ impl fuser::Filesystem for Pond {
         let name = fs_try!(reply, from_os_str(name));
         let (attr, fd) = fs_try!(
             reply,
-            self.volume.create(parent.into(), name.to_string(), excl)
+            self.runtime
+                .block_on(self.volume.create(parent.into(), name.to_string(), excl))
         );
         reply.created(
             &self.kernel_cache_timeout,
