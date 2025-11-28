@@ -116,7 +116,7 @@ impl Version {
 /// Because staged locations are effectively dangling pointers, volumes cannot
 /// be serialized while they're being staged.
 // # TODO: should we guarantee inodes are stable in the docs?
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct VolumeMetadata {
     version: Version,
 
@@ -164,13 +164,13 @@ pub(crate) enum EntryData {
     Dynamic,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKeyRef<'a> {
     ino: Ino,
     name: Cow<'a, str>,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKey<'a>(EntryKeyRef<'a>);
 
 impl<'a> From<(Ino, &'a str)> for EntryKey<'a> {
@@ -828,7 +828,7 @@ impl VolumeMetadata {
         self.data
             .iter()
             .filter_map(|(ino, entry)| match self.location(*ino) {
-                Some((Location::Staged { path }, _)) => Some((&entry.attr, path)),
+                Some((Location::Staged { path, .. }, _)) => Some((&entry.attr, path)),
                 _ => None,
             })
     }
@@ -1350,7 +1350,7 @@ mod test {
                 c.ino,
                 "hi.txt".to_string(),
                 true,
-                Location::staged("whatever"),
+                Location::staged("whatever", 0),
                 ByteRange::empty(),
             )
             .unwrap()
@@ -1634,7 +1634,7 @@ mod test {
                 Ino::Root,
                 "grow".to_string(),
                 false,
-                Location::staged("grow"),
+                Location::staged("grow", 0),
                 ByteRange::empty(),
             )
             .unwrap()

@@ -10,13 +10,16 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use parking_lot::RwLock;
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
     os::unix::fs::FileExt,
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -82,6 +85,14 @@ pub struct Volume {
     fds: Arc<RwLock<BTreeMap<Fd, FileDescriptor>>>,
     store: crate::storage::Storage,
     metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
+    // file generation number for staged files. the generation gives us an approximation of file
+    // age relative to other files. the generation is bumped everytime we commit, so we're only at
+    // risk of an overflow if the user commits 2^64 times throughout the lifetime of this process.
+    // the generation number does not persist across multiple processes -- it is always reset back
+    // to 0 since it's attached to staged (ephemeral) files.
+    generation: AtomicU64,
+    // is a commit in progress?
+    commit: AtomicBool,
 }
 
 impl Volume {
@@ -103,6 +114,8 @@ impl Volume {
             fds: Arc::new(RwLock::new(BTreeMap::new())),
             store,
             metrics_snapshot,
+            generation: AtomicU64::new(0),
+            commit: AtomicBool::new(false),
         }
     }
 
@@ -216,7 +229,7 @@ impl Volume {
                     parent,
                     name,
                     exclusive,
-                    Location::Staged { path },
+                    Location::staged(path, self.generation.load(Ordering::SeqCst)),
                     ByteRange::empty(),
                 )?
                 .clone()
@@ -284,12 +297,37 @@ impl Volume {
             Ino::CLEAR_CACHE => new_fd(&mut self.fds.write(), ino, FileDescriptor::ClearCache),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let metadata_guard = self.meta.upgradable_read();
+                // note, we can't use an upgradable read lock here because there might be a race
+                // condition?? TODO
+                let mut metadata_guard = self.meta.write();
                 match metadata_guard.location(ino) {
-                    Some((Location::Staged { path }, _)) => {
-                        let path = path.clone();
-                        std::mem::drop(metadata_guard); // guard is dropped here before the await
-                        let file = open_file(&path, OpenMode::ReadWrite).await?;
+                    Some((Location::Staged { path, generation }, _)) => {
+                        let file = if *generation < self.generation.load(Ordering::SeqCst) {
+                            // generation mismatch for staged files, which means we're opening this
+                            // up while a commit is running and this staged file is part of the
+                            // snapshot. we treat it as a committed file in this case.
+                            let path = self.store.new_staged_filepath()?;
+                            let staged = Location::staged(
+                                path.clone(),
+                                self.generation.load(Ordering::SeqCst),
+                            );
+                            metadata_guard.modify(
+                                ino,
+                                SystemTime::now(),
+                                None,
+                                Some(staged),
+                                Some(Modify::Set((0, 0).into())),
+                            )?;
+                            std::mem::drop(metadata_guard); // guard is dropped here before the await
+                            open_file(&path, OpenMode::Create).await?
+                        } else {
+                            let path = path.clone();
+                            std::mem::drop(metadata_guard); // guard is dropped here before the await
+                            open_file(&path, OpenMode::ReadWrite).await?
+                        };
+
+                        // TODO: if generation numbers don't match up, we're copying and creating
+                        // a new staged file handle.
 
                         new_fd(
                             &mut self.fds.write(),
@@ -302,16 +340,16 @@ impl Volume {
                         // committed. the alternative would be to keep a copy of the committed
                         // file locally as a staged file, which can be expensive if it's a large file.
                         let path = self.store.new_staged_filepath()?;
-                        let staged = Location::Staged { path: path.clone() };
-                        // upgrade the lock to a write lock and modify metadata next. the write
-                        // guard gets dropped after we modify since we don't assign it to anything.
-                        RwLockUpgradableReadGuard::upgrade(metadata_guard).modify(
+                        let staged =
+                            Location::staged(path.clone(), self.generation.load(Ordering::SeqCst));
+                        metadata_guard.modify(
                             ino,
                             SystemTime::now(),
                             None,
                             Some(staged),
                             Some(Modify::Set((0, 0).into())),
                         )?;
+                        std::mem::drop(metadata_guard); // guard is dropped here before the await
                         let file = open_file(&path, OpenMode::Create).await?;
                         // only create the fd once the file is open and metadata is valid
                         new_fd(
@@ -348,7 +386,7 @@ impl Volume {
             ino => {
                 let metadata_guard = self.meta.read();
                 match metadata_guard.location(ino) {
-                    Some((Location::Staged { path }, _)) => {
+                    Some((Location::Staged { path, .. }, _)) => {
                         let path = path.clone();
                         std::mem::drop(metadata_guard); // guard is dropped here before the await
                         let file = open_file(&path, OpenMode::Read).await?;
@@ -479,25 +517,19 @@ impl Volume {
             ));
         }
 
-        // don't allow staged files to be open
-        if self
-            .fds
-            .read()
-            .iter()
-            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
-        {
-            return Err(Error::new(
-                ErrorKind::ResourceBusy,
-                "all open staged files must be closed before committing",
-            ));
-        }
+        let commit = Commit::new(self)?;
 
-        let staged = StagedVolume::new(self);
-        let (dest, ranges) = staged.upload().await?;
-        staged.modify(dest, ranges)?;
-        staged.persist(version).await?;
+        // take a snapshot of the metadata and walk the volume to get a handle to each staged file.
+        let (metadata_snapshot, files) = commit.snapshot()?;
+        let (dest, range) = commit.upload_files(files).await?;
+        let mut metadata_snapshot = Commit::relocate_staged_files(metadata_snapshot, range, dest)?;
+        commit
+            .upload_metadata(&mut metadata_snapshot, version)
+            .await?;
 
-        Ok(())
+        // reconcile any differences between what we just uploaded and any modifications that
+        // occurred since we took the snapshot.
+        commit.sync(metadata_snapshot)
     }
 }
 
@@ -653,7 +685,7 @@ impl Volume {
                     dir_ino,
                     name.to_string_lossy().to_string(),
                     true,
-                    Location::staged(entry.path()),
+                    Location::staged(entry.path(), self.generation.load(Ordering::SeqCst)),
                     ByteRange { offset: 0, len },
                 )?;
             }
@@ -677,7 +709,6 @@ macro_rules! try_sync {
     };
 }
 
-#[derive(Copy, Clone)]
 enum OpenMode {
     Read,
     ReadWrite,
@@ -766,13 +797,34 @@ macro_rules! try_mpu {
     };
 }
 
-struct StagedVolume<'a> {
+struct Commit<'a> {
     inner: &'a Volume,
 }
 
-impl<'a> StagedVolume<'a> {
-    fn new(inner: &'a Volume) -> Self {
-        Self { inner }
+impl<'a> Drop for Commit<'a> {
+    fn drop(&mut self) {
+        self.inner.commit.store(false, Ordering::SeqCst);
+    }
+}
+
+impl<'a> Commit<'a> {
+    fn new(inner: &'a Volume) -> Result<Self> {
+        // only allow commits if another commit isn't already in-flight, set the commit bool if
+        // we're okay to proceed.
+        match inner
+            .commit
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => (),
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::ResourceBusy,
+                    "a commit is already in progress",
+                ));
+            }
+        }
+
+        Ok(Self { inner })
     }
 
     /// The size of each part within the multipart upload (excluding the last which is allowed to
@@ -780,12 +832,51 @@ impl<'a> StagedVolume<'a> {
     const MPU_UPLOAD_SIZE: usize = 32 * 1024 * 1024;
     const READ_BUF_SIZE: usize = 8 * 1024;
 
+    /// Takes a snapshot of the metadata and the files we need to upload as a part of this commit
+    /// while holding a lock for the metadata and file descriptor map.
+    fn snapshot(&self) -> Result<(VolumeMetadata, Vec<(FileAttr, PathBuf)>)> {
+        // read lock on metadata, others can read during the snapshot process, but can't modify.
+        let metadata = self.inner.meta.read();
+        // write lock on the fds, no one is allowed to open new fds while we're taking a snapshot.
+        let fds = self.inner.fds.write();
+
+        // don't allow open fds to staged files during the snapshot process.
+        if fds
+            .iter()
+            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
+        {
+            return Err(Error::new(
+                ErrorKind::ResourceBusy,
+                "all open staged files must be closed before committing",
+            ));
+        }
+
+        // bump the generation number for new staged files. commit will only upload and take
+        // snapshots of files with generation numbers less than this value. this draws a
+        // line in the sand on what will be included in the commit. if someone opens a staged file
+        // and sees that its generation number is less than the current generation, and commit is
+        // inprogress, then we'll treat it similarly to opening a committed file (i.e. truncating
+        // it).
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
+
+        let snapshot: Vec<_> = metadata
+            .iter_staged()
+            .map(|(attr, path)| (attr.clone(), path.clone()))
+            .collect();
+        let copy = metadata.clone();
+
+        Ok((copy, snapshot))
+    }
+
     /// Upload all staged files into a single blob under base.
     ///
     /// Returns the location of the newly uploaded blob and a vector that maps each newly written
     /// Ino to its ByteRange within the new blob. Files are uploaded to the blob using multipart
     /// uploads.
-    async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
+    async fn upload_files(
+        &self,
+        files: Vec<(FileAttr, PathBuf)>,
+    ) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
         let (dest_name, dest) = self.inner.store.new_data_file();
 
         let mut offset = 0;
@@ -797,16 +888,7 @@ impl<'a> StagedVolume<'a> {
 
         let mut buf = BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE);
         let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
-        let staged_files: Vec<(FileAttr, std::path::PathBuf)> = {
-            self.inner
-                .meta
-                .read()
-                .iter_staged()
-                .map(|(attr, path)| (attr.clone(), path.clone()))
-                .collect()
-        };
-
-        for (attr, path) in staged_files {
+        for (attr, path) in files {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
                 let file = open_file(&path, OpenMode::Read).await?;
@@ -866,11 +948,16 @@ impl<'a> StagedVolume<'a> {
         Ok((Location::committed(dest_name), staged))
     }
 
-    /// Relocate all staged files to dest.
-    fn modify(&self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
+    /// Relocate the given VolumeMetadata such that all files present in `ranges` have their
+    /// location modified to `dest`.
+    fn relocate_staged_files(
+        mut metadata: VolumeMetadata,
+        ranges: Vec<(Ino, ByteRange)>,
+        dest: Location,
+    ) -> Result<VolumeMetadata> {
         let now = SystemTime::now();
         for (ino, byte_range) in ranges {
-            self.inner.modify(
+            metadata.modify(
                 ino,
                 now,
                 Some(now),
@@ -880,15 +967,15 @@ impl<'a> StagedVolume<'a> {
         }
 
         // deduplicate and clean up all hanging staged Locations
-        self.inner.meta.write().clean_staged_locations(dest);
+        metadata.clean_staged_locations(dest);
 
-        Ok(())
+        Ok(metadata)
     }
 
     /// Mint and upload a new version of Volume.
-    async fn persist(self, version: Version) -> Result<()> {
+    async fn upload_metadata(&self, metadata: &mut VolumeMetadata, version: Version) -> Result<()> {
         let meta_path = self.inner.store.metadata_path(&version);
-        let new_volume = bytes::Bytes::from(self.inner.to_bytes_with_version(&version)?);
+        let new_volume = bytes::Bytes::from(metadata.to_bytes_with_version(&version)?);
 
         let put_metadata = || async {
             self.inner
@@ -912,7 +999,7 @@ impl<'a> StagedVolume<'a> {
 
         match res {
             Ok(_) => {
-                self.inner.meta.write().set_version(version);
+                metadata.set_version(version);
                 Ok(())
             }
             // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
@@ -934,6 +1021,12 @@ impl<'a> StagedVolume<'a> {
                 e,
             )),
         }
+    }
+
+    fn sync(self, snapshot: VolumeMetadata) -> Result<()> {
+        let metadata = self.inner.meta.write();
+        for entry in snapshot.walk(Ino::Root) {}
+        Ok(())
     }
 }
 
