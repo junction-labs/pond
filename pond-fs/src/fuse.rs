@@ -1,8 +1,16 @@
 use pond::{ErrorKind, Fd, Ino, Volume};
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::time::Duration;
 use std::time::SystemTime;
 use tracing::instrument;
+
+type FilenameHash = i64;
+
+const READDIR_BATCH: usize = 64;
 
 pub struct Pond {
     volume: Volume,
@@ -10,6 +18,7 @@ pub struct Pond {
     uid: u32,
     gid: u32,
     kernel_cache_timeout: Duration,
+    readdir_offsets: HashMap<(Ino, FilenameHash), String>,
 }
 
 impl Pond {
@@ -28,6 +37,7 @@ impl Pond {
             uid,
             gid,
             kernel_cache_timeout,
+            readdir_offsets: Default::default(),
         }
     }
 }
@@ -88,7 +98,7 @@ impl fuser::Filesystem for Pond {
         match fs_try!(reply, self.volume.lookup(parent.into(), name)) {
             Some(attr) => reply.entry(
                 &self.kernel_cache_timeout,
-                &fuse_attr(self.uid, self.gid, attr),
+                &fuse_attr(self.uid, self.gid, &attr),
                 0,
             ),
             None => reply.error(libc::ENOENT),
@@ -106,7 +116,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.getattr(ino.into()));
         reply.attr(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
         );
     }
 
@@ -116,19 +126,61 @@ impl fuser::Filesystem for Pond {
         _req: &fuser::Request<'_>,
         ino: u64,
         _fh: u64,
-        offset: i64,
+        offset: FilenameHash,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let iter = fs_try!(reply, self.volume.readdir(ino.into()));
-        let offset = fs_try!(reply, offset.try_into().map_err(|_| ErrorKind::InvalidData));
+        // translate the offset into the filename where the last readdir left off before its buffer
+        // was full. keep the cookie around so we can fall back to it if nothing new was returned.
+        let mut token: Option<String> = if offset == 0 {
+            None
+        } else {
+            let name = fs_try!(
+                reply,
+                // note that we aren't removing it here. this means that the map grows over the
+                // lifetime of the mount. this allows uses to call readdir with the same offset
+                // multiple times, whereas removing it would cause subsequent calls to fail
+                // completely. if this becomes a problem, we can revisit removing the entry here or
+                // having a TTL map.
+                self.readdir_offsets
+                    .get(&(ino.into(), offset))
+                    .ok_or_else(|| pond::Error::new(
+                        pond::ErrorKind::InvalidData,
+                        format!("bad offset passed to readdir: {offset}"),
+                    ))
+            );
+            Some(name.clone())
+        };
 
-        for (i, entry) in iter.enumerate().skip(offset) {
-            let attr = entry.attr();
-            let name = entry.name();
-            let is_full = reply.add(attr.ino.into(), (i + 1) as i64, fuse_kind(attr.kind), name);
-            if is_full {
+        'outer: loop {
+            let chunk_iter = fs_try!(
+                reply,
+                self.volume
+                    .readdir(ino.into(), token.clone(), READDIR_BATCH,)
+            );
+
+            let mut num_entries = 0;
+            for entry in chunk_iter {
+                num_entries += 1;
+                let name = entry.name();
+                let attr = entry.attr();
+
+                let full_buffer =
+                    reply.add(attr.ino.into(), hash(name), fuse_kind(attr.kind), name);
+                if full_buffer {
+                    break 'outer;
+                }
+
+                token = Some(name.to_string());
+            }
+
+            // if this emits less than the READDIR_BATCH we asked for, we've reached EOF.
+            if num_entries < READDIR_BATCH {
                 break;
             }
+        }
+
+        if let Some(name) = token {
+            self.readdir_offsets.insert((ino.into(), hash(&name)), name);
         }
         reply.ok();
     }
@@ -147,7 +199,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.mkdir(parent.into(), name.to_string()));
         reply.entry(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
             0,
         );
     }
@@ -213,11 +265,12 @@ impl fuser::Filesystem for Pond {
         let name = fs_try!(reply, from_os_str(name));
         let (attr, fd) = fs_try!(
             reply,
-            self.volume.create(parent.into(), name.to_string(), excl)
+            self.runtime
+                .block_on(self.volume.create(parent.into(), name.to_string(), excl))
         );
         reply.created(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
             0,
             fd.into(),
             0,
@@ -344,7 +397,7 @@ impl fuser::Filesystem for Pond {
         let attr = fs_try!(reply, self.volume.getattr(ino));
         reply.attr(
             &self.kernel_cache_timeout,
-            &fuse_attr(self.uid, self.gid, attr),
+            &fuse_attr(self.uid, self.gid, &attr),
         );
     }
 
@@ -450,4 +503,10 @@ fn getuid() -> u32 {
 // getgid is always successful
 fn getgid() -> u32 {
     unsafe { libc::getgid() }
+}
+
+fn hash(s: &str) -> FilenameHash {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as i64
 }

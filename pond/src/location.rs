@@ -1,25 +1,29 @@
 use std::{borrow::Cow, sync::Arc};
 
+/// Location is an enum that acts as a pointer to a blob of bytes.
+///
+/// Location is a lightweight as each enum is basically just an Arc. Cheap to clone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
-    Staged { path: std::path::PathBuf },
-    Committed { key: Arc<str> },
+    Staged {
+        path: Arc<std::path::PathBuf>,
+        generation: u64,
+    },
+    Committed {
+        key: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Location::Staged { path } => write!(f, "{}", path.display()),
+            Location::Staged { path, .. } => write!(f, "{}", path.display()),
             Location::Committed { key } => write!(f, "{key}"),
         }
     }
 }
 
 impl Location {
-    pub(crate) fn is_staged(&self) -> bool {
-        matches!(self, Location::Staged { .. })
-    }
-
     pub(crate) fn committed<'a>(key: impl Into<Cow<'a, str>>) -> Self {
         let key = match key.into() {
             Cow::Borrowed(str) => Arc::from(str),
@@ -28,9 +32,10 @@ impl Location {
         Location::Committed { key }
     }
 
-    pub(crate) fn staged(path: impl AsRef<std::path::Path>) -> Self {
+    pub(crate) fn staged(path: impl AsRef<std::path::Path>, generation: u64) -> Self {
         Location::Staged {
-            path: path.as_ref().to_path_buf(),
+            path: path.as_ref().to_path_buf().into(),
+            generation,
         }
     }
 }

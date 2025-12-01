@@ -9,6 +9,7 @@ mod metrics;
 mod storage;
 mod volume;
 
+use camino::Utf8PathBuf;
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
 pub use location::Location;
@@ -146,15 +147,14 @@ impl FileAttr {
 }
 
 #[derive(Debug, Clone)]
-pub struct DirEntry<'a> {
+pub struct DirEntryRef<'a> {
     name: &'a str,
     parents: Vec<&'a str>,
     attr: &'a FileAttr,
-    locations: &'a [Location],
     data: &'a metadata::EntryData,
 }
 
-impl<'a> DirEntry<'a> {
+impl<'a> DirEntryRef<'a> {
     pub fn name(&self) -> &str {
         self.name
     }
@@ -163,15 +163,12 @@ impl<'a> DirEntry<'a> {
         self.attr
     }
 
-    pub fn location(&self) -> Option<(&Location, ByteRange)> {
+    pub fn location(&self) -> Option<(Location, ByteRange)> {
         match self.data {
             metadata::EntryData::File {
-                location_idx,
+                location,
                 byte_range,
-            } => {
-                let location = &self.locations[*location_idx];
-                Some((location, *byte_range))
-            }
+            } => Some((location.clone(), *byte_range)),
             _ => None,
         }
     }
@@ -180,6 +177,47 @@ impl<'a> DirEntry<'a> {
         let mut path = self.parents.clone();
         path.push(self.name);
         path.join("/")
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.attr.ino.is_regular()
+    }
+
+    pub(crate) fn to_owned(&self) -> DirEntry {
+        let location = self.location().map(|(loc, range)| (loc.clone(), range));
+        let mut path: Utf8PathBuf = self.parents.iter().collect();
+        path.push(self.name());
+        DirEntry {
+            path,
+            attr: self.attr().clone(),
+            location,
+        }
+    }
+}
+
+/// Owned equivalent of [`DirEntryRef`] that does not borrow from the underlying volume.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    path: Utf8PathBuf,
+    attr: FileAttr,
+    location: Option<(Location, ByteRange)>,
+}
+
+impl DirEntry {
+    pub fn name(&self) -> &str {
+        self.path.file_name().expect("BUG: path ends in '..'")
+    }
+
+    pub fn path(&self) -> &str {
+        self.path.as_str()
+    }
+
+    pub fn attr(&self) -> &FileAttr {
+        &self.attr
+    }
+
+    pub fn location(&self) -> Option<(&Location, ByteRange)> {
+        self.location.as_ref().map(|(loc, range)| (loc, *range))
     }
 
     pub fn is_regular(&self) -> bool {

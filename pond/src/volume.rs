@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, DirEntry, Error, FileAttr, Ino, Location, Result,
+    ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, Result,
     cache::{CacheConfig, ChunkCache},
     error::ErrorKind,
     metadata::{Modify, Version, VolumeMetadata},
@@ -14,8 +14,11 @@ use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
     os::unix::fs::FileExt,
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -53,7 +56,7 @@ impl From<Fd> for u64 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum FileDescriptor {
     Committed {
         key: Arc<object_store::path::Path>,
@@ -73,12 +76,22 @@ enum FileDescriptor {
     },
 }
 
+// NOTE: When locking both meta and fds for modification, meta should always be locked first to
+//       avoid deadlocks!
 pub struct Volume {
-    meta: VolumeMetadata,
+    meta: Arc<RwLock<VolumeMetadata>>,
     cache: ChunkCache,
-    fds: BTreeMap<Fd, FileDescriptor>,
+    fds: Arc<RwLock<BTreeMap<Fd, FileDescriptor>>>,
     store: crate::storage::Storage,
     metrics_snapshot: Option<Arc<ArcSwap<Vec<u8>>>>,
+    // file generation number for staged files. the generation gives us an approximation of file
+    // age relative to other files. the generation is bumped everytime we commit, so we're only at
+    // risk of an overflow if the user commits 2^64 times throughout the lifetime of this process.
+    // the generation number does not persist across multiple processes -- it is always reset back
+    // to 0 since it's attached to staged (ephemeral) files.
+    generation: AtomicU64,
+    // is a commit in progress?
+    commit: AtomicBool,
 }
 
 impl Volume {
@@ -95,24 +108,18 @@ impl Volume {
         });
 
         Self {
-            meta,
+            meta: Arc::new(RwLock::new(meta)),
             cache,
-            fds: Default::default(),
+            fds: Arc::new(RwLock::new(BTreeMap::new())),
             store,
             metrics_snapshot,
+            generation: AtomicU64::new(0),
+            commit: AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn metadata(&self) -> &VolumeMetadata {
-        &self.meta
-    }
-
-    pub(crate) fn metadata_mut(&mut self) -> &mut VolumeMetadata {
-        &mut self.meta
-    }
-
     pub(crate) fn modify(
-        &mut self,
+        &self,
         ino: Ino,
         mtime: SystemTime,
         ctime: Option<SystemTime>,
@@ -122,14 +129,21 @@ impl Volume {
         match ino {
             Ino::CLEAR_CACHE | Ino::COMMIT => Ok(()),
             ino => {
-                self.meta.modify(ino, mtime, ctime, location, range)?;
+                self.meta
+                    .write()
+                    .expect("lock was poisoned")
+                    .modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
         }
     }
 
-    pub fn version(&self) -> &Version {
-        self.metadata().version()
+    pub fn version(&self) -> Version {
+        self.meta
+            .read()
+            .expect("lock was poisoned")
+            .version()
+            .clone()
     }
 
     pub fn object_store_description(&self) -> String {
@@ -145,91 +159,130 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.meta.to_bytes()
+        self.meta.read().expect("lock was poisoned").to_bytes()
     }
 
     pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
-        self.meta.to_bytes_with_version(version)
+        self.meta
+            .read()
+            .expect("lock was poisoned")
+            .to_bytes_with_version(version)
     }
 
-    pub fn getattr(&self, ino: Ino) -> Result<&FileAttr> {
+    pub fn getattr(&self, ino: Ino) -> Result<FileAttr> {
         scoped_timer!("pond_volume_getattr_latency_secs");
-        match self.meta.getattr(ino) {
-            Some(attr) => Ok(attr),
+        match self.meta.read().expect("lock was poisoned").getattr(ino) {
+            Some(attr) => Ok(attr.clone()),
             None => Err(ErrorKind::NotFound.into()),
         }
     }
 
     pub fn setattr(
-        &mut self,
+        &self,
         ino: Ino,
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
-    ) -> Result<&FileAttr> {
-        self.meta.setattr(ino, mtime, ctime)
+    ) -> Result<FileAttr> {
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .setattr(ino, mtime, ctime)
+            .cloned()
     }
 
-    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<&FileAttr>> {
+    pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<FileAttr>> {
         scoped_timer!("pond_volume_lookup_latency_secs");
-        let attr = self.meta.lookup(parent, name)?;
-        Ok(attr)
+        Ok(self
+            .meta
+            .read()
+            .expect("lock was poisoned")
+            .lookup(parent, name)?
+            .cloned())
     }
 
-    pub fn mkdir(&mut self, parent: Ino, name: String) -> Result<&FileAttr> {
-        self.meta.mkdir(parent, name)
+    pub fn mkdir(&self, parent: Ino, name: String) -> Result<FileAttr> {
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .mkdir(parent, name)
+            .cloned()
     }
 
-    pub fn rmdir(&mut self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.rmdir(parent, name)?;
+    pub fn rmdir(&self, parent: Ino, name: &str) -> Result<()> {
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .rmdir(parent, name)?;
         Ok(())
     }
 
-    pub fn rename(
-        &mut self,
-        parent: Ino,
-        name: &str,
-        newparent: Ino,
-        newname: String,
-    ) -> Result<()> {
-        self.meta.rename(parent, name, newparent, newname)?;
+    pub fn rename(&self, parent: Ino, name: &str, newparent: Ino, newname: String) -> Result<()> {
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .rename(parent, name, newparent, newname)?;
         Ok(())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Result<impl Iterator<Item = DirEntry<'_>>> {
-        let iter = self.meta.readdir(ino)?;
-        Ok(iter)
+    pub fn readdir(
+        &self,
+        ino: Ino,
+        offset: Option<String>,
+        size: usize,
+    ) -> Result<impl Iterator<Item = DirEntry>> {
+        let metadata = self.meta.read().expect("lock was poisoned");
+        let entries: Vec<DirEntry> = metadata
+            .readdir(ino, offset)?
+            .take(size)
+            .map(|e| e.to_owned())
+            .collect();
+        Ok(entries.into_iter())
     }
 
-    pub fn create(
-        &mut self,
+    pub async fn create(
+        &self,
         parent: Ino,
         name: String,
         exclusive: bool,
-    ) -> Result<(&FileAttr, Fd)> {
-        let (path, file) = self.store.tempfile()?;
+    ) -> Result<(FileAttr, Fd)> {
+        let path = self.store.new_staged_filepath()?;
+        let file = open_file(path.as_path(), OpenMode::Create).await?;
 
-        let attr = self.meta.create(
-            parent,
-            name,
-            exclusive,
-            Location::Staged { path },
-            ByteRange::empty(),
-        )?;
+        let attr = {
+            let mut metadata = self.meta.write().expect("lock was poisoned");
+            metadata
+                .create(
+                    parent,
+                    name,
+                    exclusive,
+                    Location::staged(path, self.generation.load(Ordering::SeqCst)),
+                    ByteRange::empty(),
+                )?
+                .clone()
+            // we drop the write lock on metadata here -- the metadata and fd updates are
+            // decoupled anyway, so right now a failed new_fd call doesn't cause us to undo the
+            // metadata change. if we implemented transaction-like behavior, then it would be more
+            // useful to hold both locks at the same time but as-is there's no reason to hold the
+            // metadata for longer.
+        };
 
         let fd = new_fd(
-            &mut self.fds,
+            &mut self.fds.write().expect("lock was poisoned"),
             attr.ino,
             FileDescriptor::Staged { file: file.into() },
         )?;
         Ok((attr, fd))
     }
 
-    pub fn delete(&mut self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.delete(parent, name)?;
+    pub fn delete(&self, parent: Ino, name: &str) -> Result<()> {
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .delete(parent, name)?;
         Ok(())
     }
 
-    pub fn truncate(&mut self, ino: Ino, size: u64) -> Result<()> {
+    pub fn truncate(&self, ino: Ino, size: u64) -> Result<()> {
         self.modify(
             ino,
             SystemTime::now(),
@@ -263,92 +316,157 @@ impl Volume {
     /// Open a Fd to a locally staged file for reading and writing.
     ///
     /// Opening a Fd with write permissions will always truncate the file.
-    pub async fn open_read_write(&mut self, ino: Ino) -> Result<Fd> {
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "https://github.com/rust-lang/rust-clippy/issues/6446"
+    )]
+    pub async fn open_read_write(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::COMMIT => new_fd(&mut self.fds, ino, FileDescriptor::Commit),
-            Ino::CLEAR_CACHE => new_fd(&mut self.fds, ino, FileDescriptor::ClearCache),
+            Ino::COMMIT => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::Commit,
+            ),
+            Ino::CLEAR_CACHE => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::ClearCache,
+            ),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
-            ino => match self.meta.location(ino) {
-                Some((Location::Staged { path }, _)) => {
-                    let file = open_file(path, true).await?;
+            ino => {
+                let mut metadata_guard = self.meta.write().expect("lock was poisoned");
+                match metadata_guard.location(ino) {
+                    Some((Location::Staged { path, generation }, _)) => {
+                        let file = if generation < self.generation.load(Ordering::SeqCst) {
+                            // generation mismatch for staged files, which means we're opening this
+                            // up while a commit is running and this staged file is part of the
+                            // snapshot. we treat it as a committed file in this case.
+                            let path = self.store.new_staged_filepath()?;
+                            let staged = Location::staged(
+                                path.clone(),
+                                self.generation.load(Ordering::SeqCst),
+                            );
+                            metadata_guard.modify(
+                                ino,
+                                SystemTime::now(),
+                                None,
+                                Some(staged),
+                                Some(Modify::Set((0, 0).into())),
+                            )?;
+                            std::mem::drop(metadata_guard); // guard is dropped here before the await
+                            open_file(&path, OpenMode::Create).await?
+                        } else {
+                            let path = path.clone();
+                            std::mem::drop(metadata_guard); // guard is dropped here before the await
+                            open_file(&path, OpenMode::ReadWrite).await?
+                        };
 
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
+                        new_fd(
+                            &mut self.fds.write().expect("lock was poisoned"),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
+                    }
+                    Some((Location::Committed { .. }, ..)) => {
+                        // truncate the file (by assigning it a brand new staged file) if it's
+                        // committed. the alternative would be to keep a copy of the committed
+                        // file locally as a staged file, which can be expensive if it's a large file.
+                        let path = self.store.new_staged_filepath()?;
+                        let staged =
+                            Location::staged(path.clone(), self.generation.load(Ordering::SeqCst));
+                        metadata_guard.modify(
+                            ino,
+                            SystemTime::now(),
+                            None,
+                            Some(staged),
+                            Some(Modify::Set((0, 0).into())),
+                        )?;
+                        std::mem::drop(metadata_guard); // guard is dropped here before the await
+                        let file = open_file(&path, OpenMode::Create).await?;
+                        // only create the fd once the file is open and metadata is valid
+                        new_fd(
+                            &mut self.fds.write().expect("lock was poisoned"),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
+                    }
+                    None => Err(ErrorKind::NotFound.into()),
                 }
-                Some((Location::Committed { .. }, ..)) => {
-                    // truncate the file (by assigning it a brand new staged file) if it's
-                    // committed. the alternative would be to keep a copy of the committed
-                    // file locally as a staged file, which can be expensive if it's a large file.
-                    let (path, file) = self.store.tempfile()?;
-                    let staged = Location::Staged { path };
-                    // modify metadata next
-                    self.modify(
-                        ino,
-                        SystemTime::now(),
-                        None,
-                        Some(staged),
-                        Some(Modify::Set((0, 0).into())),
-                    )?;
-                    // only create the fd once the file is open and metadata is valid
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
-                }
-                None => Err(ErrorKind::NotFound.into()),
-            },
+            }
         }
     }
 
-    pub async fn open_read(&mut self, ino: Ino) -> Result<Fd> {
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "https://github.com/rust-lang/rust-clippy/issues/6446"
+    )]
+    pub async fn open_read(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::VERSION => new_fd(&mut self.fds, ino, FileDescriptor::Version),
+            Ino::VERSION => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::Version,
+            ),
             Ino::PROM_METRICS => {
                 let data = match &self.metrics_snapshot {
                     Some(metrics) => metrics.load().clone(),
                     None => Default::default(),
                 };
                 new_fd(
-                    &mut self.fds,
+                    &mut self.fds.write().expect("lock was poisoned"),
                     ino,
                     FileDescriptor::PromMetrics { snapshot: data },
                 )
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
-            ino => match self.meta.location(ino) {
-                Some((Location::Staged { path }, _)) => {
-                    let file = open_file(path, false).await?;
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Staged { file: file.into() },
-                    )
+            ino => {
+                let metadata_guard = self.meta.read().expect("lock was poisoned");
+                match metadata_guard.location(ino) {
+                    Some((Location::Staged { path, .. }, _)) => {
+                        let path = path.clone();
+                        std::mem::drop(metadata_guard); // guard is dropped here before the await
+                        let file = open_file(&path, OpenMode::Read).await?;
+                        new_fd(
+                            &mut self.fds.write().expect("lock was poisoned"),
+                            ino,
+                            FileDescriptor::Staged { file: file.into() },
+                        )
+                    }
+                    Some((Location::Committed { key }, range)) => {
+                        let key = Arc::new(self.store.child_path(key.as_ref()));
+                        let range = *range;
+                        std::mem::drop(metadata_guard);
+                        new_fd(
+                            &mut self.fds.write().expect("lock was poisoned"),
+                            ino,
+                            FileDescriptor::Committed { key, range },
+                        )
+                    }
+                    None => Err(ErrorKind::NotFound.into()),
                 }
-                Some((Location::Committed { key }, range)) => {
-                    let key = Arc::new(self.store.child_path(key));
-                    new_fd(
-                        &mut self.fds,
-                        ino,
-                        FileDescriptor::Committed { key, range: *range },
-                    )
-                }
-                None => Err(ErrorKind::NotFound.into()),
-            },
+            }
         }
     }
 
     pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        match self.fds.get(&fd) {
+        let descriptor = self
+            .fds
+            .read()
+            .expect("lock was poisoned")
+            .get(&fd)
+            .cloned();
+        match descriptor {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
-            Some(FileDescriptor::Version) => read_version(self.meta.version(), offset, buf),
-            Some(FileDescriptor::PromMetrics { snapshot }) => read_from_buf(snapshot, offset, buf),
+            Some(FileDescriptor::Version) => {
+                let version = self.version();
+                read_version(&version, offset, buf)
+            }
+            Some(FileDescriptor::PromMetrics { snapshot }) => {
+                read_from_buf(snapshot.as_ref(), offset, buf)
+            }
             Some(FileDescriptor::Committed { key, range }) => {
                 scoped_timer!("pond_volume_read_latency_secs", "type" => "committed");
                 // FIXME: readahead needs to know the extent of the location -
@@ -361,10 +479,7 @@ impl Volume {
                     return Ok(0);
                 }
                 let blob_offset = range.offset + offset;
-                let bytes: Vec<Bytes> = self
-                    .cache
-                    .get_at(key.clone(), blob_offset, read_len)
-                    .await?;
+                let bytes: Vec<Bytes> = self.cache.get_at(key, blob_offset, read_len).await?;
                 Ok(copy_into(buf, &bytes))
             }
             Some(FileDescriptor::Staged { file, .. }) => {
@@ -375,10 +490,16 @@ impl Volume {
         }
     }
 
-    pub async fn write_at(&mut self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
+    pub async fn write_at(&self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
 
-        match self.fds.get_mut(&fd) {
+        let descriptor = self
+            .fds
+            .read()
+            .expect("lock was poisoned")
+            .get(&fd)
+            .cloned();
+        match descriptor {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
                 Ok(data.len())
@@ -427,14 +548,14 @@ impl Volume {
         }
     }
 
-    pub async fn release(&mut self, fd: Fd) -> Result<()> {
-        match self.fds.remove(&fd) {
+    pub async fn release(&self, fd: Fd) -> Result<()> {
+        match self.fds.write().expect("lock was poisoned").remove(&fd) {
             Some(_) => Ok(()),
             None => Err(ErrorKind::NotFound.into()),
         }
     }
 
-    pub async fn commit(&mut self, version: Version) -> Result<()> {
+    pub async fn commit(&self, version: Version) -> Result<()> {
         if self.store.exists(&version).await? {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
@@ -442,24 +563,19 @@ impl Volume {
             ));
         }
 
-        // don't allow staged files to be open
-        if self
-            .fds
-            .iter()
-            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
-        {
-            return Err(Error::new(
-                ErrorKind::ResourceBusy,
-                "all open staged files must be closed before committing",
-            ));
-        }
+        let commit = Commit::new(self)?;
 
-        let mut staged = StagedVolume::new(self);
-        let (dest, ranges) = staged.upload().await?;
-        staged.modify(dest, ranges)?;
-        staged.persist(version).await?;
+        // take a snapshot of the metadata and walk the volume to get a handle to each staged file.
+        let mut snapshot = commit.snapshot()?;
+        let (dest, range) = commit.upload_files(snapshot.staged_files).await?;
+        apply_location_ranges(&mut snapshot.metadata, range, dest)?;
+        commit
+            .upload_metadata(&mut snapshot.metadata, version)
+            .await?;
 
-        Ok(())
+        // reconcile any differences between what we just uploaded and any modifications that
+        // occurred since we took the snapshot.
+        commit.sync(snapshot.metadata)
     }
 }
 
@@ -480,9 +596,63 @@ fn read_from_buf(from: &[u8], offset: u64, to: &mut [u8]) -> Result<usize> {
     Ok(amt)
 }
 
+pub struct WalkVolume {
+    meta: Arc<RwLock<VolumeMetadata>>,
+    stack: Vec<std::vec::IntoIter<DirEntry>>,
+}
+
+impl WalkVolume {
+    fn new(meta: Arc<RwLock<VolumeMetadata>>, ino: Ino) -> Result<Self> {
+        let entries = meta
+            .read()
+            .expect("lock was poisoned")
+            .readdir(ino, None)?
+            .map(|e| e.to_owned())
+            .collect::<Vec<_>>();
+        Ok(Self {
+            meta,
+            stack: vec![entries.into_iter()],
+        })
+    }
+
+    fn push_dir_entries(&mut self, ino: Ino) -> Result<()> {
+        let entries = self
+            .meta
+            .read()
+            .expect("lock was poisoned")
+            .readdir(ino, None)?
+            .map(|e| e.to_owned())
+            .collect::<Vec<_>>();
+        self.stack.push(entries.into_iter());
+        Ok(())
+    }
+}
+
+impl Iterator for WalkVolume {
+    type Item = Result<DirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let iter = self.stack.last_mut()?;
+            if let Some(entry) = iter.next() {
+                if entry.attr().kind == FileType::Directory
+                    && let Err(e) = self.push_dir_entries(entry.attr().ino)
+                {
+                    return Some(Err(e));
+                }
+                return Some(Ok(entry));
+            } else {
+                self.stack.pop();
+            }
+        }
+    }
+}
+
 impl Volume {
-    pub fn walk(&self, ino: Ino) -> Result<impl Iterator<Item = Result<DirEntry<'_>>>> {
-        self.meta.walk(ino)
+    /// Returns a guarded iterator over the entire volume. The guard ensures that iteration is done
+    /// over a consistent view of the Volume.
+    pub fn walk(&self, ino: Ino) -> Result<WalkVolume> {
+        WalkVolume::new(self.meta.clone(), ino)
     }
 
     /// Pack a local directory into a Pond volume.
@@ -515,7 +685,10 @@ impl Volume {
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
                     .collect();
-                self.metadata_mut().mkdir_all(Ino::Root, dirs)?;
+                self.meta
+                    .write()
+                    .expect("lock was poisoned")
+                    .mkdir_all(Ino::Root, dirs)?;
             }
             // for a file:
             //
@@ -537,7 +710,11 @@ impl Volume {
                     let dirs = dir
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy().to_string());
-                    self.metadata_mut().mkdir_all(Ino::Root, dirs)?.ino
+                    self.meta
+                        .write()
+                        .expect("lock was poisoned")
+                        .mkdir_all(Ino::Root, dirs)?
+                        .ino
                 } else {
                     Ino::Root
                 };
@@ -559,11 +736,11 @@ impl Volume {
                         )
                     })?
                     .len();
-                self.metadata_mut().create(
+                self.meta.write().expect("lock was poisoned").create(
                     dir_ino,
                     name.to_string_lossy().to_string(),
                     true,
-                    Location::staged(entry.path()),
+                    Location::staged(entry.path(), self.generation.load(Ordering::SeqCst)),
                     ByteRange { offset: 0, len },
                 )?;
             }
@@ -587,11 +764,25 @@ macro_rules! try_sync {
     };
 }
 
-/// Opens a std::fs::File for reading (and writing if `write` is set).
-async fn open_file(path: &Path, write: bool) -> Result<std::fs::File> {
+enum OpenMode {
+    Read,
+    ReadWrite,
+    Create,
+}
+
+/// Opens a std::fs::File for reading and optionally writing.
+async fn open_file(path: &Path, mode: OpenMode) -> Result<std::fs::File> {
     let copy = path.to_path_buf();
+
+    let mut options = std::fs::File::options();
+    match mode {
+        OpenMode::Read => options.read(true),
+        OpenMode::ReadWrite => options.read(true).write(true),
+        OpenMode::Create => options.read(true).write(true).create(true).truncate(true),
+    };
+
     try_sync!(
-        std::fs::File::options().read(true).write(write).open(copy),
+        options.open(copy),
         "std::fs::File::open",
         "failed to open staged file"
     )
@@ -661,13 +852,39 @@ macro_rules! try_mpu {
     };
 }
 
-struct StagedVolume<'a> {
-    inner: &'a mut Volume,
+struct Snapshot {
+    metadata: VolumeMetadata,
+    staged_files: Vec<(FileAttr, Arc<PathBuf>)>,
 }
 
-impl<'a> StagedVolume<'a> {
-    fn new(inner: &'a mut Volume) -> Self {
-        Self { inner }
+struct Commit<'a> {
+    inner: &'a Volume,
+}
+
+impl<'a> Drop for Commit<'a> {
+    fn drop(&mut self) {
+        self.inner.commit.store(false, Ordering::SeqCst);
+    }
+}
+
+impl<'a> Commit<'a> {
+    fn new(inner: &'a Volume) -> Result<Self> {
+        // only allow commits if another commit isn't already in-flight, set the commit bool if
+        // we're okay to proceed.
+        match inner
+            .commit
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => (),
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::ResourceBusy,
+                    "a commit is already in progress",
+                ));
+            }
+        }
+
+        Ok(Self { inner })
     }
 
     /// The size of each part within the multipart upload (excluding the last which is allowed to
@@ -675,12 +892,53 @@ impl<'a> StagedVolume<'a> {
     const MPU_UPLOAD_SIZE: usize = 32 * 1024 * 1024;
     const READ_BUF_SIZE: usize = 8 * 1024;
 
+    /// Takes a snapshot of the metadata and the files we need to upload as a part of this commit
+    /// while holding a lock for the metadata and file descriptor map.
+    fn snapshot(&self) -> Result<Snapshot> {
+        // read lock on metadata, others can read during the snapshot process, but can't modify.
+        let metadata = self.inner.meta.read().expect("lock was poisoned");
+        // write lock on the fds, no one is allowed to open new fds while we're taking a snapshot.
+        let fds = self.inner.fds.write().expect("lock was poisoned");
+
+        // don't allow open fds to staged files during the snapshot process.
+        if fds
+            .iter()
+            .any(|(_, desc)| matches!(desc, FileDescriptor::Staged { .. }))
+        {
+            return Err(Error::new(
+                ErrorKind::ResourceBusy,
+                "all open staged files must be closed before committing",
+            ));
+        }
+
+        // bump the generation number for new staged files. commit will only upload and take
+        // snapshots of files with generation numbers less than this value. this draws a
+        // line in the sand on what will be included in the commit. if someone opens a staged file
+        // and sees that its generation number is less than the current generation, and commit is
+        // inprogress, then we'll treat it similarly to opening a committed file (i.e. truncating
+        // it).
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
+
+        let staged_files: Vec<_> = metadata
+            .iter_staged()
+            .map(|(attr, path)| (attr.clone(), path.clone()))
+            .collect();
+
+        Ok(Snapshot {
+            metadata: metadata.clone(),
+            staged_files,
+        })
+    }
+
     /// Upload all staged files into a single blob under base.
     ///
     /// Returns the location of the newly uploaded blob and a vector that maps each newly written
     /// Ino to its ByteRange within the new blob. Files are uploaded to the blob using multipart
     /// uploads.
-    async fn upload(&self) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
+    async fn upload_files(
+        &self,
+        files: Vec<(FileAttr, Arc<PathBuf>)>,
+    ) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
         let (dest_name, dest) = self.inner.store.new_data_file();
 
         let mut offset = 0;
@@ -692,10 +950,10 @@ impl<'a> StagedVolume<'a> {
 
         let mut buf = BytesMut::with_capacity(Self::MPU_UPLOAD_SIZE);
         let mut read_buf = vec![0u8; Self::READ_BUF_SIZE];
-        for (attr, path) in self.inner.meta.iter_staged() {
+        for (attr, path) in files {
             // don't actually upload anything for zero sized files
             if attr.size > 0 {
-                let file = open_file(path, false).await?;
+                let file = open_file(&path, OpenMode::Read).await?;
                 let mut reader = BufReader::new(file).take(attr.size);
 
                 loop {
@@ -752,29 +1010,10 @@ impl<'a> StagedVolume<'a> {
         Ok((Location::committed(dest_name), staged))
     }
 
-    /// Relocate all staged files to dest.
-    fn modify(&mut self, dest: Location, ranges: Vec<(Ino, ByteRange)>) -> Result<()> {
-        let now = SystemTime::now();
-        for (ino, byte_range) in ranges {
-            self.inner.meta.modify(
-                ino,
-                now,
-                Some(now),
-                Some(dest.clone()),
-                Some(Modify::Set(byte_range)),
-            )?;
-        }
-
-        // deduplicate and clean up all hanging staged Locations
-        self.inner.meta.clean_staged_locations(dest);
-
-        Ok(())
-    }
-
     /// Mint and upload a new version of Volume.
-    async fn persist(self, version: Version) -> Result<()> {
+    async fn upload_metadata(&self, metadata: &mut VolumeMetadata, version: Version) -> Result<()> {
         let meta_path = self.inner.store.metadata_path(&version);
-        let new_volume = bytes::Bytes::from(self.inner.to_bytes_with_version(&version)?);
+        let new_volume = bytes::Bytes::from(metadata.to_bytes_with_version(&version)?);
 
         let put_metadata = || async {
             self.inner
@@ -798,7 +1037,7 @@ impl<'a> StagedVolume<'a> {
 
         match res {
             Ok(_) => {
-                self.inner.meta.set_version(version);
+                metadata.set_version(version);
                 Ok(())
             }
             // TODO: there's a scenario here where we get an AlreadyExists error returned to us,
@@ -821,6 +1060,86 @@ impl<'a> StagedVolume<'a> {
             )),
         }
     }
+
+    fn sync(self, snapshot: VolumeMetadata) -> Result<()> {
+        let mut metadata = self.inner.meta.write().expect("lock was poisoned");
+        metadata.set_version(snapshot.version().clone());
+
+        let snapshot_generation = self.inner.generation.load(Ordering::SeqCst);
+        // walk the snapshot, updating the current view of metadata for the dir entries for staged
+        // regular files that we committed up to S3. only update them if they weren't updated since
+        // we took the snapshot. if they were updated, then any concurrent updates to the metdata
+        // while we were committing will take precedence.
+        for snapshot_entry in snapshot.walk(Ino::Root)? {
+            let snapshot_entry = snapshot_entry?;
+            if !snapshot_entry.is_regular() || !snapshot_entry.attr.is_file() {
+                continue;
+            }
+
+            // fetch the equivalent entry in the current version of metadata. if it's missing, then
+            // someone deleted this ino while we were busy committing.
+            let ino = snapshot_entry.attr.ino;
+            let Some(attr) = metadata.getattr(ino).cloned() else {
+                continue;
+            };
+
+            // if the location is still staged and has an older generation, then we know that it
+            // wasn't opened for writing since the commit. we can proceed with replacing its
+            // location to the one we uploaded to S3.
+            if !matches!(
+                metadata.location(ino),
+                Some((Location::Staged { generation, .. }, _)) if generation < snapshot_generation
+            ) {
+                continue;
+            }
+
+            // retain mtime and ctime changes (e.g. if the file was touched to update mtime or
+            // moved)
+            let new_mtime = std::cmp::max(attr.mtime, snapshot_entry.attr.mtime);
+            let new_ctime = std::cmp::max(attr.ctime, snapshot_entry.attr.ctime);
+
+            let Some((snapshot_location, snapshot_byte_range)) = snapshot_entry.location() else {
+                continue;
+            };
+
+            metadata.modify(
+                ino,
+                new_mtime,
+                Some(new_ctime),
+                Some(snapshot_location.clone()),
+                Some(Modify::Set(snapshot_byte_range)),
+            )?;
+        }
+
+        // the walk and location modification will result in some unreferenced staged locations.
+        // these need to be cleaned up.
+        metadata.prune_unreferenced_locations();
+
+        Ok(())
+    }
+}
+
+/// Updates the entries within `metadata` specified by the Inos in `ranges` to point to `dest` and
+/// have the range in `ranges`.
+fn apply_location_ranges(
+    metadata: &mut VolumeMetadata,
+    ranges: Vec<(Ino, ByteRange)>,
+    dest: Location,
+) -> Result<()> {
+    let now = SystemTime::now();
+    for (ino, byte_range) in ranges {
+        metadata.modify(
+            ino,
+            now,
+            Some(now),
+            Some(dest.clone()),
+            Some(Modify::Set(byte_range)),
+        )?;
+    }
+
+    metadata.prune_unreferenced_locations();
+
+    Ok(())
 }
 
 fn should_retry(e: &object_store::Error) -> bool {
@@ -882,12 +1201,12 @@ mod tests {
         }
     }
 
-    async fn assert_write(volume: &mut Volume, fd: Fd, contents: &'static str) {
+    async fn assert_write(volume: &Volume, fd: Fd, contents: &'static str) {
         volume.write_at(fd, 0, contents.as_bytes()).await.unwrap();
         volume.release(fd).await.unwrap();
     }
 
-    async fn assert_read(volume: &mut Volume, name: &'static str, contents: &'static str) {
+    async fn assert_read(volume: &Volume, name: &'static str, contents: &'static str) {
         let attr = volume.lookup(Ino::Root, name).unwrap().unwrap();
         let mut buf = vec![0u8; attr.size as usize];
         let fd = volume.open_read(attr.ino).await.unwrap();
@@ -907,13 +1226,14 @@ mod tests {
             .unwrap();
 
         // create a volume with three files, all of which are 5 bytes long.
-        let (mut volume, inos) = runtime.block_on(async {
+        let (volume, inos) = runtime.block_on(async {
             let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-            let mut volume = client.create_volume().await;
+            let volume = client.create_volume().await;
 
-            let mut create = async |name, bs| {
+            let create = async |name, bs| {
                 let (attr, fd) = volume
                     .create(Ino::Root, std::primitive::str::to_string(name), true)
+                    .await
                     .unwrap();
                 let ino = attr.ino;
                 volume.write_at(fd, 0, bs).await.unwrap();
@@ -954,47 +1274,59 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume().await;
+        let volume = client.create_volume().await;
 
         // clean volume -- this is not staged
-        assert!(!volume.meta.is_staged());
+        assert!(!volume.meta.read().expect("lock was poisoned").is_staged());
 
         // creating two files, it should be a staged volume now.
-        let (attr1, fd1) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let (attr1, fd1) = volume
+            .create(Ino::Root, "hello.txt".into(), true)
+            .await
+            .unwrap();
         let attr1 = attr1.clone();
-        assert_write(&mut volume, fd1, "hello").await;
-        let (attr2, fd2) = volume.create(Ino::Root, "world.txt".into(), true).unwrap();
+        assert_write(&volume, fd1, "hello").await;
+        let (attr2, fd2) = volume
+            .create(Ino::Root, "world.txt".into(), true)
+            .await
+            .unwrap();
         let attr2 = attr2.clone();
-        assert_write(&mut volume, fd2, "world").await;
+        assert_write(&volume, fd2, "world").await;
 
-        assert!(volume.meta.is_staged());
-        for attr in [&attr1, &attr2] {
-            assert!(matches!(
-                volume.meta.location(attr.ino),
-                Some((Location::Staged { .. }, _))
-            ));
+        {
+            let meta = volume.meta.read().expect("lock was poisoned");
+            assert!(meta.is_staged());
+            for attr in [&attr1, &attr2] {
+                assert!(matches!(
+                    meta.location(attr.ino),
+                    Some((Location::Staged { .. }, _))
+                ));
+            }
         }
 
         // commit!!!
         let commit_fd = volume.open_read_write(Ino::COMMIT).await.unwrap();
-        assert_write(&mut volume, commit_fd, "next-version").await;
+        assert_write(&volume, commit_fd, "next-version").await;
 
         // after commit, both files are no longer staged
-        assert!(!volume.meta.is_staged());
-        for attr in [&attr1, &attr2] {
-            assert!(matches!(
-                volume.meta.location(attr.ino),
-                Some((Location::Committed { .. }, _))
-            ));
+        {
+            let meta = volume.meta.read().expect("lock was poisoned");
+            assert!(!meta.is_staged());
+            for attr in [&attr1, &attr2] {
+                assert!(matches!(
+                    meta.location(attr.ino),
+                    Some((Location::Committed { .. }, _))
+                ));
+            }
         }
 
         // read the new volume, assert that the committed files have the
         // right contents, and check the version is bumped as expected
-        let mut next_volume = client.load_volume(&None).await.unwrap();
-        let next_version: &str = next_volume.meta.version().as_ref();
-        assert_eq!(next_version, "next-version",);
-        assert_read(&mut next_volume, "hello.txt", "hello").await;
-        assert_read(&mut next_volume, "world.txt", "world").await;
+        let next_volume = client.load_volume(&None).await.unwrap();
+        let next_version = next_volume.version().to_string();
+        assert_eq!(next_version, "next-version");
+        assert_read(&next_volume, "hello.txt", "hello").await;
+        assert_read(&next_volume, "world.txt", "world").await;
     }
 
     #[tokio::test]
@@ -1004,13 +1336,20 @@ mod tests {
         std::fs::create_dir_all(&volume_path).unwrap();
 
         let mut client = Client::open(volume_path.to_str().unwrap()).unwrap();
-        let mut volume = client.create_volume().await;
+        let volume = client.create_volume().await;
 
         // creating a file, but holding the fd (not releasing it)
-        let (attr, fd) = volume.create(Ino::Root, "hello.txt".into(), true).unwrap();
+        let (attr, fd) = volume
+            .create(Ino::Root, "hello.txt".into(), true)
+            .await
+            .unwrap();
         let attr = attr.clone();
         assert!(matches!(
-            volume.meta.location(attr.ino),
+            volume
+                .meta
+                .read()
+                .expect("lock was poisoned")
+                .location(attr.ino),
             Some((Location::Staged { .. }, _))
         ));
 
@@ -1038,7 +1377,7 @@ mod tests {
         let _f3 = volume.open_read_write(Ino::COMMIT).await.unwrap();
         let _f4 = volume.open_read(attr.ino).await.unwrap();
         // this is ok, because none of them are staged
-        assert!(!volume.fds.is_empty());
+        assert!(!volume.fds.read().expect("lock was poisoned").is_empty());
         volume
             .commit(Version::from_static("next-version"))
             .await

@@ -1,13 +1,14 @@
 use std::{
     borrow::{Borrow, Cow},
-    collections::{BTreeMap, VecDeque, btree_map},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map},
     fmt::Debug,
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{ByteRange, DirEntry, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
+use crate::{ByteRange, DirEntryRef, Error, FileAttr, FileType, Ino, Location, error::ErrorKind};
 
 // TODO: we duplicate file/dir names as strings in data values and entry keys.
 // have to figure out how to intern somewhere if we want to stop, and probably
@@ -116,7 +117,7 @@ impl Version {
 /// Because staged locations are effectively dangling pointers, volumes cannot
 /// be serialized while they're being staged.
 // # TODO: should we guarantee inodes are stable in the docs?
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct VolumeMetadata {
     version: Version,
 
@@ -124,10 +125,9 @@ pub(crate) struct VolumeMetadata {
     // volume.
     next_ino: Ino,
 
-    // interned list of locations that hold data blobs. this list must
-    // remain in a stable order. each Entry contains indexes into this
-    // vec, and re-ordering it invalidates those indexes.
-    locations: Vec<Location>,
+    // interned set of locations that hold data blobs. the locations themselves are cheap to clone
+    // as each enum is just an Arc.
+    locations: BTreeSet<Location>,
 
     // Ino -> Entry
     data: BTreeMap<Ino, Entry>,
@@ -154,23 +154,24 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum EntryData {
     Directory,
     File {
-        location_idx: usize,
+        /// Location is an enum over Arcs, it's cheap to copy.
+        location: Location,
         byte_range: ByteRange,
     },
     Dynamic,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKeyRef<'a> {
     ino: Ino,
     name: Cow<'a, str>,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryKey<'a>(EntryKeyRef<'a>);
 
 impl<'a> From<(Ino, &'a str)> for EntryKey<'a> {
@@ -232,7 +233,7 @@ impl VolumeMetadata {
         Self {
             version,
             next_ino: Ino::min_regular(),
-            locations: vec![],
+            locations: BTreeSet::new(),
             data,
             dirs,
         }
@@ -527,7 +528,7 @@ impl VolumeMetadata {
         let ino = self.next_ino()?;
         let slot = self.data.entry(ino);
 
-        let location_idx = insert_unique(&mut self.locations, location);
+        let location = get_interned_or_insert(&mut self.locations, location);
         let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
@@ -540,7 +541,7 @@ impl VolumeMetadata {
                 kind: FileType::Regular,
             },
             data: EntryData::File {
-                location_idx,
+                location,
                 byte_range,
             },
         };
@@ -642,56 +643,21 @@ impl VolumeMetadata {
         Ok(&entry.attr)
     }
 
-    /// Change the physical location of a data blob.
-    ///
-    /// This changes the physical location for all files in the volume that
-    /// refer to this blob. To relocate an individual file, see `modify`.
-    pub(crate) fn relocate(&mut self, from: &Location, to: Location) -> crate::Result<()> {
-        let Some(from) = self.locations.iter_mut().find(|l| l == &from) else {
-            return Err(ErrorKind::NotFound.into());
-        };
-        *from = to;
-        Ok(())
-    }
-
-    /// Clean up all staged locations, replacing all internal state to instead point to dest.
-    ///
-    /// This attempts to keep Volume in a consistent state at every step of modification.
-    pub(crate) fn clean_staged_locations(&mut self, dest: Location) {
-        // find the first staged location within self.locations and use that as the final spot
-        // for dest.
-        let Some((idx, location)) = self
-            .locations
-            .iter_mut()
-            .enumerate()
-            .find(|(i, l)| l.is_staged())
-        else {
+    /// Remove any locations that no longer have references.
+    pub(crate) fn prune_unreferenced_locations(&mut self) {
+        if self.locations.is_empty() {
             return;
-        };
-        *location = dest.clone();
-
-        // we're making an assumption here that once you see the first staged location,
-        // every location after that must also be staged. so if we see a location_idx > idx, this
-        // means it's a staged location.
-        assert!(
-            &self
-                .locations
-                .iter()
-                .skip(idx + 1)
-                .all(|l| l.is_staged() || l == &dest)
-        );
-
-        // update all relevant EntryData::File::location_idx to point to the same idx we found
-        // above!
-        for (_, Entry { data, .. }) in self.data.iter_mut() {
-            let EntryData::File { location_idx, .. } = data else {
-                continue;
-            };
-            *location_idx = idx.min(*location_idx);
         }
 
-        // lop off the tail
-        self.locations.truncate(idx + 1);
+        // keep track of all referenced locations while we're walking the entries
+        let mut seen = BTreeSet::new();
+        for entry in self.data.values() {
+            if let EntryData::File { location, .. } = &entry.data {
+                seen.insert(location);
+            }
+        }
+
+        self.locations.retain(|e| seen.contains(e));
     }
 
     /// Update a file's metadata to reflect that a file's data has been modified.
@@ -710,7 +676,7 @@ impl VolumeMetadata {
             return Err(ErrorKind::NotFound.into());
         };
         let EntryData::File {
-            location_idx,
+            location: mut_location,
             byte_range,
         } = &mut entry.data
         else {
@@ -718,8 +684,7 @@ impl VolumeMetadata {
         };
 
         if let Some(location) = location {
-            let new_location = insert_unique(&mut self.locations, location);
-            *location_idx = new_location;
+            *mut_location = get_interned_or_insert(&mut self.locations, location);
         }
         match range {
             Some(Modify::Set(range)) => {
@@ -754,12 +719,19 @@ impl VolumeMetadata {
     /// `(filename, attr)` pairs.
     ///
     /// Iterator order is not guaranteed to be stable.
-    pub(crate) fn readdir<'a>(&'a self, ino: Ino) -> crate::Result<ReadDir<'a>> {
+    pub(crate) fn readdir<'a>(
+        &'a self,
+        ino: Ino,
+        offset: Option<String>,
+    ) -> crate::Result<ReadDir<'a>> {
         let parents = self.dir_path(ino)?;
+        let range = match offset {
+            Some(offset) => self.dirs.range(entry_range_with_offset(ino, offset)?),
+            None => self.dirs.range(entry_range(ino)?),
+        };
         Ok(ReadDir {
             data: &self.data,
-            locations: &self.locations,
-            range: self.dirs.range(entry_range(ino)?),
+            range,
             parents,
         })
     }
@@ -771,7 +743,6 @@ impl VolumeMetadata {
     ) -> crate::Result<ReadDir<'a>> {
         Ok(ReadDir {
             data: &self.data,
-            locations: &self.locations,
             range: self.dirs.range(entry_range(ino)?),
             parents,
         })
@@ -800,7 +771,6 @@ impl VolumeMetadata {
         let root_dir = self.dir_entry(ino)?;
         let root_iter = ReadDir {
             data: &self.data,
-            locations: &self.locations,
             range: self.dirs.range(entry_range(ino)?),
             parents: parents.clone(),
         };
@@ -816,11 +786,11 @@ impl VolumeMetadata {
     /// order.
     ///
     /// Returns an iterator over `(FileAttr, PathBuf)` tuples.
-    pub(crate) fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, &PathBuf)> {
+    pub(crate) fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, Arc<PathBuf>)> {
         self.data
             .iter()
             .filter_map(|(ino, entry)| match self.location(*ino) {
-                Some((Location::Staged { path }, _)) => Some((&entry.attr, path)),
+                Some((Location::Staged { path, .. }, _)) => Some((&entry.attr, path.clone())),
                 _ => None,
             })
     }
@@ -838,16 +808,13 @@ impl VolumeMetadata {
     ///
     /// Attempting to get the physical location of a directory or a symlink
     /// returns an error.
-    pub(crate) fn location(&self, ino: Ino) -> Option<(&Location, &ByteRange)> {
+    pub(crate) fn location(&self, ino: Ino) -> Option<(Location, &ByteRange)> {
         self.data.get(&ino).and_then(|entry| match &entry.data {
             // files need to map to blob list
             EntryData::File {
-                location_idx,
+                location,
                 byte_range,
-            } => {
-                let location = self.locations.get(*location_idx)?;
-                Some((location, byte_range))
-            }
+            } => Some((location.clone(), byte_range)),
             // no other file type has a location
             _ => None,
         })
@@ -863,10 +830,15 @@ impl VolumeMetadata {
     pub(crate) fn to_bytes_with_version(&self, version: &Version) -> crate::Result<Vec<u8>> {
         let mut fbb = FlatBufferBuilder::new();
 
+        // flatten our interned location set into a vector. we'll serialize the locations as a
+        // vector, and each data entry will have an index into this vector to save on space.
+        let mut location_idx_map: BTreeMap<Location, usize> = BTreeMap::new();
         let locations = {
             let mut locations = Vec::with_capacity(self.locations.len());
-            for location in &self.locations {
-                locations.push(to_fb_location(&mut fbb, location)?)
+            // stable iteration order since self.locations is a BTreeMap
+            for (i, location) in self.locations.iter().enumerate() {
+                locations.push(to_fb_location(&mut fbb, location)?);
+                location_idx_map.insert(location.clone(), i);
             }
             fbb.create_vector(&locations)
         };
@@ -876,7 +848,7 @@ impl VolumeMetadata {
                 if !ino.is_regular() {
                     continue;
                 }
-                dir_entries.push(to_fb_entry(&mut fbb, entry)?);
+                dir_entries.push(to_fb_entry(&mut fbb, &location_idx_map, entry)?);
             }
             fbb.create_vector(&dir_entries)
         };
@@ -908,14 +880,15 @@ impl VolumeMetadata {
         let mut volume = Self::new(version);
 
         // set the locations
-        volume.locations = locations;
+        volume.locations = locations.into_iter().collect();
+        let location_idx_map: Vec<_> = volume.locations.iter().cloned().collect();
 
         // walk the serialized entries and insert both the entries
         // and their dir index entry
         for entry in fb_volume.entries().iter() {
             let parent_ino = entry.parent_ino().into();
             let dir_key = (parent_ino, entry.name().to_string()).into();
-            let entry = from_fb_entry(&entry)?;
+            let entry = from_fb_entry(&location_idx_map, &entry)?;
             max_ino = max_ino.max(entry.attr.ino);
             volume.dirs.insert(dir_key, entry.attr.ino);
             volume.data.insert(entry.attr.ino, entry);
@@ -926,13 +899,18 @@ impl VolumeMetadata {
     }
 }
 
-fn insert_unique<T: std::cmp::PartialEq>(xs: &mut Vec<T>, x: T) -> usize {
-    match xs.iter().position(|e| e == &x) {
-        Some(idx) => idx,
+/// Insert it into `locations` if it doesn't exist, else grab a clone of the
+/// location inside of it (location is a bag of Arcs, so this keeps only 1 copy around).
+pub(crate) fn get_interned_or_insert(
+    locations: &mut BTreeSet<Location>,
+    location: Location,
+) -> Location {
+    match locations.get(&location) {
+        // this gives us the interned location
+        Some(location) => location.clone(),
         None => {
-            let idx = xs.len();
-            xs.push(x);
-            idx
+            locations.insert(location.clone());
+            location
         }
     }
 }
@@ -943,16 +921,27 @@ fn entry_range(ino: Ino) -> crate::Result<std::ops::Range<EntryKey<'static>>> {
     Ok(start..end)
 }
 
+fn entry_range_with_offset(
+    ino: Ino,
+    offset: String,
+) -> crate::Result<impl std::ops::RangeBounds<EntryKey<'static>>> {
+    let start: EntryKey = (ino, offset).into();
+    let end: EntryKey = (ino.add(1)?, "").into();
+    Ok((
+        std::ops::Bound::Excluded(start),
+        std::ops::Bound::Excluded(end),
+    ))
+}
+
 /// The iterator returned from [readdir][Volume::readdir].
 pub(crate) struct ReadDir<'a> {
     data: &'a BTreeMap<Ino, Entry>,
-    locations: &'a [Location],
     range: btree_map::Range<'a, EntryKey<'static>, Ino>,
     parents: Vec<&'a str>,
 }
 
 impl<'a> Iterator for ReadDir<'a> {
-    type Item = DirEntry<'a>;
+    type Item = DirEntryRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(EntryKey(_), ino)| {
@@ -961,11 +950,10 @@ impl<'a> Iterator for ReadDir<'a> {
                 .get(ino)
                 .unwrap_or_else(|| panic!("BUG: invalid dirent: ino={ino:?}"));
 
-            DirEntry {
+            DirEntryRef {
                 name: &dent.name,
                 parents: self.parents.clone(),
                 attr: &dent.attr,
-                locations: self.locations,
                 data: &dent.data,
             }
         })
@@ -987,7 +975,7 @@ impl<'a> Iterator for WalkIter<'a> {
     // TODO: it's a big gnarly to be cloning and returning the ancestors path
     // every time but the lifetime on returning a slice referencing self
     // is a pain to express.
-    type Item = crate::Result<DirEntry<'a>>;
+    type Item = crate::Result<DirEntryRef<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.readdirs.is_empty() {
@@ -1019,6 +1007,7 @@ impl<'a> Iterator for WalkIter<'a> {
 
 fn to_fb_entry<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
+    location_idx_map: &BTreeMap<Location, usize>,
     entry: &Entry,
 ) -> crate::Result<WIPOffset<fb::Entry<'a>>> {
     let attrs = fb::FileAttrs::create(
@@ -1033,14 +1022,17 @@ fn to_fb_entry<'a>(
     );
     let location_ref = match &entry.data {
         EntryData::File {
-            location_idx,
+            location,
             byte_range,
         } => Some({
             let byte_range = fb::ByteRange::new(byte_range.offset, byte_range.len);
             fb::LocationRef::create(
                 fbb,
                 &fb::LocationRefArgs {
-                    location_index: *location_idx as u16,
+                    location_index: *(location_idx_map
+                        .get(location)
+                        .expect("BUG: metadata had a dangling location"))
+                        as u16,
                     byte_range: Some(&byte_range),
                 },
             )
@@ -1060,7 +1052,7 @@ fn to_fb_entry<'a>(
     ))
 }
 
-fn from_fb_entry(fb_entry: &fb::Entry) -> crate::Result<Entry> {
+fn from_fb_entry(location_idx_map: &[Location], fb_entry: &fb::Entry) -> crate::Result<Entry> {
     let name = fb_entry.name().to_string().into();
     let parent_ino = fb_entry.parent_ino();
     let attr = {
@@ -1088,8 +1080,15 @@ fn from_fb_entry(fb_entry: &fb::Entry) -> crate::Result<Entry> {
                     "missing file data range",
                 ));
             };
+            let Some(location) = location_idx_map.get(location_ref.location_index() as usize)
+            else {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("missing location at idx: {}", location_ref.location_index()),
+                ));
+            };
             EntryData::File {
-                location_idx: location_ref.location_index() as usize,
+                location: location.clone(),
                 byte_range: ByteRange {
                     offset: byte_range.offset(),
                     len: byte_range.length(),
@@ -1191,8 +1190,8 @@ mod test {
     fn readdir_nospecial(
         v: &VolumeMetadata,
         ino: Ino,
-    ) -> crate::Result<impl Iterator<Item = DirEntry<'_>>> {
-        Ok(v.readdir(ino)?.filter(|e| e.attr.ino.is_regular()))
+    ) -> crate::Result<impl Iterator<Item = DirEntryRef<'_>>> {
+        Ok(v.readdir(ino, None)?.filter(|e| e.attr.ino.is_regular()))
     }
 
     #[test]
@@ -1213,7 +1212,7 @@ mod test {
             .clone();
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::committed("zzzz"));
+        assert_eq!(l1, Location::committed("zzzz"));
 
         let f2 = volume
             .create(
@@ -1231,10 +1230,10 @@ mod test {
 
         // old locations should be stable
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::committed("zzzz"));
+        assert_eq!(l1, Location::committed("zzzz"));
         // location should match what we just created with
         let (l2, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l2, &Location::committed("aaaa"));
+        assert_eq!(l2, Location::committed("aaaa"));
     }
 
     #[test]
@@ -1262,15 +1261,15 @@ mod test {
 
         // location should match what we just created with
         let (l1, _) = volume.location(f1.ino).unwrap();
-        assert_eq!(l1, &Location::committed("zzzz"));
+        assert_eq!(l1, Location::committed("zzzz"));
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l1, &Location::committed("zzzz"));
+        assert_eq!(l1, Location::committed("zzzz"));
 
         // delete the first file
         volume.delete(Ino::Root, "zzzz").unwrap();
         assert_eq!(volume.location(f1.ino), None);
         let (l1, _) = volume.location(f2.ino).unwrap();
-        assert_eq!(l1, &Location::committed("zzzz"));
+        assert_eq!(l1, Location::committed("zzzz"));
 
         // delete both files
         volume.delete(a.ino, "zzzz").unwrap();
@@ -1284,7 +1283,11 @@ mod test {
             .collect();
         assert_eq!(vec!["a"], names);
         // should be empty
-        let names: Vec<_> = volume.readdir(a.ino).unwrap().map(|e| e.name).collect();
+        let names: Vec<_> = volume
+            .readdir(a.ino, None)
+            .unwrap()
+            .map(|e| e.name)
+            .collect();
         assert!(names.is_empty());
     }
 
@@ -1326,7 +1329,7 @@ mod test {
                 c.ino,
                 "hi.txt".to_string(),
                 true,
-                Location::staged("whatever"),
+                Location::staged("whatever", 0),
                 ByteRange::empty(),
             )
             .unwrap()
@@ -1365,7 +1368,7 @@ mod test {
         );
         assert_eq!(
             volume
-                .readdir(a.ino)
+                .readdir(a.ino, None)
                 .unwrap()
                 .map(|e| e.path())
                 .collect::<Vec<_>>(),
@@ -1373,7 +1376,7 @@ mod test {
         );
         assert_eq!(
             volume
-                .readdir(b.ino)
+                .readdir(b.ino, None)
                 .unwrap()
                 .map(|e| e.path())
                 .collect::<Vec<_>>(),
@@ -1561,7 +1564,7 @@ mod test {
         assert_eq!(
             volume.location(test_txt.ino).unwrap(),
             (
-                &Location::committed("test-key.txt"),
+                Location::committed("test-key.txt"),
                 &ByteRange { offset: 0, len: 64 },
             )
         );
@@ -1595,7 +1598,7 @@ mod test {
         .unwrap();
 
         let (location, range) = meta.location(ino).unwrap();
-        assert_eq!(location, &new_location);
+        assert_eq!(location, new_location);
         assert_eq!(*range, new_range);
 
         let attr = meta.getattr(ino).unwrap();
@@ -1610,7 +1613,7 @@ mod test {
                 Ino::Root,
                 "grow".to_string(),
                 false,
-                Location::staged("grow"),
+                Location::staged("grow", 0),
                 ByteRange::empty(),
             )
             .unwrap()

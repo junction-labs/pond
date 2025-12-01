@@ -7,6 +7,7 @@ edition = "2024"
 arc-swap.workspace = true
 backon.workspace = true
 bytes.workspace = true
+camino.workspace = true
 flatbuffers.workspace = true
 foyer.workspace = true
 foyer-memory.workspace = true
