@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
     Staged {
-        path: std::path::PathBuf,
+        path: Arc<std::path::PathBuf>,
         generation: u64,
     },
     Committed {
@@ -21,10 +21,6 @@ impl std::fmt::Display for Location {
 }
 
 impl Location {
-    pub(crate) fn is_staged(&self) -> bool {
-        matches!(self, Location::Staged { .. })
-    }
-
     pub(crate) fn committed<'a>(key: impl Into<Cow<'a, str>>) -> Self {
         let key = match key.into() {
             Cow::Borrowed(str) => Arc::from(str),
@@ -35,7 +31,7 @@ impl Location {
 
     pub(crate) fn staged(path: impl AsRef<std::path::Path>, generation: u64) -> Self {
         Location::Staged {
-            path: path.as_ref().to_path_buf(),
+            path: path.as_ref().to_path_buf().into(),
             generation,
         }
     }

@@ -1,9 +1,10 @@
 use std::{
     borrow::{Borrow, Cow},
-    collections::{BTreeMap, VecDeque, btree_map},
+    collections::{BTreeMap, HashMap, VecDeque, btree_map},
     fmt::Debug,
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -654,44 +655,171 @@ impl VolumeMetadata {
         Ok(())
     }
 
-    /// Clean up all staged locations, replacing all internal state to instead point to dest.
+    /// Remove any locations that no longer have references while keeping metadata valid at all
+    /// times.
     ///
-    /// This attempts to keep Volume in a consistent state at every step of modification.
-    pub(crate) fn clean_staged_locations(&mut self, dest: Location) {
-        // find the first staged location within self.locations and use that as the final spot
-        // for dest.
-        let Some((idx, location)) = self
-            .locations
-            .iter_mut()
-            .enumerate()
-            .find(|(i, l)| l.is_staged())
-        else {
+    /// This is less efficient because we keep this function cancel and panic safe. If the future
+    /// or thread running this is killed, the metadata will remain valid.
+    pub(crate) fn prune_unreferenced_locations(&mut self) {
+        if self.locations.is_empty() {
             return;
-        };
-        *location = dest.clone();
-
-        // we're making an assumption here that once you see the first staged location,
-        // every location after that must also be staged. so if we see a location_idx > idx, this
-        // means it's a staged location.
-        assert!(
-            &self
-                .locations
-                .iter()
-                .skip(idx + 1)
-                .all(|l| l.is_staged() || l == &dest)
-        );
-
-        // update all relevant EntryData::File::location_idx to point to the same idx we found
-        // above!
-        for (_, Entry { data, .. }) in self.data.iter_mut() {
-            let EntryData::File { location_idx, .. } = data else {
-                continue;
-            };
-            *location_idx = idx.min(*location_idx);
         }
 
-        // lop off the tail
-        self.locations.truncate(idx + 1);
+        // count how many entries point to each location, and keep the references to the entries
+        // for each location
+        let mut refcounts = vec![0usize; self.locations.len()];
+        let mut references = vec![vec![]; self.locations.len()];
+        for entry in self.data.values() {
+            if let EntryData::File { location_idx, .. } = entry.data {
+                refcounts[location_idx] += 1;
+                references[location_idx].push(entry.attr.ino);
+            }
+        }
+
+        if refcounts.iter().all(|count| *count > 0) {
+            return;
+        }
+
+        // replacing any spots where we find unreferenced locations with a referenced location.
+        // doing it with two pointers to avoid shifting everything down one slot, so we're filling
+        // in gaps where we have unreferenced locations with locations (with references!) from the
+        // back.
+        let mut insert = 0;
+        let mut back = self.locations.len();
+        while insert < back {
+            if refcounts[insert] > 0 {
+                // insert will keep searching for an unreferenced location.
+                insert += 1;
+                continue;
+            } else if refcounts[back - 1] == 0 {
+                // if the location at the back is unreferenced, we can just ignore it. at the end,
+                // this gets truncated away.
+                back -= 1;
+                continue;
+            } else {
+                // at this point, `insert` points to an unreferenced location and `back` points to a
+                // referenced location.
+
+                // copy the referenced location into the unreferenced location's position in the
+                // locations vector, and update the references. this keeps it cancel and panic safe.
+                self.locations[insert] = self.locations[back - 1].clone();
+                for ino in &references[back - 1] {
+                    let Some(entry) = self.data.get_mut(ino) else {
+                        continue;
+                    };
+                    let EntryData::File { location_idx, .. } = &mut entry.data else {
+                        // we loaded it as a file above. inos aren't reused so this would be a big bug.
+                        panic!("BUG: non-file entry holds a location index.");
+                    };
+                    *location_idx = insert;
+                }
+                insert += 1;
+                back -= 1;
+            }
+        }
+        self.locations.truncate(insert);
+    }
+
+    /// Deduplicate committed locations while keeping staged entries at the tail.
+    ///
+    /// This builds a plan for the final layout (unique committed locations first, then staged
+    /// ones), appends that layout to the existing vector, and remaps entries as each new slot is
+    /// written. A final prune drops the old copies. Because nothing is overwritten before all
+    /// references move, metadata remains consistent even if the operation is interrupted.
+    pub(crate) fn compact_locations(&mut self) {
+        self.prune_unreferenced_locations();
+
+        if self.locations.len() <= 1 {
+            return;
+        }
+
+        #[derive(Debug)]
+        struct LocationPlan {
+            location: Location,
+            sources: Vec<(usize, Vec<Ino>)>,
+        }
+
+        let references = self.collect_location_references();
+        if references.iter().all(|inos| inos.is_empty()) {
+            self.locations.clear();
+            return;
+        }
+
+        let mut committed_plans: Vec<LocationPlan> = Vec::new();
+        let mut canonical: HashMap<Location, usize> = HashMap::new();
+        let mut staged_plans: Vec<LocationPlan> = Vec::new();
+
+        for (idx, location) in self.locations.iter().cloned().enumerate() {
+            let inos = &references[idx];
+            if inos.is_empty() {
+                continue;
+            }
+
+            match location {
+                Location::Committed { .. } => {
+                    if let Some(&plan_idx) = canonical.get(&location) {
+                        committed_plans[plan_idx].sources.push((idx, inos.clone()));
+                    } else {
+                        let plan_idx = committed_plans.len();
+                        canonical.insert(location.clone(), plan_idx);
+                        committed_plans.push(LocationPlan {
+                            location,
+                            sources: vec![(idx, inos.clone())],
+                        });
+                    }
+                }
+                Location::Staged { .. } => staged_plans.push(LocationPlan {
+                    location,
+                    sources: vec![(idx, inos.clone())],
+                }),
+            }
+        }
+
+        if committed_plans.is_empty() && staged_plans.is_empty() {
+            return;
+        }
+
+        let mut plans = committed_plans;
+        plans.extend(staged_plans);
+
+        for LocationPlan { location, sources } in plans {
+            let dest_idx = self.locations.len();
+            self.locations.push(location);
+            for (src_idx, inos) in sources {
+                self.remap_location_indices(&inos, src_idx, dest_idx);
+            }
+        }
+
+        self.prune_unreferenced_locations();
+    }
+
+    fn collect_location_references(&self) -> Vec<Vec<Ino>> {
+        let mut references = vec![Vec::new(); self.locations.len()];
+        for (ino, entry) in self.data.iter() {
+            if let EntryData::File { location_idx, .. } = entry.data {
+                references[location_idx].push(*ino);
+            }
+        }
+        references
+    }
+
+    fn remap_location_indices(&mut self, inos: &[Ino], from_idx: usize, to_idx: usize) {
+        if from_idx == to_idx {
+            return;
+        }
+
+        for ino in inos {
+            let entry = self
+                .data
+                .get_mut(ino)
+                .expect("inode missing while remapping locations");
+            let EntryData::File { location_idx, .. } = &mut entry.data else {
+                debug_assert!(false, "non-file entry holds a location index");
+                continue;
+            };
+            debug_assert_eq!(*location_idx, from_idx);
+            *location_idx = to_idx;
+        }
     }
 
     /// Update a file's metadata to reflect that a file's data has been modified.
@@ -824,11 +952,11 @@ impl VolumeMetadata {
     /// order.
     ///
     /// Returns an iterator over `(FileAttr, PathBuf)` tuples.
-    pub(crate) fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, &PathBuf)> {
+    pub(crate) fn iter_staged(&self) -> impl Iterator<Item = (&FileAttr, Arc<PathBuf>)> {
         self.data
             .iter()
             .filter_map(|(ino, entry)| match self.location(*ino) {
-                Some((Location::Staged { path, .. }, _)) => Some((&entry.attr, path)),
+                Some((Location::Staged { path, .. }, _)) => Some((&entry.attr, path.clone())),
                 _ => None,
             })
     }

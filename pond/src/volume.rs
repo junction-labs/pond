@@ -520,16 +520,16 @@ impl Volume {
         let commit = Commit::new(self)?;
 
         // take a snapshot of the metadata and walk the volume to get a handle to each staged file.
-        let (metadata_snapshot, files) = commit.snapshot()?;
-        let (dest, range) = commit.upload_files(files).await?;
-        let mut metadata_snapshot = Commit::relocate_staged_files(metadata_snapshot, range, dest)?;
+        let mut snapshot = commit.snapshot()?;
+        let (dest, range) = commit.upload_files(snapshot.staged_files).await?;
+        apply_location_ranges(&mut snapshot.metadata, range, dest)?;
         commit
-            .upload_metadata(&mut metadata_snapshot, version)
+            .upload_metadata(&mut snapshot.metadata, version)
             .await?;
 
         // reconcile any differences between what we just uploaded and any modifications that
         // occurred since we took the snapshot.
-        commit.sync(metadata_snapshot)
+        commit.sync(snapshot.metadata)
     }
 }
 
@@ -797,6 +797,11 @@ macro_rules! try_mpu {
     };
 }
 
+struct Snapshot {
+    metadata: VolumeMetadata,
+    staged_files: Vec<(FileAttr, Arc<PathBuf>)>,
+}
+
 struct Commit<'a> {
     inner: &'a Volume,
 }
@@ -834,7 +839,7 @@ impl<'a> Commit<'a> {
 
     /// Takes a snapshot of the metadata and the files we need to upload as a part of this commit
     /// while holding a lock for the metadata and file descriptor map.
-    fn snapshot(&self) -> Result<(VolumeMetadata, Vec<(FileAttr, PathBuf)>)> {
+    fn snapshot(&self) -> Result<Snapshot> {
         // read lock on metadata, others can read during the snapshot process, but can't modify.
         let metadata = self.inner.meta.read();
         // write lock on the fds, no one is allowed to open new fds while we're taking a snapshot.
@@ -859,13 +864,15 @@ impl<'a> Commit<'a> {
         // it).
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
 
-        let snapshot: Vec<_> = metadata
+        let staged_files: Vec<_> = metadata
             .iter_staged()
             .map(|(attr, path)| (attr.clone(), path.clone()))
             .collect();
-        let copy = metadata.clone();
 
-        Ok((copy, snapshot))
+        Ok(Snapshot {
+            metadata: metadata.clone(),
+            staged_files,
+        })
     }
 
     /// Upload all staged files into a single blob under base.
@@ -875,7 +882,7 @@ impl<'a> Commit<'a> {
     /// uploads.
     async fn upload_files(
         &self,
-        files: Vec<(FileAttr, PathBuf)>,
+        files: Vec<(FileAttr, Arc<PathBuf>)>,
     ) -> Result<(Location, Vec<(Ino, ByteRange)>)> {
         let (dest_name, dest) = self.inner.store.new_data_file();
 
@@ -948,30 +955,6 @@ impl<'a> Commit<'a> {
         Ok((Location::committed(dest_name), staged))
     }
 
-    /// Relocate the given VolumeMetadata such that all files present in `ranges` have their
-    /// location modified to `dest`.
-    fn relocate_staged_files(
-        mut metadata: VolumeMetadata,
-        ranges: Vec<(Ino, ByteRange)>,
-        dest: Location,
-    ) -> Result<VolumeMetadata> {
-        let now = SystemTime::now();
-        for (ino, byte_range) in ranges {
-            metadata.modify(
-                ino,
-                now,
-                Some(now),
-                Some(dest.clone()),
-                Some(Modify::Set(byte_range)),
-            )?;
-        }
-
-        // deduplicate and clean up all hanging staged Locations
-        metadata.clean_staged_locations(dest);
-
-        Ok(metadata)
-    }
-
     /// Mint and upload a new version of Volume.
     async fn upload_metadata(&self, metadata: &mut VolumeMetadata, version: Version) -> Result<()> {
         let meta_path = self.inner.store.metadata_path(&version);
@@ -1024,10 +1007,84 @@ impl<'a> Commit<'a> {
     }
 
     fn sync(self, snapshot: VolumeMetadata) -> Result<()> {
-        let metadata = self.inner.meta.write();
-        for entry in snapshot.walk(Ino::Root) {}
+        let mut metadata = self.inner.meta.write();
+        metadata.set_version(snapshot.version().clone());
+
+        let snapshot_generation = self.inner.generation.load(Ordering::SeqCst);
+        // walk the snapshot, updating the current view of metadata for the dir entries for staged
+        // regular files that we committed up to S3. only update them if they weren't updated since
+        // we took the snapshot. if they were updated, then any concurrent updates to the metdata
+        // while we were committing will take precedence.
+        for snapshot_entry in snapshot.walk(Ino::Root)? {
+            let snapshot_entry = snapshot_entry?;
+            if !snapshot_entry.is_regular() || !snapshot_entry.attr.is_file() {
+                continue;
+            }
+
+            // fetch the equivalent entry in the current version of metadata. if it's missing, then
+            // someone deleted this ino while we were busy committing.
+            let ino = snapshot_entry.attr.ino;
+            let Some(attr) = metadata.getattr(ino).cloned() else {
+                continue;
+            };
+
+            // if the location is still staged and has an older generation, then we know that it
+            // wasn't opened for writing since the commit. we can proceed with replacing its
+            // location to the one we uploaded to S3.
+            if !matches!(
+                metadata.location(ino),
+                Some((Location::Staged { generation, .. }, _)) if *generation < snapshot_generation
+            ) {
+                continue;
+            }
+
+            // retain mtime and ctime changes (e.g. if the file was touched to update mtime or
+            // moved)
+            let new_mtime = std::cmp::max(attr.mtime, snapshot_entry.attr.mtime);
+            let new_ctime = std::cmp::max(attr.ctime, snapshot_entry.attr.ctime);
+
+            let Some((snapshot_location, snapshot_byte_range)) = snapshot_entry.location() else {
+                continue;
+            };
+
+            metadata.modify(
+                ino,
+                new_mtime,
+                Some(new_ctime),
+                Some(snapshot_location.clone()),
+                Some(Modify::Set(snapshot_byte_range)),
+            )?;
+        }
+
+        // the walk and location modification will result in some unreferenced staged locations.
+        // these need to be cleaned up.
+        metadata.compact_locations();
+
         Ok(())
     }
+}
+
+/// Updates the entries within `metadata` specified by the Inos in `ranges` to point to `dest` and
+/// have the range in `ranges`.
+fn apply_location_ranges(
+    metadata: &mut VolumeMetadata,
+    ranges: Vec<(Ino, ByteRange)>,
+    dest: Location,
+) -> Result<()> {
+    let now = SystemTime::now();
+    for (ino, byte_range) in ranges {
+        metadata.modify(
+            ino,
+            now,
+            Some(now),
+            Some(dest.clone()),
+            Some(Modify::Set(byte_range)),
+        )?;
+    }
+
+    metadata.compact_locations();
+
+    Ok(())
 }
 
 fn should_retry(e: &object_store::Error) -> bool {
