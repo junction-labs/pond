@@ -528,16 +528,7 @@ impl VolumeMetadata {
         let ino = self.next_ino()?;
         let slot = self.data.entry(ino);
 
-        // insert it into our self.location set if it doesn't exist, else grab a clone of the
-        // location inside of it (location is a bag of Arcs, so this keeps only 1 copy around).
-        let location = match self.locations.get(&location) {
-            // this gives us the interned location
-            Some(location) => location.clone(),
-            None => {
-                self.locations.insert(location.clone());
-                location
-            }
-        };
+        let location = get_interned_or_insert(&mut self.locations, location);
         let now = SystemTime::now();
         let new_entry = Entry {
             name: name.clone().into(),
@@ -694,14 +685,7 @@ impl VolumeMetadata {
         };
 
         if let Some(location) = location {
-            *mut_location = match self.locations.get(&location) {
-                // this gives us the interned location
-                Some(location) => location.clone(),
-                None => {
-                    self.locations.insert(location.clone());
-                    location
-                }
-            };
+            *mut_location = get_interned_or_insert(&mut self.locations, location);
         }
         match range {
             Some(Modify::Set(range)) => {
@@ -913,6 +897,22 @@ impl VolumeMetadata {
         volume.next_ino = max_ino.add(1)?;
 
         Ok(volume)
+    }
+}
+
+/// Insert it into `locations` if it doesn't exist, else grab a clone of the
+/// location inside of it (location is a bag of Arcs, so this keeps only 1 copy around).
+pub(crate) fn get_interned_or_insert(
+    locations: &mut BTreeSet<Location>,
+    location: Location,
+) -> Location {
+    match locations.get(&location) {
+        // this gives us the interned location
+        Some(location) => location.clone(),
+        None => {
+            locations.insert(location.clone());
+            location
+        }
     }
 }
 
