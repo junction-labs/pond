@@ -10,14 +10,13 @@ use arc_swap::ArcSwap;
 use backon::{ExponentialBuilder, Retryable};
 use bytes::{Bytes, BytesMut};
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-use parking_lot::RwLock;
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
@@ -132,6 +131,7 @@ impl Volume {
             ino => {
                 self.meta
                     .write()
+                    .expect("lock was poisoned")
                     .modify(ino, mtime, ctime, location, range)?;
                 Ok(())
             }
@@ -139,7 +139,11 @@ impl Volume {
     }
 
     pub fn version(&self) -> Version {
-        self.meta.read().version().clone()
+        self.meta
+            .read()
+            .expect("lock was poisoned")
+            .version()
+            .clone()
     }
 
     pub fn object_store_description(&self) -> String {
@@ -155,16 +159,19 @@ impl Volume {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.meta.read().to_bytes()
+        self.meta.read().expect("lock was poisoned").to_bytes()
     }
 
     pub fn to_bytes_with_version(&self, version: &Version) -> Result<Vec<u8>> {
-        self.meta.read().to_bytes_with_version(version)
+        self.meta
+            .read()
+            .expect("lock was poisoned")
+            .to_bytes_with_version(version)
     }
 
     pub fn getattr(&self, ino: Ino) -> Result<FileAttr> {
         scoped_timer!("pond_volume_getattr_latency_secs");
-        match self.meta.read().getattr(ino) {
+        match self.meta.read().expect("lock was poisoned").getattr(ino) {
             Some(attr) => Ok(attr.clone()),
             None => Err(ErrorKind::NotFound.into()),
         }
@@ -176,25 +183,44 @@ impl Volume {
         mtime: Option<SystemTime>,
         ctime: Option<SystemTime>,
     ) -> Result<FileAttr> {
-        self.meta.write().setattr(ino, mtime, ctime).cloned()
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .setattr(ino, mtime, ctime)
+            .cloned()
     }
 
     pub fn lookup(&self, parent: Ino, name: &str) -> Result<Option<FileAttr>> {
         scoped_timer!("pond_volume_lookup_latency_secs");
-        Ok(self.meta.read().lookup(parent, name)?.cloned())
+        Ok(self
+            .meta
+            .read()
+            .expect("lock was poisoned")
+            .lookup(parent, name)?
+            .cloned())
     }
 
     pub fn mkdir(&self, parent: Ino, name: String) -> Result<FileAttr> {
-        self.meta.write().mkdir(parent, name).cloned()
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .mkdir(parent, name)
+            .cloned()
     }
 
     pub fn rmdir(&self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.write().rmdir(parent, name)?;
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .rmdir(parent, name)?;
         Ok(())
     }
 
     pub fn rename(&self, parent: Ino, name: &str, newparent: Ino, newname: String) -> Result<()> {
-        self.meta.write().rename(parent, name, newparent, newname)?;
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .rename(parent, name, newparent, newname)?;
         Ok(())
     }
 
@@ -204,7 +230,7 @@ impl Volume {
         offset: Option<String>,
         size: usize,
     ) -> Result<impl Iterator<Item = DirEntry>> {
-        let metadata = self.meta.read();
+        let metadata = self.meta.read().expect("lock was poisoned");
         let entries: Vec<DirEntry> = metadata
             .readdir(ino, offset)?
             .take(size)
@@ -223,7 +249,7 @@ impl Volume {
         let file = open_file(path.as_path(), OpenMode::Create).await?;
 
         let attr = {
-            let mut metadata = self.meta.write();
+            let mut metadata = self.meta.write().expect("lock was poisoned");
             metadata
                 .create(
                     parent,
@@ -241,7 +267,7 @@ impl Volume {
         };
 
         let fd = new_fd(
-            &mut self.fds.write(),
+            &mut self.fds.write().expect("lock was poisoned"),
             attr.ino,
             FileDescriptor::Staged { file: file.into() },
         )?;
@@ -249,7 +275,10 @@ impl Volume {
     }
 
     pub fn delete(&self, parent: Ino, name: &str) -> Result<()> {
-        self.meta.write().delete(parent, name)?;
+        self.meta
+            .write()
+            .expect("lock was poisoned")
+            .delete(parent, name)?;
         Ok(())
     }
 
@@ -293,13 +322,21 @@ impl Volume {
     )]
     pub async fn open_read_write(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::COMMIT => new_fd(&mut self.fds.write(), ino, FileDescriptor::Commit),
-            Ino::CLEAR_CACHE => new_fd(&mut self.fds.write(), ino, FileDescriptor::ClearCache),
+            Ino::COMMIT => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::Commit,
+            ),
+            Ino::CLEAR_CACHE => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::ClearCache,
+            ),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
                 // note, we can't use an upgradable read lock here because there might be a race
                 // condition?? TODO
-                let mut metadata_guard = self.meta.write();
+                let mut metadata_guard = self.meta.write().expect("lock was poisoned");
                 match metadata_guard.location(ino) {
                     Some((Location::Staged { path, generation }, _)) => {
                         let file = if generation < self.generation.load(Ordering::SeqCst) {
@@ -330,7 +367,7 @@ impl Volume {
                         // a new staged file handle.
 
                         new_fd(
-                            &mut self.fds.write(),
+                            &mut self.fds.write().expect("lock was poisoned"),
                             ino,
                             FileDescriptor::Staged { file: file.into() },
                         )
@@ -353,7 +390,7 @@ impl Volume {
                         let file = open_file(&path, OpenMode::Create).await?;
                         // only create the fd once the file is open and metadata is valid
                         new_fd(
-                            &mut self.fds.write(),
+                            &mut self.fds.write().expect("lock was poisoned"),
                             ino,
                             FileDescriptor::Staged { file: file.into() },
                         )
@@ -370,28 +407,32 @@ impl Volume {
     )]
     pub async fn open_read(&self, ino: Ino) -> Result<Fd> {
         match ino {
-            Ino::VERSION => new_fd(&mut self.fds.write(), ino, FileDescriptor::Version),
+            Ino::VERSION => new_fd(
+                &mut self.fds.write().expect("lock was poisoned"),
+                ino,
+                FileDescriptor::Version,
+            ),
             Ino::PROM_METRICS => {
                 let data = match &self.metrics_snapshot {
                     Some(metrics) => metrics.load().clone(),
                     None => Default::default(),
                 };
                 new_fd(
-                    &mut self.fds.write(),
+                    &mut self.fds.write().expect("lock was poisoned"),
                     ino,
                     FileDescriptor::PromMetrics { snapshot: data },
                 )
             }
             Ino::COMMIT | Ino::CLEAR_CACHE => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                let metadata_guard = self.meta.read();
+                let metadata_guard = self.meta.read().expect("lock was poisoned");
                 match metadata_guard.location(ino) {
                     Some((Location::Staged { path, .. }, _)) => {
                         let path = path.clone();
                         std::mem::drop(metadata_guard); // guard is dropped here before the await
                         let file = open_file(&path, OpenMode::Read).await?;
                         new_fd(
-                            &mut self.fds.write(),
+                            &mut self.fds.write().expect("lock was poisoned"),
                             ino,
                             FileDescriptor::Staged { file: file.into() },
                         )
@@ -401,7 +442,7 @@ impl Volume {
                         let range = *range;
                         std::mem::drop(metadata_guard);
                         new_fd(
-                            &mut self.fds.write(),
+                            &mut self.fds.write().expect("lock was poisoned"),
                             ino,
                             FileDescriptor::Committed { key, range },
                         )
@@ -415,7 +456,12 @@ impl Volume {
     pub async fn read_at(&self, fd: Fd, offset: u64, buf: &mut [u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_read_buf_size_bytes").record(buf.len() as f64);
 
-        let descriptor = self.fds.read().get(&fd).cloned();
+        let descriptor = self
+            .fds
+            .read()
+            .expect("lock was poisoned")
+            .get(&fd)
+            .cloned();
         match descriptor {
             // reads of write-only special fds do nothing
             Some(FileDescriptor::ClearCache) | Some(FileDescriptor::Commit) => Ok(0),
@@ -452,7 +498,12 @@ impl Volume {
     pub async fn write_at(&self, fd: Fd, offset: u64, data: &[u8]) -> Result<usize> {
         metrics::histogram!("pond_volume_write_buf_size_bytes").record(data.len() as f64);
 
-        let descriptor = self.fds.read().get(&fd).cloned();
+        let descriptor = self
+            .fds
+            .read()
+            .expect("lock was poisoned")
+            .get(&fd)
+            .cloned();
         match descriptor {
             Some(FileDescriptor::ClearCache) => {
                 self.cache.clear();
@@ -503,7 +554,7 @@ impl Volume {
     }
 
     pub async fn release(&self, fd: Fd) -> Result<()> {
-        match self.fds.write().remove(&fd) {
+        match self.fds.write().expect("lock was poisoned").remove(&fd) {
             Some(_) => Ok(()),
             None => Err(ErrorKind::NotFound.into()),
         }
@@ -559,6 +610,7 @@ impl WalkVolume {
     fn new(meta: Arc<RwLock<VolumeMetadata>>, ino: Ino) -> Result<Self> {
         let entries = meta
             .read()
+            .expect("lock was poisoned")
             .readdir(ino, None)?
             .map(|e| e.to_owned())
             .collect::<Vec<_>>();
@@ -572,6 +624,7 @@ impl WalkVolume {
         let entries = self
             .meta
             .read()
+            .expect("lock was poisoned")
             .readdir(ino, None)?
             .map(|e| e.to_owned())
             .collect::<Vec<_>>();
@@ -637,7 +690,10 @@ impl Volume {
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
                     .collect();
-                self.meta.write().mkdir_all(Ino::Root, dirs)?;
+                self.meta
+                    .write()
+                    .expect("lock was poisoned")
+                    .mkdir_all(Ino::Root, dirs)?;
             }
             // for a file:
             //
@@ -659,7 +715,11 @@ impl Volume {
                     let dirs = dir
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy().to_string());
-                    self.meta.write().mkdir_all(Ino::Root, dirs)?.ino
+                    self.meta
+                        .write()
+                        .expect("lock was poisoned")
+                        .mkdir_all(Ino::Root, dirs)?
+                        .ino
                 } else {
                     Ino::Root
                 };
@@ -681,7 +741,7 @@ impl Volume {
                         )
                     })?
                     .len();
-                self.meta.write().create(
+                self.meta.write().expect("lock was poisoned").create(
                     dir_ino,
                     name.to_string_lossy().to_string(),
                     true,
@@ -841,9 +901,9 @@ impl<'a> Commit<'a> {
     /// while holding a lock for the metadata and file descriptor map.
     fn snapshot(&self) -> Result<Snapshot> {
         // read lock on metadata, others can read during the snapshot process, but can't modify.
-        let metadata = self.inner.meta.read();
+        let metadata = self.inner.meta.read().expect("lock was poisoned");
         // write lock on the fds, no one is allowed to open new fds while we're taking a snapshot.
-        let fds = self.inner.fds.write();
+        let fds = self.inner.fds.write().expect("lock was poisoned");
 
         // don't allow open fds to staged files during the snapshot process.
         if fds
@@ -1007,7 +1067,7 @@ impl<'a> Commit<'a> {
     }
 
     fn sync(self, snapshot: VolumeMetadata) -> Result<()> {
-        let mut metadata = self.inner.meta.write();
+        let mut metadata = self.inner.meta.write().expect("lock was poisoned");
         metadata.set_version(snapshot.version().clone());
 
         let snapshot_generation = self.inner.generation.load(Ordering::SeqCst);
@@ -1222,7 +1282,7 @@ mod tests {
         let volume = client.create_volume().await;
 
         // clean volume -- this is not staged
-        assert!(!volume.meta.read().is_staged());
+        assert!(!volume.meta.read().expect("lock was poisoned").is_staged());
 
         // creating two files, it should be a staged volume now.
         let (attr1, fd1) = volume
@@ -1239,7 +1299,7 @@ mod tests {
         assert_write(&volume, fd2, "world").await;
 
         {
-            let meta = volume.meta.read();
+            let meta = volume.meta.read().expect("lock was poisoned");
             assert!(meta.is_staged());
             for attr in [&attr1, &attr2] {
                 assert!(matches!(
@@ -1255,7 +1315,7 @@ mod tests {
 
         // after commit, both files are no longer staged
         {
-            let meta = volume.meta.read();
+            let meta = volume.meta.read().expect("lock was poisoned");
             assert!(!meta.is_staged());
             for attr in [&attr1, &attr2] {
                 assert!(matches!(
@@ -1290,7 +1350,11 @@ mod tests {
             .unwrap();
         let attr = attr.clone();
         assert!(matches!(
-            volume.meta.read().location(attr.ino),
+            volume
+                .meta
+                .read()
+                .expect("lock was poisoned")
+                .location(attr.ino),
             Some((Location::Staged { .. }, _))
         ));
 
@@ -1318,7 +1382,7 @@ mod tests {
         let _f3 = volume.open_read_write(Ino::COMMIT).await.unwrap();
         let _f4 = volume.open_read(attr.ino).await.unwrap();
         // this is ok, because none of them are staged
-        assert!(!volume.fds.read().is_empty());
+        assert!(!volume.fds.read().expect("lock was poisoned").is_empty());
         volume
             .commit(Version::from_static("next-version"))
             .await
