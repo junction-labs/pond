@@ -649,8 +649,7 @@ impl VolumeMetadata {
             return;
         }
 
-        // count how many entries point to each location, and keep the references to the entries
-        // for each location
+        // keep track of all referenced locations while we're walking the entries
         let mut seen = BTreeSet::new();
         for entry in self.data.values() {
             if let EntryData::File { location, .. } = &entry.data {

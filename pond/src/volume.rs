@@ -334,8 +334,6 @@ impl Volume {
             ),
             Ino::VERSION => Err(ErrorKind::PermissionDenied.into()),
             ino => {
-                // note, we can't use an upgradable read lock here because there might be a race
-                // condition?? TODO
                 let mut metadata_guard = self.meta.write().expect("lock was poisoned");
                 match metadata_guard.location(ino) {
                     Some((Location::Staged { path, generation }, _)) => {
@@ -362,9 +360,6 @@ impl Volume {
                             std::mem::drop(metadata_guard); // guard is dropped here before the await
                             open_file(&path, OpenMode::ReadWrite).await?
                         };
-
-                        // TODO: if generation numbers don't match up, we're copying and creating
-                        // a new staged file handle.
 
                         new_fd(
                             &mut self.fds.write().expect("lock was poisoned"),
