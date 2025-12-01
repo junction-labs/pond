@@ -151,7 +151,6 @@ pub struct DirEntryRef<'a> {
     name: &'a str,
     parents: Vec<&'a str>,
     attr: &'a FileAttr,
-    locations: &'a [Location],
     data: &'a metadata::EntryData,
 }
 
@@ -164,15 +163,12 @@ impl<'a> DirEntryRef<'a> {
         self.attr
     }
 
-    pub fn location(&self) -> Option<(&Location, ByteRange)> {
+    pub fn location(&self) -> Option<(Location, ByteRange)> {
         match self.data {
             metadata::EntryData::File {
-                location_idx,
+                location,
                 byte_range,
-            } => {
-                let location = &self.locations[*location_idx];
-                Some((location, *byte_range))
-            }
+            } => Some((location.clone(), *byte_range)),
             _ => None,
         }
     }

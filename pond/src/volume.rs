@@ -302,7 +302,7 @@ impl Volume {
                 let mut metadata_guard = self.meta.write();
                 match metadata_guard.location(ino) {
                     Some((Location::Staged { path, generation }, _)) => {
-                        let file = if *generation < self.generation.load(Ordering::SeqCst) {
+                        let file = if generation < self.generation.load(Ordering::SeqCst) {
                             // generation mismatch for staged files, which means we're opening this
                             // up while a commit is running and this staged file is part of the
                             // snapshot. we treat it as a committed file in this case.
@@ -1033,7 +1033,7 @@ impl<'a> Commit<'a> {
             // location to the one we uploaded to S3.
             if !matches!(
                 metadata.location(ino),
-                Some((Location::Staged { generation, .. }, _)) if *generation < snapshot_generation
+                Some((Location::Staged { generation, .. }, _)) if generation < snapshot_generation
             ) {
                 continue;
             }
@@ -1058,7 +1058,7 @@ impl<'a> Commit<'a> {
 
         // the walk and location modification will result in some unreferenced staged locations.
         // these need to be cleaned up.
-        metadata.compact_locations();
+        metadata.prune_unreferenced_locations();
 
         Ok(())
     }
@@ -1082,7 +1082,7 @@ fn apply_location_ranges(
         )?;
     }
 
-    metadata.compact_locations();
+    metadata.prune_unreferenced_locations();
 
     Ok(())
 }

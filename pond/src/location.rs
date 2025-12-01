@@ -1,5 +1,8 @@
 use std::{borrow::Cow, sync::Arc};
 
+/// Location is an enum that acts as a pointer to a blob of bytes.
+///
+/// Location is a lightweight as each enum is basically just an Arc. Cheap to clone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
     Staged {
